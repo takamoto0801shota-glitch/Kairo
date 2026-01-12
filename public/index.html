@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kairo - AI薬局</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <h1>Kairo</h1>
+            <button id="clearButton" class="clear-button" title="新しい会話を始める">はじめから</button>
+        </div>
+        
+        <div id="summaryCard" class="summary-card" style="display: none;">
+            <!-- 安心サマリーがここに表示される -->
+        </div>
+        
+        <div class="chat-messages" id="chatMessages">
+            <!-- メッセージがここに追加される -->
+        </div>
+        
+        <div class="chat-input-container">
+            <input 
+                type="text" 
+                id="userInput" 
+                class="chat-input" 
+                placeholder="どんな感じですか？"
+                autocomplete="off"
+            >
+            <button id="sendButton" class="send-button">送る</button>
+        </div>
+    </div>
+    
+    <script src="script.js"></script>
+</body>
+</html>
+
