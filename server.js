@@ -657,8 +657,8 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`Kairo server is running on http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Kairo server is running on port ${PORT}`);
   console.log(
     process.env.OPENAI_API_KEY
       ? "✓ OpenAI API key is configured"
