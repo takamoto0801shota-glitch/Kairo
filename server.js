@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const OpenAI = require("openai");
+const path = require("path");
 require("dotenv").config();
 
 const app = express();
@@ -9,7 +10,7 @@ const PORT = process.env.PORT || 3000;
 // Middleware
 app.use(cors());
 app.use(express.json());
-app.use(express.static("public")); // Serve static files from public directory
+app.use(express.static(path.join(__dirname, "public"))); // Serve static files from public directory
 
 // Initialize OpenAI client
 const openai = new OpenAI({
@@ -326,6 +327,22 @@ AI：「頭が痛いのはつらいですよね。
 十分な情報を集めた後、必ず以下の形式で提示する。
 体調が悪くて流し読みする人向けに、見やすく整理してください。
 
+【結論の姿勢 - 最重要】
+- 情報が十分に集まったと判断したら、**必ず結論を最初に言い切る**
+- **曖昧な表現（〜かもしれません／判断はご自身で 等）は使わない**
+- **「私がここまでの情報を踏まえて判断しました」という立場を明確にする**
+- 結論の冒頭には、必ず次のいずれかを含める：
+  - 「結論から言います。今の状態は心配いりません。」
+  - 「私がここまでの情報を踏まえて判断すると、今は様子見で大丈夫です。」
+  - 「現時点では、緊急性はなく安心して大丈夫だと判断します。」
+  
+【まとめブロックの完全性 - 最重要】
+- **まとめは必ず「全ブロック」を出す。途中の1ブロックだけを出すのは禁止。**
+- **（A）の場合は 📝→⚠️→🏥→💬 の4ブロックを必ず全部出す。**
+- **（B）の場合は 🟢→🤝→✅→⏳→🚨→🌱 の6ブロックを必ず全部出す。**
+- **「🌱 最後に」「💬 最後に」だけを単独で出すのは禁止。**
+- **判断に必要な情報が足りないなら、まとめを出さずに質問を増やす。**
+
 **必ず「病院をおすすめする時」と「様子見/市販薬の場合」で形式を分ける：**
 
 判断をする前に、以下を確認する：
@@ -583,7 +600,7 @@ const conversationHistory = {};
 
 // Root route - serve index.html
 app.get("/", (req, res) => {
-  res.sendFile(__dirname + "/public/index.html");
+  res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
 // Chat API endpoint
@@ -633,10 +650,28 @@ app.post("/api/chat", async (req, res) => {
     res.json({ response: aiResponse });
   } catch (error) {
     console.error("OpenAI API Error:", error);
-    res.status(500).json({
+    console.error("Error details:", {
+      message: error.message,
+      type: error.constructor.name,
+      stack: error.stack
+    });
+    
+    // より詳細なエラー情報を返す（開発環境用）
+    const errorResponse = {
       error: "AIの応答を取得できませんでした",
       details: error.message,
-    });
+    };
+    
+    // OpenAI APIのエラーの場合、より詳細な情報を追加
+    if (error.response) {
+      errorResponse.openaiError = {
+        status: error.response.status,
+        statusText: error.response.statusText,
+        data: error.response.data
+      };
+    }
+    
+    res.status(500).json(errorResponse);
   }
 });
 

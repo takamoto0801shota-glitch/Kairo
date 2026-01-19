@@ -30,9 +30,11 @@ function saveHistory() {
     if (isUser) {
       text = msg.textContent;
     } else {
-      // AIメッセージの場合、ブロック形式の場合は元のテキストを取得
-      if (msg.classList.contains("has-blocks")) {
-        const blocks = msg.querySelectorAll('.message-block');
+      // AIメッセージの場合、元のテキストがあれば優先
+      if (msg.dataset.originalText) {
+        text = msg.dataset.originalText;
+      } else if (msg.classList.contains("has-blocks")) {
+        const blocks = msg.querySelectorAll('.message-block:not(.summary-block)');
         let fullText = '';
         blocks.forEach(block => {
           const header = block.querySelector('.block-header');
@@ -113,9 +115,9 @@ function loadHistory() {
         
         messagesContainer.appendChild(messageDiv);
         
-        // 判断が完了していて、まだまとめブロックが含まれていない場合は追加
+        // 判断が完了している場合は、必ずまとめブロックを追加
         const decisionCompleted = isDecisionCompleted(msg.text);
-        if (decisionCompleted && !msg.text.includes('🌱 最後に') && !msg.text.includes('💬 最後に')) {
+        if (decisionCompleted) {
           addSummaryBlock(messageDiv, msg.text);
         }
       }
@@ -262,20 +264,24 @@ function isDecisionCompleted(text) {
     '🏥 Kairoの判断',
     '📝 いまの状態を整理します',
     '⚠️ Kairoが気になっているポイント',
-    '今は[様子見/市販薬/病院に行くこと]だと私は判断します',
     '病院に行くことをおすすめします',
     '病院をおすすめします'
   ];
   
+  const decisionPatterns = [
+    /今は.*様子見/,
+    /市販薬/,
+    /病院に行くことをおすすめ/,
+    /病院をおすすめ/,
+    /判断します/,
+    /おすすめします/
+  ];
+  
   // 判断を示すブロックが含まれているか
   const hasDecisionBlock = decisionIndicators.some(indicator => text.includes(indicator));
+  const hasDecisionPattern = decisionPatterns.some(pattern => pattern.test(text));
   
-  // ただし、最後のまとめセクション（🌱 最後に、💬 最後に）は既に含まれているかチェック
-  const hasSummaryBlock = text.includes('🌱 最後に') || text.includes('💬 最後に');
-  
-  // 判断ブロックが含まれていて、まとめブロックがまだ含まれていない場合、判断完了とみなす
-  // または、既にまとめブロックが含まれている場合も判断完了とみなす（重複表示を防ぐ）
-  return hasDecisionBlock;
+  return hasDecisionBlock || hasDecisionPattern;
 }
 
 // Get urgency level from AI message (緊急度を判定)
@@ -306,6 +312,7 @@ function createSummaryBlock(text) {
   let headerIcon = '🟢';
   let headerText = 'まず安心してください';
   let summaryContent = '';
+  const actionSuffix = '\n👉 これ以上、何かする必要はありません。';
   
   if (urgencyLevel === 'high') {
     headerIcon = '🔴';
@@ -314,14 +321,14 @@ function createSummaryBlock(text) {
     // 判断を抽出（🏥 セクションから）
     const hospitalMatch = text.match(/🏥[^⸻]*?Kairoの判断[^⸻]*?\*\*([^*]+)\*\*/s);
     if (hospitalMatch) {
-      summaryContent = hospitalMatch[1].trim() + '\n\n専門家の確認が必要です。\n一人で判断しなくて大丈夫です。';
+      summaryContent = hospitalMatch[1].trim() + '\n\n✅ 今やること\n\n専門家の確認が必要です。\n一人で判断しなくて大丈夫です。' + actionSuffix;
     } else {
       // 別のパターンで判断を抽出
       const judgmentMatch = text.match(/\*\*([^*]+)\*\*/);
       if (judgmentMatch && text.includes('病院')) {
-        summaryContent = judgmentMatch[1].trim() + '\n\n専門家の確認が必要です。\n一人で判断しなくて大丈夫です。';
+        summaryContent = judgmentMatch[1].trim() + '\n\n✅ 今やること\n\n専門家の確認が必要です。\n一人で判断しなくて大丈夫です。' + actionSuffix;
       } else {
-        summaryContent = '専門家の確認が必要です。\n一人で判断しなくて大丈夫です。';
+        summaryContent = '✅ 今やること\n\n専門家の確認が必要です。\n一人で判断しなくて大丈夫です。' + actionSuffix;
       }
     }
   } else if (urgencyLevel === 'medium') {
@@ -331,9 +338,9 @@ function createSummaryBlock(text) {
     // 判断を抽出
     const judgmentMatch = text.match(/\*\*([^*]+)\*\*/);
     if (judgmentMatch) {
-      summaryContent = judgmentMatch[1].trim() + '\n\n様子を見ながら、必要に応じて専門家に相談しましょう。\nまた不安になったら、いつでもここで聞いてください。';
+      summaryContent = judgmentMatch[1].trim() + '\n\n✅ 今やること\n\n様子を見ながら、必要に応じて専門家に相談しましょう。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
     } else {
-      summaryContent = '様子を見ながら、必要に応じて専門家に相談しましょう。\nまた不安になったら、いつでもここで聞いてください。';
+      summaryContent = '✅ 今やること\n\n様子を見ながら、必要に応じて専門家に相談しましょう。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
     }
   } else {
     headerIcon = '🟢';
@@ -342,14 +349,14 @@ function createSummaryBlock(text) {
     // 判断を抽出（🤝 セクションから）
     const stateMatch = text.match(/🤝[^⸻]*?今の状態について[^⸻]*?\*\*([^*]+)\*\*/s);
     if (stateMatch) {
-      summaryContent = stateMatch[1].trim() + '\n\n今の状態を確認しながら、様子を見ていきましょう。\nまた不安になったら、いつでもここで聞いてください。';
+      summaryContent = stateMatch[1].trim() + '\n\n✅ 今やること\n\n今の状態を確認しながら、様子を見ていきましょう。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
     } else {
       // 別のパターンで判断を抽出
       const judgmentMatch = text.match(/\*\*([^*]+)\*\*/);
       if (judgmentMatch) {
-        summaryContent = judgmentMatch[1].trim() + '\n\n今の状態を確認しながら、様子を見ていきましょう。\nまた不安になったら、いつでもここで聞いてください。';
+        summaryContent = judgmentMatch[1].trim() + '\n\n✅ 今やること\n\n今の状態を確認しながら、様子を見ていきましょう。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
       } else {
-        summaryContent = '今の状態を確認しながら、様子を見ていきましょう。\nまた不安になったら、いつでもここで聞いてください。';
+        summaryContent = '✅ 今やること\n\n今の状態を確認しながら、様子を見ていきましょう。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
       }
     }
   }
@@ -482,9 +489,8 @@ function addMessage(text, isUser = false, save = true) {
           // 判断が完了しているかチェック
           const decisionCompleted = isDecisionCompleted(text);
           
-          // 判断が完了していて、まだまとめブロックが含まれていない場合
-          if (decisionCompleted && !text.includes('🌱 最後に') && !text.includes('💬 最後に')) {
-            // まとめブロックを自動的に追加
+          // 判断が完了している場合は、必ずまとめブロックを追加
+          if (decisionCompleted) {
             setTimeout(() => {
               addSummaryBlock(messageDiv, text);
             }, 500); // 少し遅延させて自然な流れにする
@@ -575,9 +581,8 @@ function addMessage(text, isUser = false, save = true) {
           // 判断が完了しているかチェック
           const decisionCompleted = isDecisionCompleted(text);
           
-          // 判断が完了していて、まだまとめブロックが含まれていない場合
-          if (decisionCompleted && !text.includes('🌱 最後に') && !text.includes('💬 最後に')) {
-            // まとめブロックを自動的に追加
+          // 判断が完了している場合は、必ずまとめブロックを追加
+          if (decisionCompleted) {
             setTimeout(() => {
               addSummaryBlock(messageDiv, text);
             }, 500); // 少し遅延させて自然な流れにする
@@ -604,6 +609,13 @@ function addMessage(text, isUser = false, save = true) {
 
 // Add summary block to message (まとめブロックを追加)
 function addSummaryBlock(messageDiv, fullText) {
+  if (messageDiv.dataset.summaryAdded === "true") {
+    return;
+  }
+  if (!messageDiv.dataset.originalText) {
+    messageDiv.dataset.originalText = fullText;
+  }
+
   const summaryBlock = createSummaryBlock(fullText);
   
   // まとめブロックのdivを作成
@@ -622,6 +634,7 @@ function addSummaryBlock(messageDiv, fullText) {
   
   // メッセージdivに追加
   messageDiv.appendChild(blockDiv);
+  messageDiv.dataset.summaryAdded = "true";
   
   // スクロールを自然に追従
   const messagesContainer = document.getElementById("chatMessages");
@@ -679,14 +692,28 @@ async function callOpenAI(message) {
     });
 
     if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+      let errorMessage = `HTTP error! status: ${response.status}`;
+      try {
+        const errorData = await response.json();
+        errorMessage = errorData.error || errorData.details || errorMessage;
+        console.error("サーバーエラー:", errorData);
+      } catch (parseError) {
+        const text = await response.text();
+        console.error("レスポンステキスト:", text);
+        errorMessage = `サーバーエラー (${response.status}): ${text.substring(0, 100)}`;
+      }
+      throw new Error(errorMessage);
     }
 
     const data = await response.json();
     return data.response;
   } catch (error) {
     console.error("API呼び出しエラー:", error);
+    console.error("エラーの詳細:", {
+      message: error.message,
+      stack: error.stack,
+      name: error.name
+    });
     throw error;
   }
 }
@@ -732,19 +759,25 @@ async function handleUserInput() {
         // Show AI response with typing animation (1文字ずつ表示)
         addMessage(aiResponse);
       }, 300);
-  } catch (error) {
-    // Remove loading message
-    const loadingMsg = document.getElementById(loadingId);
-    if (loadingMsg) {
-      loadingMsg.remove();
-    }
+      } catch (error) {
+        // Remove loading message
+        const loadingMsg = document.getElementById(loadingId);
+        if (loadingMsg) {
+          loadingMsg.remove();
+        }
 
-    // Show error message
-    addMessage(
-      "すみません。うまくつながらなかったようです。\n少し時間をおいて、もう一度試してみてください。"
-    );
-    console.error("エラー:", error);
-  } finally {
+        // Show error message with more details
+        let errorMessage = "すみません。うまくつながらなかったようです。\n少し時間をおいて、もう一度試してみてください。";
+        
+        // より詳細なエラー情報をコンソールに出力
+        console.error("API呼び出しエラー:", error);
+        if (error.message) {
+          console.error("エラーメッセージ:", error.message);
+        }
+        
+        // Show error message
+        addMessage(errorMessage);
+      } finally {
     // Re-enable input
     input.disabled = false;
     sendButton.disabled = false;

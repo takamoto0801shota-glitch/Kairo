@@ -179,3 +179,4 @@ git push -u origin main
 - パフォーマンスの監視
 - セキュリティの強化
 
+
