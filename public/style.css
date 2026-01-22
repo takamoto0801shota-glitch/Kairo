@@ -129,40 +129,16 @@ body {
     font-weight: 300;
 }
 
-/* タイピングアニメーション用 */
-.message.ai.typing {
-    opacity: 0;
-}
-
-.message.ai.typing.show {
-    opacity: 1;
-    animation: fadeIn 0.3s ease-out;
-}
-
-.kairo-message {
-    animation: appearFromTop 0.35s ease-out;
-}
-
-@keyframes fadeIn {
-    from {
-        opacity: 0;
-        transform: translateY(5px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
-@keyframes appearFromTop {
-    from {
-        opacity: 0;
-        transform: translateY(-8px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
+/* Kairoメッセージは動かさない（横・縦・フェード禁止） */
+.message.ai,
+.message.ai.has-blocks,
+.message.ai.loading,
+.message.ai .message-block,
+.message.ai .block-header,
+.message.ai .block-content {
+    transform: none;
+    transition: none;
+    animation: none;
 }
 
 .chat-input-container {

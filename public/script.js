@@ -88,7 +88,7 @@ function loadHistory() {
         // AIメッセージは履歴なので即座に表示（タイピングアニメーションなし）
         const blocks = parseAIMessage(msg.text);
         const messageDiv = document.createElement("div");
-        messageDiv.className = `message ai kairo-message ${blocks && blocks.length > 0 ? 'has-blocks' : ''}`;
+        messageDiv.className = `message ai ${blocks && blocks.length > 0 ? 'has-blocks' : ''}`;
         
         if (blocks && blocks.length > 0) {
           blocks.forEach(block => {
@@ -450,172 +450,63 @@ function extractSummary(text) {
   return summary.trim() || null;
 }
 
-// Add message to chat with typing animation for AI messages
+// Add message to chat (AIは即時表示)
 function addMessage(text, isUser = false, save = true) {
   const messagesContainer = document.getElementById("chatMessages");
   const messageDiv = document.createElement("div");
-  messageDiv.className = `message ${isUser ? "user" : "ai"}${isUser ? "" : " kairo-message"}`;
+  messageDiv.className = `message ${isUser ? "user" : "ai"}`;
   
   if (isUser) {
     // User messages: show immediately
     messageDiv.textContent = text;
     messagesContainer.insertAdjacentElement("beforeend", messageDiv);
   } else {
-    // AI messages: Check if it should be parsed into blocks
+    // AI messages: render immediately at final position
     const blocks = parseAIMessage(text);
-    
-    messageDiv.className += " typing";
     messagesContainer.insertAdjacentElement("beforeend", messageDiv);
     
     if (blocks && blocks.length > 0) {
-      // ブロック形式のメッセージ: ブロックごとにタイピング
       messageDiv.classList.add("has-blocks");
-      messageDiv.innerHTML = '';
       
-      let currentBlockIndex = 0;
-      let currentCharIndex = 0;
-      let isTypingHeader = true; // 見出しをタイピング中かどうか
-      
-      // 各ブロックの構造を作成（最初は全て空）
-      const blockElements = blocks.map((block) => {
+      blocks.forEach((block) => {
         const blockDiv = document.createElement("div");
         blockDiv.className = "message-block";
-        blockDiv.style.display = "none"; // 最初は非表示
         
-        const headerDiv = document.createElement("div");
-        headerDiv.className = "block-header";
-        headerDiv.textContent = ''; // 最初は空
-        blockDiv.appendChild(headerDiv);
+        if (block.header) {
+          const headerDiv = document.createElement("div");
+          headerDiv.className = "block-header";
+          headerDiv.textContent = block.header.icon + ' ' + block.header.name;
+          blockDiv.appendChild(headerDiv);
+        }
         
         const contentDiv = document.createElement("div");
         contentDiv.className = "block-content";
-        contentDiv.textContent = ''; // 最初は空
+        contentDiv.textContent = block.content || '';
         blockDiv.appendChild(contentDiv);
         
         messageDiv.appendChild(blockDiv);
-        
-        // 見出しテキストとコンテンツテキストを準備
-        const headerText = block.header ? (block.header.icon + ' ' + block.header.name) : '';
-        return { blockDiv, headerDiv, contentDiv, headerText, content: block.content || '' };
       });
-      
-      // タイピングアニメーション（ブロックごと、1文字ずつ）
-      function typeNextChar() {
-        if (currentBlockIndex >= blockElements.length) {
-          // すべてのブロックが完了
-          messageDiv.classList.add("show");
-          messageDiv.classList.remove("typing");
-          
-          // 判断が完了しているかチェック
-          const decisionCompleted = isDecisionCompleted(text);
-          
-          // 判断が完了している場合は、必ずまとめブロックを追加
-          if (decisionCompleted) {
-            setTimeout(() => {
-              addSummaryBlock(messageDiv, text);
-            }, 500); // 少し遅延させて自然な流れにする
-          }
-          
-          // タイピング完了後に履歴を保存
-          if (save) {
-            saveHistory();
-          }
-          
-          // 安心サマリーを抽出して表示
-          const summary = extractSummary(text);
-          if (summary) {
-            updateSummaryCard(summary);
-          }
-          return;
-        }
-        
-        const currentBlock = blockElements[currentBlockIndex];
-        
-        // 現在のブロックを表示
-        if (currentBlock.blockDiv.style.display === "none") {
-          currentBlock.blockDiv.style.display = "block";
-        }
-        
-        if (isTypingHeader && currentBlock.headerText) {
-          // 見出しをタイピング中
-          if (currentCharIndex < currentBlock.headerText.length) {
-            currentBlock.headerDiv.textContent = currentBlock.headerText.substring(0, currentCharIndex + 1);
-            currentCharIndex++;
-            setTimeout(typeNextChar, 40);
-          } else {
-            // 見出し完了、コンテンツに移行
-            isTypingHeader = false;
-            currentCharIndex = 0;
-            setTimeout(typeNextChar, 100); // 見出しとコンテンツの間の間隔
-          }
-        } else {
-          // コンテンツをタイピング中
-          const fullContent = currentBlock.content;
-          if (currentCharIndex < fullContent.length) {
-            // 1文字ずつ追加（改行（\n）も含めて保持）
-            const displayedText = fullContent.substring(0, currentCharIndex + 1);
-            currentBlock.contentDiv.textContent = displayedText;
-            
-            currentCharIndex++;
-            
-            // 40ms/文字の速度で表示（体調が悪い人向けにゆっくりめ）
-            setTimeout(typeNextChar, 40);
-          } else {
-            // 現在のブロックが完了、次のブロックへ
-            currentBlockIndex++;
-            currentCharIndex = 0;
-            isTypingHeader = true;
-            // ブロック間の少し長めの間隔（200ms）
-            setTimeout(typeNextChar, 200);
-          }
-        }
-      }
-      
-      // タイピング開始（少し遅延させて見やすく）
-      setTimeout(typeNextChar, 100);
     } else {
-      // 通常のメッセージ（ブロック形式でない場合）: 1文字ずつタイピング
-      let charIndex = 0;
-      
-      function typeChar() {
-        if (charIndex < text.length) {
-          // 改行（\n）を保持しながら1文字ずつ追加
-          messageDiv.textContent = text.substring(0, charIndex + 1);
-          
-          charIndex++;
-          
-          // 40ms/文字の速度で表示（体調が悪い人向けにゆっくりめ）
-          setTimeout(typeChar, 40);
-        } else {
-          // タイピング完了
-          messageDiv.classList.add("show");
-          messageDiv.classList.remove("typing");
-          
-          // 判断が完了しているかチェック
-          const decisionCompleted = isDecisionCompleted(text);
-          
-          // 判断が完了している場合は、必ずまとめブロックを追加
-          if (decisionCompleted) {
-            setTimeout(() => {
-              addSummaryBlock(messageDiv, text);
-            }, 500); // 少し遅延させて自然な流れにする
-          }
-          
-          // タイピング完了後に履歴を保存
-          if (save) {
-            saveHistory();
-          }
-          
-          // 安心サマリーを抽出して表示
-          const summary = extractSummary(text);
-          if (summary) {
-            updateSummaryCard(summary);
-          }
-        }
-      }
-      
-      // タイピング開始
-      setTimeout(typeChar, 100);
+      messageDiv.textContent = text;
+    }
+    
+    // 判断が完了しているかチェック
+    const decisionCompleted = isDecisionCompleted(text);
+    
+    // 判断が完了している場合は、必ずまとめブロックを追加
+    if (decisionCompleted) {
+      addSummaryBlock(messageDiv, text);
+    }
+    
+    // 履歴を保存
+    if (save) {
+      saveHistory();
+    }
+    
+    // 安心サマリーを抽出して表示
+    const summary = extractSummary(text);
+    if (summary) {
+      updateSummaryCard(summary);
     }
   }
 }
@@ -673,7 +564,9 @@ function updateSummaryCard(summary) {
   
   if (summary && summaryCard) {
     // 既存のコンテンツをクリア
-    summaryCard.innerHTML = '';
+    while (summaryCard.firstChild) {
+      summaryCard.removeChild(summaryCard.firstChild);
+    }
     
     // 新しいコンテンツを作成
     const contentDiv = document.createElement("div");
@@ -687,7 +580,9 @@ function updateSummaryCard(summary) {
   } else if (!summary && summaryCard) {
     // サマリーがない場合は非表示
     summaryCard.style.display = "none";
-    summaryCard.innerHTML = '';
+    while (summaryCard.firstChild) {
+      summaryCard.removeChild(summaryCard.firstChild);
+    }
   }
 }
 
@@ -776,11 +671,8 @@ async function handleUserInput() {
         loadingMsg.remove();
       }
 
-      // 少し遅延してからタイピングアニメーションを開始（自然な流れ）
-      setTimeout(() => {
-        // Show AI response with typing animation (1文字ずつ表示)
-        addMessage(aiResponse);
-      }, 300);
+      // Show AI response immediately
+      addMessage(aiResponse);
       } catch (error) {
         // Remove loading message
         const loadingMsg = document.getElementById(loadingId);
