@@ -380,37 +380,39 @@ function addMessage(text, isUser = false, save = true) {
   if (isUser) {
     // User messages: show immediately
     messageDiv.textContent = text;
-    messagesContainer.insertAdjacentElement("beforeend", messageDiv);
-  } else {
-    // AI messages: render immediately at final position
-    const blocks = parseAIMessage(text);
-    messagesContainer.insertAdjacentElement("beforeend", messageDiv);
+    messagesContainer.appendChild(messageDiv);
+    return;
+  }
+  
+  // AI messages: render line-by-line (no animation, no re-render)
+  const blocks = parseAIMessage(text);
+  messagesContainer.appendChild(messageDiv);
+  
+  const appendLinesSequentially = (target, textToAppend, done) => {
+    const lines = textToAppend.split("\n");
+    let index = 0;
     
-    if (blocks && blocks.length > 0) {
-      messageDiv.classList.add("has-blocks");
+    const appendNext = () => {
+      const lineSpan = document.createElement("span");
+      lineSpan.textContent = lines[index];
+      target.appendChild(lineSpan);
       
-      blocks.forEach((block) => {
-        const blockDiv = document.createElement("div");
-        blockDiv.className = "message-block";
-        
-        if (block.header) {
-          const headerDiv = document.createElement("div");
-          headerDiv.className = "block-header";
-          headerDiv.textContent = block.header.icon + ' ' + block.header.name;
-          blockDiv.appendChild(headerDiv);
-        }
-        
-        const contentDiv = document.createElement("div");
-        contentDiv.className = "block-content";
-        contentDiv.textContent = block.content || '';
-        blockDiv.appendChild(contentDiv);
-        
-        messageDiv.appendChild(blockDiv);
-      });
-    } else {
-      messageDiv.textContent = text;
-    }
+      if (index < lines.length - 1) {
+        target.appendChild(document.createElement("br"));
+      }
+      
+      index += 1;
+      if (index < lines.length) {
+        setTimeout(appendNext, 24);
+      } else if (done) {
+        done();
+      }
+    };
     
+    appendNext();
+  };
+  
+  const finalizeMessage = () => {
     // 判断が完了しているかチェック
     const decisionCompleted = isDecisionCompleted(text);
     
@@ -429,6 +431,51 @@ function addMessage(text, isUser = false, save = true) {
     if (summary) {
       updateSummaryCard(summary);
     }
+  };
+  
+  if (blocks && blocks.length > 0) {
+    messageDiv.classList.add("has-blocks");
+    let blockIndex = 0;
+    
+    const appendNextBlock = () => {
+      if (blockIndex >= blocks.length) {
+        finalizeMessage();
+        return;
+      }
+      
+      const block = blocks[blockIndex];
+      const blockDiv = document.createElement("div");
+      blockDiv.className = "message-block";
+      messageDiv.appendChild(blockDiv);
+      
+      const headerDiv = document.createElement("div");
+      headerDiv.className = "block-header";
+      blockDiv.appendChild(headerDiv);
+      
+      const contentDiv = document.createElement("div");
+      contentDiv.className = "block-content";
+      blockDiv.appendChild(contentDiv);
+      
+      const headerText = block.header ? (block.header.icon + " " + block.header.name) : "";
+      
+      if (headerText) {
+        appendLinesSequentially(headerDiv, headerText, () => {
+          appendLinesSequentially(contentDiv, block.content || "", () => {
+            blockIndex += 1;
+            appendNextBlock();
+          });
+        });
+      } else {
+        appendLinesSequentially(contentDiv, block.content || "", () => {
+          blockIndex += 1;
+          appendNextBlock();
+        });
+      }
+    };
+    
+    appendNextBlock();
+  } else {
+    appendLinesSequentially(messageDiv, text, finalizeMessage);
   }
 }
 
@@ -578,7 +625,7 @@ async function handleUserInput() {
     loadingDiv.className = "message ai loading";
     loadingDiv.textContent = "考え中...";
     const messagesContainer = document.getElementById("chatMessages");
-    messagesContainer.insertAdjacentElement("beforeend", loadingDiv);
+    messagesContainer.appendChild(loadingDiv);
 
     try {
       // Call OpenAI API
