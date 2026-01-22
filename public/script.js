@@ -57,106 +57,27 @@ function saveHistory() {
   localStorage.setItem(HISTORY_KEY, JSON.stringify(messages));
 }
 
-// Load conversation history
+// Load conversation history (再描画は行わない)
 function loadHistory() {
-  const savedHistory = localStorage.getItem(HISTORY_KEY);
-  if (savedHistory) {
-    const messages = JSON.parse(savedHistory);
-    const messagesContainer = document.getElementById("chatMessages");
-    messagesContainer.innerHTML = "";
-    
-    // 最後のAIメッセージからサマリーを抽出
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (!messages[i].isUser) {
-        const summary = extractSummary(messages[i].text);
-        if (summary) {
-          updateSummaryCard(summary);
-        }
-        break;
-      }
-    }
-    
-    // 履歴を復元（タイピングアニメーションなしで即座に表示）
-    messages.forEach((msg, index) => {
-      if (msg.isUser) {
-        // ユーザーメッセージは即座に表示
-        const messageDiv = document.createElement("div");
-        messageDiv.className = "message user";
-        messageDiv.textContent = msg.text;
-        messagesContainer.insertAdjacentElement("beforeend", messageDiv);
-      } else {
-        // AIメッセージは履歴なので即座に表示（タイピングアニメーションなし）
-        const blocks = parseAIMessage(msg.text);
-        const messageDiv = document.createElement("div");
-        messageDiv.className = `message ai ${blocks && blocks.length > 0 ? 'has-blocks' : ''}`;
-        
-        if (blocks && blocks.length > 0) {
-          blocks.forEach(block => {
-            const blockDiv = document.createElement("div");
-            blockDiv.className = "message-block";
-            
-            if (block.header) {
-              const headerDiv = document.createElement("div");
-              headerDiv.className = "block-header";
-              headerDiv.textContent = block.header.icon + ' ' + block.header.name;
-              blockDiv.appendChild(headerDiv);
-            }
-            
-            const contentDiv = document.createElement("div");
-            contentDiv.className = "block-content";
-            contentDiv.textContent = block.content;
-            blockDiv.appendChild(contentDiv);
-            
-            messageDiv.appendChild(blockDiv);
-          });
-        } else {
-          messageDiv.textContent = msg.text;
-        }
-        
-        messagesContainer.insertAdjacentElement("beforeend", messageDiv);
-        
-        // 判断が完了している場合は、必ずまとめブロックを追加
-        const decisionCompleted = isDecisionCompleted(msg.text);
-        if (decisionCompleted) {
-          addSummaryBlock(messageDiv, msg.text);
-        }
-      }
-    });
-    
-  }
+  return;
 }
 
 // Clear conversation history
 function clearHistory() {
   localStorage.removeItem(HISTORY_KEY);
   localStorage.removeItem(CONVERSATION_ID_KEY);
-  const messagesContainer = document.getElementById("chatMessages");
-  messagesContainer.innerHTML = "";
-
-  // 安心サマリーを非表示
-  const summaryCard = document.getElementById("summaryCard");
-  if (summaryCard) {
-    summaryCard.style.display = "none";
-    summaryCard.innerHTML = "";
-  }
-
-  const input = document.getElementById("userInput");
-  const button = document.getElementById("sendButton");
-  input.disabled = false;
-  button.disabled = false;
-  input.placeholder = "どんな感じですか？";
-
-  // Clear server-side history
+  // Clear server-side history, then reload to reset UI without DOM再生成
   fetch(CLEAR_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ conversationId: getConversationId() }),
-  }).catch((err) => console.error("履歴クリアエラー:", err));
-
-  // Start new conversation
-  showInitialMessage();
+  })
+    .catch((err) => console.error("履歴クリアエラー:", err))
+    .finally(() => {
+      window.location.reload();
+    });
 }
 
 // Parse AI message into blocks (cards)
@@ -563,25 +484,23 @@ function updateSummaryCard(summary) {
   const summaryCard = document.getElementById("summaryCard");
   
   if (summary && summaryCard) {
-    // 既存のコンテンツをクリア
-    while (summaryCard.firstChild) {
-      summaryCard.removeChild(summaryCard.firstChild);
+    let contentDiv = document.getElementById("summaryCardContent");
+    if (!contentDiv) {
+      contentDiv = document.createElement("div");
+      contentDiv.id = "summaryCardContent";
+      contentDiv.className = "summary-card-content";
+      summaryCard.appendChild(contentDiv);
     }
-    
-    // 新しいコンテンツを作成
-    const contentDiv = document.createElement("div");
-    contentDiv.id = "summaryCardContent";
-    contentDiv.className = "summary-card-content";
     contentDiv.textContent = summary;
-    summaryCard.appendChild(contentDiv);
     
     // サマリーカードを表示
     summaryCard.style.display = "block";
   } else if (!summary && summaryCard) {
     // サマリーがない場合は非表示
     summaryCard.style.display = "none";
-    while (summaryCard.firstChild) {
-      summaryCard.removeChild(summaryCard.firstChild);
+    const contentDiv = document.getElementById("summaryCardContent");
+    if (contentDiv) {
+      contentDiv.textContent = "";
     }
   }
 }
@@ -701,14 +620,8 @@ async function handleUserInput() {
 
 // Initialize
 function init() {
-  // Load saved history
-  const savedHistory = localStorage.getItem(HISTORY_KEY);
-
-  if (savedHistory) {
-    loadHistory();
-  } else {
-    showInitialMessage();
-  }
+  // Start fresh without re-rendering history
+  showInitialMessage();
 
   // Send button event
   document.getElementById("sendButton").addEventListener("click", handleUserInput);
