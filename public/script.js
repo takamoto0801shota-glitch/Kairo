@@ -83,7 +83,7 @@ function loadHistory() {
         const messageDiv = document.createElement("div");
         messageDiv.className = "message user";
         messageDiv.textContent = msg.text;
-        messagesContainer.appendChild(messageDiv);
+        messagesContainer.insertAdjacentElement("beforeend", messageDiv);
       } else {
         // AIメッセージは履歴なので即座に表示（タイピングアニメーションなし）
         const blocks = parseAIMessage(msg.text);
@@ -113,7 +113,7 @@ function loadHistory() {
           messageDiv.textContent = msg.text;
         }
         
-        messagesContainer.appendChild(messageDiv);
+        messagesContainer.insertAdjacentElement("beforeend", messageDiv);
         
         // 判断が完了している場合は、必ずまとめブロックを追加
         const decisionCompleted = isDecisionCompleted(msg.text);
@@ -123,7 +123,6 @@ function loadHistory() {
       }
     });
     
-    messagesContainer.scrollTop = messagesContainer.scrollHeight;
   }
 }
 
@@ -460,14 +459,13 @@ function addMessage(text, isUser = false, save = true) {
   if (isUser) {
     // User messages: show immediately
     messageDiv.textContent = text;
-    messagesContainer.appendChild(messageDiv);
-    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    messagesContainer.insertAdjacentElement("beforeend", messageDiv);
   } else {
     // AI messages: Check if it should be parsed into blocks
     const blocks = parseAIMessage(text);
     
     messageDiv.className += " typing";
-    messagesContainer.appendChild(messageDiv);
+    messagesContainer.insertAdjacentElement("beforeend", messageDiv);
     
     if (blocks && blocks.length > 0) {
       // ブロック形式のメッセージ: ブロックごとにタイピング
@@ -542,7 +540,6 @@ function addMessage(text, isUser = false, save = true) {
           // 見出しをタイピング中
           if (currentCharIndex < currentBlock.headerText.length) {
             currentBlock.headerDiv.textContent = currentBlock.headerText.substring(0, currentCharIndex + 1);
-            messagesContainer.scrollTop = messagesContainer.scrollHeight;
             currentCharIndex++;
             setTimeout(typeNextChar, 40);
           } else {
@@ -558,9 +555,6 @@ function addMessage(text, isUser = false, save = true) {
             // 1文字ずつ追加（改行（\n）も含めて保持）
             const displayedText = fullContent.substring(0, currentCharIndex + 1);
             currentBlock.contentDiv.textContent = displayedText;
-            
-            // スクロールを自然に追従
-            messagesContainer.scrollTop = messagesContainer.scrollHeight;
             
             currentCharIndex++;
             
@@ -587,9 +581,6 @@ function addMessage(text, isUser = false, save = true) {
         if (charIndex < text.length) {
           // 改行（\n）を保持しながら1文字ずつ追加
           messageDiv.textContent = text.substring(0, charIndex + 1);
-          
-          // スクロールを自然に追従
-          messagesContainer.scrollTop = messagesContainer.scrollHeight;
           
           charIndex++;
           
@@ -671,10 +662,6 @@ function addSummaryBlock(messageDiv, fullText) {
   // メッセージdivに追加
   messageDiv.appendChild(blockDiv);
   messageDiv.dataset.summaryAdded = "true";
-  
-  // スクロールを自然に追従
-  const messagesContainer = document.getElementById("chatMessages");
-  messagesContainer.scrollTop = messagesContainer.scrollHeight;
   
   // 履歴を保存
   saveHistory();
@@ -777,8 +764,7 @@ async function handleUserInput() {
     loadingDiv.className = "message ai loading";
     loadingDiv.textContent = "考え中...";
     const messagesContainer = document.getElementById("chatMessages");
-    messagesContainer.appendChild(loadingDiv);
-    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    messagesContainer.insertAdjacentElement("beforeend", loadingDiv);
 
     try {
       // Call OpenAI API
