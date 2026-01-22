@@ -287,22 +287,39 @@ function isDecisionCompleted(text) {
 // Get urgency level from AI message (緊急度を判定)
 function getUrgencyLevel(text) {
   // 病院をおすすめする場合
-  if (text.includes('🏥 Kairoの判断') || text.includes('病院をおすすめします') || text.includes('病院に行くことをおすすめします')) {
+  if (
+    text.includes('🏥 Kairoの判断') ||
+    text.includes('病院をおすすめします') ||
+    text.includes('病院に行くことをおすすめします') ||
+    text.includes('今すぐ病院') ||
+    text.includes('救急')
+  ) {
     return 'high'; // 🔴
   }
   
   // 緊急性が高い場合
-  if (text.includes('緊急性が高い') || text.includes('緊急性：高') || text.includes('緊急性：中')) {
-    return 'medium'; // 🟡
+  if (text.includes('緊急性が高い') || text.includes('緊急性：高')) {
+    return 'high'; // 🔴
   }
   
   // 様子見/市販薬の場合
-  if (text.includes('🟢 まず安心してください') || text.includes('様子見') || text.includes('市販薬')) {
+  if (
+    text.includes('🟢 まず安心してください') ||
+    text.includes('様子見') ||
+    text.includes('市販薬') ||
+    text.includes('緊急性は高くなさそう') ||
+    text.includes('心配いりません')
+  ) {
     return 'low'; // 🟢
   }
   
-  // デフォルトは低緊急性
-  return 'low';
+  // 注意・中程度の表現がある場合は🟡
+  if (text.includes('注意') || text.includes('緊急性') || text.includes('受診を検討')) {
+    return 'medium'; // 🟡
+  }
+  
+  // デフォルトは中緊急性（🟡を増やす）
+  return 'medium';
 }
 
 // Create summary block (まとめブロックを作成)
@@ -333,14 +350,19 @@ function createSummaryBlock(text) {
     }
   } else if (urgencyLevel === 'medium') {
     headerIcon = '🟡';
-    headerText = '今日は注意しながら過ごしましょう';
+    headerText = 'まず安心してください';
     
-    // 判断を抽出
-    const judgmentMatch = text.match(/\*\*([^*]+)\*\*/);
-    if (judgmentMatch) {
-      summaryContent = judgmentMatch[1].trim() + '\n\n✅ 今やること\n\n様子を見ながら、必要に応じて専門家に相談しましょう。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
+    // 🟡は🟢と同じ構成
+    const stateMatch = text.match(/🤝[^⸻]*?今の状態について[^⸻]*?\*\*([^*]+)\*\*/s);
+    if (stateMatch) {
+      summaryContent = stateMatch[1].trim() + '\n\n✅ 今やること\n\n今の状態を確認しながら、様子を見ていきましょう。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
     } else {
-      summaryContent = '✅ 今やること\n\n様子を見ながら、必要に応じて専門家に相談しましょう。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
+      const judgmentMatch = text.match(/\*\*([^*]+)\*\*/);
+      if (judgmentMatch) {
+        summaryContent = judgmentMatch[1].trim() + '\n\n✅ 今やること\n\n今の状態を確認しながら、様子を見ていきましょう。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
+      } else {
+        summaryContent = '✅ 今やること\n\n今の状態を確認しながら、様子を見ていきましょう。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
+      }
     }
   } else {
     headerIcon = '🟢';
@@ -609,6 +631,20 @@ function addMessage(text, isUser = false, save = true) {
 
 // Add summary block to message (まとめブロックを追加)
 function addSummaryBlock(messageDiv, fullText) {
+  const hasSummaryInText =
+    fullText.includes('🌱 最後に') ||
+    fullText.includes('💬 最後に') ||
+    fullText.includes('🟢 まず安心してください') ||
+    fullText.includes('🤝 今の状態について') ||
+    fullText.includes('✅ 今すぐやること') ||
+    fullText.includes('⏳ 今後の見通し') ||
+    fullText.includes('🚨 もし次の症状が出たら') ||
+    fullText.includes('📝 いまの状態を整理します') ||
+    fullText.includes('⚠️ Kairoが気になっているポイント') ||
+    fullText.includes('🏥 Kairoの判断');
+  if (hasSummaryInText) {
+    return;
+  }
   if (messageDiv.dataset.summaryAdded === "true") {
     return;
   }
