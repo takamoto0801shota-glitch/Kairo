@@ -88,7 +88,7 @@ function loadHistory() {
         // AIメッセージは履歴なので即座に表示（タイピングアニメーションなし）
         const blocks = parseAIMessage(msg.text);
         const messageDiv = document.createElement("div");
-        messageDiv.className = `message ai ${blocks && blocks.length > 0 ? 'has-blocks' : ''}`;
+        messageDiv.className = `message ai kairo-message ${blocks && blocks.length > 0 ? 'has-blocks' : ''}`;
         
         if (blocks && blocks.length > 0) {
           blocks.forEach(block => {
@@ -455,7 +455,7 @@ function extractSummary(text) {
 function addMessage(text, isUser = false, save = true) {
   const messagesContainer = document.getElementById("chatMessages");
   const messageDiv = document.createElement("div");
-  messageDiv.className = `message ${isUser ? "user" : "ai"}`;
+  messageDiv.className = `message ${isUser ? "user" : "ai"}${isUser ? "" : " kairo-message"}`;
   
   if (isUser) {
     // User messages: show immediately

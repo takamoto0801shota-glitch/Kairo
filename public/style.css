@@ -139,6 +139,10 @@ body {
     animation: fadeIn 0.3s ease-out;
 }
 
+.kairo-message {
+    animation: appearFromTop 0.35s ease-out;
+}
+
 @keyframes fadeIn {
     from {
         opacity: 0;
@@ -150,34 +154,47 @@ body {
     }
 }
 
+@keyframes appearFromTop {
+    from {
+        opacity: 0;
+        transform: translateY(-8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
 .chat-input-container {
     display: flex;
     align-items: center;
-    padding: 20px 24px;
+    gap: 8px;
+    padding: 8px;
     border-top: 1px solid #f0f0f0;
     background-color: #ffffff;
-    gap: 12px;
 }
 
 .chat-input {
-    flex: 1;
-    padding: 10px 16px;
+    flex: 7;
+    padding: 8px 12px;
     border: 1px solid #e8e8e8;
     border-radius: 24px;
-    font-size: 15px;
+    font-size: 14px;
     height: 40px;
     min-height: 40px;
+    resize: none;
     outline: none;
     background-color: #fafafa;
     color: #333;
     font-family: 'Noto Sans JP', sans-serif;
-    transition: all 0.2s;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    box-sizing: border-box;
 }
 
 .chat-input:focus {
-    border-color: #b8d4ce;
+    border-color: #6FB8A6;
     background-color: #ffffff;
-    box-shadow: 0 0 0 3px rgba(74, 155, 142, 0.08);
+    box-shadow: 0 0 0 2px rgba(111, 184, 166, 0.25);
 }
 
 .chat-input::placeholder {
@@ -186,17 +203,24 @@ body {
 }
 
 .send-button {
-    padding: 14px 28px;
+    flex: 3;
+    height: 40px;
+    min-width: 56px;
+    max-width: 80px;
+    padding: 0 12px;
     background-color: #4a9b8e;
     color: white;
     border: none;
     border-radius: 24px;
-    font-size: 15px;
+    font-size: 14px;
     cursor: pointer;
     transition: all 0.2s;
     font-weight: 400;
     font-family: 'Noto Sans JP', sans-serif;
     flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .send-button:hover {
