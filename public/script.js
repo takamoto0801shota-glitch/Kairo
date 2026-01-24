@@ -5,6 +5,7 @@ const CLEAR_URL = "/api/clear";
 // Conversation history keys
 const HISTORY_KEY = "kairo_chat_history";
 const CONVERSATION_ID_KEY = "kairo_conversation_id";
+const FIRST_QUESTION_KEY = "kairo_first_question";
 
 // Generate or get conversation ID
 function getConversationId() {
@@ -66,6 +67,7 @@ function loadHistory() {
 function clearHistory() {
   localStorage.removeItem(HISTORY_KEY);
   localStorage.removeItem(CONVERSATION_ID_KEY);
+  localStorage.removeItem(FIRST_QUESTION_KEY);
   // Clear server-side history, then reload to reset UI without DOM再生成
   fetch(CLEAR_URL, {
     method: "POST",
@@ -381,6 +383,9 @@ function addMessage(text, isUser = false, save = true) {
     // User messages: show immediately
     messageDiv.textContent = text;
     messagesContainer.appendChild(messageDiv);
+    if (!localStorage.getItem(FIRST_QUESTION_KEY)) {
+      localStorage.setItem(FIRST_QUESTION_KEY, text);
+    }
     return;
   }
   
@@ -538,7 +543,28 @@ function updateSummaryCard(summary) {
       contentDiv.className = "summary-card-content";
       summaryCard.appendChild(contentDiv);
     }
-    contentDiv.textContent = summary;
+    const firstQuestion = localStorage.getItem(FIRST_QUESTION_KEY);
+    const summaryText = summary.trim();
+    const emojiMatch = summaryText.match(/[🟢🟡🔴]/);
+    let emoji = emojiMatch ? emojiMatch[0] : '';
+    if (!emoji) {
+      const level = getUrgencyLevel(summaryText);
+      emoji = level === 'high' ? '🔴' : level === 'medium' ? '🟡' : '🟢';
+    }
+    let answerText = summaryText;
+    if (summaryText.includes("👉")) {
+      answerText = summaryText.split("👉").slice(1).join("👉").trim();
+    } else {
+      const firstLineRemoved = summaryText.replace(/^[🟢🟡🔴🚨][^\n]*\n?/, "").trim();
+      if (firstLineRemoved) {
+        answerText = firstLineRemoved;
+      }
+    }
+    if (firstQuestion) {
+      contentDiv.textContent = `${emoji} 「${firstQuestion}」への結論\n👉 ${answerText}`;
+    } else {
+      contentDiv.textContent = summaryText;
+    }
     
     // サマリーカードを表示
     summaryCard.style.display = "block";
