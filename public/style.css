@@ -7,6 +7,10 @@
     box-sizing: border-box;
 }
 
+:root {
+    --header-height: 64px;
+}
+
 html, body {
     width: 100%;
     height: 100%;
@@ -35,26 +39,43 @@ body {
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
     position: relative;
     overflow: hidden;
+    padding-top: calc(var(--header-height) + env(safe-area-inset-top));
 }
 
 .chat-header {
     background-color: #ffffff;
     color: #333;
-    padding: 18px 20px;
-    padding-top: calc(16px + env(safe-area-inset-top));
+    padding: 8px 20px;
+    padding-top: calc(8px + env(safe-area-inset-top));
     text-align: center;
     border-bottom: 1px solid #f0f0f0;
-    position: sticky;
+    position: fixed;
     top: 0;
     z-index: 10;
     overflow: hidden;
+    width: 100%;
+    max-width: 600px;
+    height: calc(var(--header-height) + env(safe-area-inset-top));
+    left: 0;
+    right: 0;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
 }
 
 .chat-header h1 {
-    font-size: 28px;
+    font-size: 20px;
     font-weight: 300;
     letter-spacing: 0.5px;
     color: #4a9b8e;
+}
+
+.header-message {
+    margin-top: 2px;
+    font-size: 12px;
+    font-weight: 400;
+    color: #6c8f88;
 }
 
 .clear-button {
