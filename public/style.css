@@ -8,7 +8,7 @@
 }
 
 :root {
-    --header-height: 64px;
+    --header-height: 56px;
 }
 
 html, body {
@@ -39,7 +39,7 @@ body {
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
     position: relative;
     overflow: hidden;
-    padding-top: calc(var(--header-height) + env(safe-area-inset-top));
+    padding-top: calc(var(--header-height) + env(safe-area-inset-top) + 6px);
 }
 
 .chat-header {
@@ -50,12 +50,12 @@ body {
     text-align: center;
     border-bottom: 1px solid #f0f0f0;
     position: fixed;
-    top: 0;
+    top: calc(env(safe-area-inset-top) + 6px);
     z-index: 10;
     overflow: hidden;
     width: 100%;
     max-width: 600px;
-    height: calc(var(--header-height) + env(safe-area-inset-top));
+    height: var(--header-height);
     left: 0;
     right: 0;
     margin: 0 auto;
@@ -71,12 +71,6 @@ body {
     color: #4a9b8e;
 }
 
-.header-message {
-    margin-top: 2px;
-    font-size: 12px;
-    font-weight: 400;
-    color: #6c8f88;
-}
 
 .clear-button {
     position: absolute;

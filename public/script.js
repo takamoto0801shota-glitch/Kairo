@@ -543,7 +543,6 @@ function updateSummaryCard(summary) {
       contentDiv.className = "summary-card-content";
       summaryCard.appendChild(contentDiv);
     }
-    const firstQuestion = localStorage.getItem(FIRST_QUESTION_KEY);
     const summaryText = summary.trim();
     const emojiMatch = summaryText.match(/[🟢🟡🔴]/);
     let emoji = emojiMatch ? emojiMatch[0] : '';
@@ -551,19 +550,10 @@ function updateSummaryCard(summary) {
       const level = getUrgencyLevel(summaryText);
       emoji = level === 'high' ? '🔴' : level === 'medium' ? '🟡' : '🟢';
     }
-    let answerText = summaryText;
-    if (summaryText.includes("👉")) {
-      answerText = summaryText.split("👉").slice(1).join("👉").trim();
-    } else {
-      const firstLineRemoved = summaryText.replace(/^[🟢🟡🔴🚨][^\n]*\n?/, "").trim();
-      if (firstLineRemoved) {
-        answerText = firstLineRemoved;
-      }
-    }
-    if (firstQuestion) {
-      contentDiv.textContent = `${emoji} 「${firstQuestion}」への結論\n👉 ${answerText}`;
-    } else {
+    if (emojiMatch) {
       contentDiv.textContent = summaryText;
+    } else {
+      contentDiv.textContent = `${emoji} ${summaryText}`;
     }
     
     // サマリーカードを表示
