@@ -642,6 +642,150 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 // Store conversation history (in production, use a database)
 const conversationHistory = {};
 
+function buildFullSummary(isHospital) {
+  if (isHospital) {
+    return [
+      "📝 いまの状態を整理します（メモ）",
+      "",
+      "• 体調の不安がある",
+      "• 症状が続いている",
+      "",
+      "⸻",
+      "",
+      "⚠️ Kairoが気になっているポイント",
+      "",
+      "• いつもと違う可能性がある",
+      "• 自分で様子見しにくい状況",
+      "",
+      "⸻",
+      "",
+      "🏥 Kairoの判断",
+      "",
+      "結論から言います。今は病院で確認したほうが安心です。",
+      "",
+      "ただ、様子見と言い切れない理由：",
+      "• 症状の経過がまだはっきりしない",
+      "• 今の状況が続いているため",
+      "",
+      "**このため、病院に行くことをおすすめします。**",
+      "",
+      "⸻",
+      "",
+      "💬 最後に",
+      "",
+      "不安になるのは当然です。",
+      "この判断は慎重で正しいものです。",
+      "一人で判断しなくて大丈夫です。",
+    ].join("\n");
+  }
+
+  return [
+    "🟢 まず安心してください",
+    "",
+    "現時点では、緊急性はなく安心して大丈夫だと判断します。",
+    "",
+    "⸻",
+    "",
+    "🤝 今の状態について",
+    "",
+    "今の状態はつらいですよね。",
+    "",
+    "ただ、",
+    "• まだ様子を見られる状態です",
+    "• 危険なサインは強く出ていません",
+    "",
+    "**この点から見て、今は様子見で大丈夫だと私は判断します。**",
+    "",
+    "⸻",
+    "",
+    "✅ 今すぐやること（これだけでOK）",
+    "",
+    "今日は次の3つだけ意識してください。",
+    "",
+    "• 水分をこまめにとる",
+    "• 体を休める",
+    "• 無理をしない",
+    "",
+    "⸻",
+    "",
+    "⏳ 今後の見通し",
+    "",
+    "多くの場合、次のような経過になります。",
+    "",
+    "• 数時間〜半日後",
+    "　少し落ち着いてくることが多いです",
+    "",
+    "• 1〜2日後",
+    "　普段に近づけば心配いらないことがほとんどです",
+    "",
+    "⸻",
+    "",
+    "🚨 もし次の症状が出たら",
+    "",
+    "その場合は、病院に行きましょう。",
+    "",
+    "• 強い痛みが続く",
+    "• 意識がぼんやりする",
+    "• 水分が取れなくなる",
+    "",
+    "⸻",
+    "",
+    "🌱 最後に",
+    "",
+    "また不安になったら、いつでもここで聞いてください。",
+    "一人で判断しなくて大丈夫です。",
+  ].join("\n");
+}
+
+function normalizeSummaryBlocks(text) {
+  const hospitalIndicators = [
+    "🏥 Kairoの判断",
+    "病院をおすすめします",
+    "病院に行くことをおすすめします",
+    "病院に行きましょう",
+  ];
+
+  const hospitalHeaders = [
+    "📝 いまの状態を整理します",
+    "⚠️ Kairoが気になっているポイント",
+    "🏥 Kairoの判断",
+    "💬 最後に",
+  ];
+
+  const normalHeaders = [
+    "🟢 まず安心してください",
+    "🤝 今の状態について",
+    "✅ 今すぐやること",
+    "⏳ 今後の見通し",
+    "🚨 もし次の症状が出たら",
+    "🌱 最後に",
+  ];
+
+  const isHospital = hospitalIndicators.some((indicator) => text.includes(indicator));
+  const requiredHeaders = isHospital ? hospitalHeaders : normalHeaders;
+  const hasAllRequired = requiredHeaders.every((header) => text.includes(header));
+
+  if (hasAllRequired) {
+    return text;
+  }
+
+  const anySummaryHeaders = [...hospitalHeaders, ...normalHeaders].filter((header) =>
+    text.includes(header)
+  );
+
+  if (anySummaryHeaders.length === 0) {
+    return text;
+  }
+
+  const firstIndex = Math.min(
+    ...anySummaryHeaders.map((header) => text.indexOf(header)).filter((idx) => idx >= 0)
+  );
+  const baseText = text.slice(0, firstIndex).trim();
+  const fullSummary = buildFullSummary(isHospital);
+
+  return baseText ? `${baseText}\n\n${fullSummary}` : fullSummary;
+}
+
 // Root route - serve index.html
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
@@ -684,14 +828,15 @@ app.post("/api/chat", async (req, res) => {
     });
 
     const aiResponse = completion.choices[0].message.content;
+    const normalizedResponse = normalizeSummaryBlocks(aiResponse);
 
     // Add AI response to history
     conversationHistory[conversationId].push({
       role: "assistant",
-      content: aiResponse,
+      content: normalizedResponse,
     });
 
-    res.json({ response: aiResponse });
+    res.json({ response: normalizedResponse });
   } catch (error) {
     console.error("OpenAI API Error:", error);
     console.error("Error details:", {
