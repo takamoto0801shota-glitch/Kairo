@@ -9,6 +9,7 @@
 
 :root {
     --header-height: 56px;
+    --input-height: 56px;
 }
 
 html, body {
@@ -22,9 +23,6 @@ body {
     font-family: 'Noto Sans JP', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     background-color: #fafafa;
     height: 100vh;
-    display: flex;
-    justify-content: center;
-    align-items: center;
     color: #333;
 }
 
@@ -39,7 +37,7 @@ body {
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
     position: relative;
     overflow: hidden;
-    padding-top: calc(var(--header-height) + env(safe-area-inset-top) + 6px);
+    margin: 0 auto;
 }
 
 .chat-header {
@@ -50,12 +48,12 @@ body {
     text-align: center;
     border-bottom: 1px solid #f0f0f0;
     position: fixed;
-    top: calc(env(safe-area-inset-top) + 6px);
+    top: 0;
     z-index: 10;
     overflow: hidden;
     width: 100%;
     max-width: 600px;
-    height: var(--header-height);
+    height: calc(var(--header-height) + env(safe-area-inset-top));
     left: 0;
     right: 0;
     margin: 0 auto;
@@ -94,7 +92,11 @@ body {
 }
 
 .chat-messages {
-    flex: 1;
+    position: absolute;
+    top: calc(var(--header-height) + env(safe-area-inset-top));
+    bottom: var(--input-height);
+    left: 0;
+    right: 0;
     overflow-y: auto;
     padding: 32px 24px;
     display: flex;
@@ -169,10 +171,15 @@ body {
     padding: 8px;
     border-top: 1px solid #f0f0f0;
     background-color: #ffffff;
-    position: sticky;
+    position: fixed;
     bottom: 0;
     z-index: 10;
     overflow: hidden;
+    height: var(--input-height);
+    left: 0;
+    right: 0;
+    max-width: 600px;
+    margin: 0 auto;
 }
 
 .chat-input {
@@ -272,11 +279,6 @@ body {
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
     border-radius: 0 0 12px 12px;
     width: 100%;
-    display: block !important;
-    opacity: 1 !important;
-    visibility: visible !important;
-    position: relative;
-    z-index: 9999;
 }
 
 .summary-card-content {
