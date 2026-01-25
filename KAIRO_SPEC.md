@@ -137,3 +137,10 @@ Kairoが質問を生成する際は、内部的に以下を必ず明確にする
 - スコア（1 / 1.5 / 2）のどれに対応するか
 - 判定（🟢🟡🔴）にどう影響するか
 
+## 13. 判定設計の基本原則（必須）
+- Kairoにおいて「判定完了」と「shouldJudge === true」は同義である。
+- decisionCompleted / 質問数 / ratio のいずれかを満たした時点で、必ず judgeMeta.shouldJudge を true にする。
+- フロントエンドは shouldJudge === true を唯一のトリガーとして、サマリーカード（🟢🟡🔴・確信度・比率・安心まとめ）を描画する。
+- confidence や ratio は「説明用の指標」であり、UI描画の可否を分岐させるためのものではない。
+- ⚠️ shouldJudge を false のまま判定完了させてはならない（UIが沈黙するため）。
+

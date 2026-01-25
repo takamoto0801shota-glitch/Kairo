@@ -540,6 +540,7 @@ function addSummaryBlock(messageDiv, fullText) {
 function updateSummaryCard(judgeMeta) {
   console.log("[DEBUG] updateSummaryCard entered", judgeMeta);
   const summaryCard = document.getElementById("summaryCard");
+  console.log("[DEBUG] summaryCard element", summaryCard);
   let contentDiv = document.getElementById("summaryCardContent");
   if (!contentDiv) {
     contentDiv = document.createElement("div");
@@ -638,9 +639,8 @@ async function handleUserInput() {
     try {
       // Call OpenAI API
       const data = await callOpenAI(userText);
+      console.log("[DEBUG] full aiResponse", data);
       const aiResponse = data;
-      console.log("[DEBUG] full aiResponse", aiResponse);
-      console.log("[DEBUG] judgeMeta", aiResponse.judgeMeta);
       const aiMessage = aiResponse.message;
 
       // Remove loading message
@@ -652,7 +652,8 @@ async function handleUserInput() {
       // Show AI response immediately
       addMessage(aiMessage);
 
-      if (aiResponse.judgeMeta?.shouldJudge === true) {
+      console.log("[DEBUG] judgeMeta", aiResponse.judgeMeta);
+      if (aiResponse.judgeMeta && aiResponse.judgeMeta.shouldJudge === true) {
         console.log("[DEBUG] force summary render");
         updateSummaryCard(aiResponse.judgeMeta);
       }
