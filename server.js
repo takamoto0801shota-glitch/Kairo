@@ -960,11 +960,13 @@ function judgeDecision(state, summaryRequested, maxQuestions) {
     state.totalScore
   );
   const confidence = state.confidence;
-  const shouldJudge =
-    confidence >= 95 ||
+  const decisionCompleted =
+    state.questionCount >= 5 ||
+    ratio >= 0.8 ||
     state.questionCount >= maxQuestions ||
     summaryRequested ||
     state.finalQuestionPending;
+  const shouldJudge = decisionCompleted;
 
   console.log(
     "[DEBUG] shouldJudge=",
@@ -1240,7 +1242,7 @@ app.post("/api/chat", async (req, res) => {
       questionCount: conversationState[conversationId].questionCount,
     };
     console.log("[DEBUG] response payload", { response: aiResponse, judgeMeta });
-    res.json({ response: aiResponse, judgeMeta });
+    res.json({ message: aiResponse, response: aiResponse, judgeMeta });
   } catch (error) {
     console.error("OpenAI API Error:", error);
     console.error("Error details:", {

@@ -272,6 +272,11 @@ body {
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
     border-radius: 0 0 12px 12px;
     width: 100%;
+    display: block !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    position: relative;
+    z-index: 9999;
 }
 
 .summary-card-content {

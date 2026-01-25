@@ -537,52 +537,27 @@ function addSummaryBlock(messageDiv, fullText) {
 }
 
 // Update summary card (サマリーカードを更新)
-function updateSummaryCard(summary) {
+function updateSummaryCard(judgeMeta) {
+  console.log("[DEBUG] updateSummaryCard entered", judgeMeta);
   const summaryCard = document.getElementById("summaryCard");
-  
-  if (summary && summaryCard) {
-    console.log("[Kairo] renderSummaryCard", { summary });
-    let contentDiv = document.getElementById("summaryCardContent");
-    if (!contentDiv) {
-      contentDiv = document.createElement("div");
-      contentDiv.id = "summaryCardContent";
-      contentDiv.className = "summary-card-content";
-      summaryCard.appendChild(contentDiv);
-    }
-    if (typeof summary === "object" && summary.judgement) {
-      const emoji = summary.judgement;
-      let label = "安心してください";
-      if (emoji === "🟡") {
-        label = "注意して様子を見ましょう";
-      } else if (emoji === "🔴") {
-        label = "病院をおすすめします";
-      }
-      contentDiv.textContent = `${emoji} ${label}`;
-    } else {
-      const summaryText = summary.trim();
-      const emojiMatch = summaryText.match(/[🟢🟡🔴]/);
-      let emoji = emojiMatch ? emojiMatch[0] : '';
-      if (!emoji) {
-        const level = getUrgencyLevel(summaryText);
-        emoji = level === 'high' ? '🔴' : level === 'medium' ? '🟡' : '🟢';
-      }
-      if (emojiMatch) {
-        contentDiv.textContent = summaryText;
-      } else {
-        contentDiv.textContent = `${emoji} ${summaryText}`;
-      }
-    }
-    
-    // サマリーカードを表示
-    summaryCard.style.display = "block";
-  } else if (!summary && summaryCard) {
-    // サマリーがない場合は非表示
-    summaryCard.style.display = "none";
-    const contentDiv = document.getElementById("summaryCardContent");
-    if (contentDiv) {
-      contentDiv.textContent = "";
-    }
+  let contentDiv = document.getElementById("summaryCardContent");
+  if (!contentDiv) {
+    contentDiv = document.createElement("div");
+    contentDiv.id = "summaryCardContent";
+    contentDiv.className = "summary-card-content";
+    summaryCard.appendChild(contentDiv);
   }
+
+  const emoji = judgeMeta?.judgement || "🟢";
+  let label = "安心してください";
+  if (emoji === "🟡") {
+    label = "注意して様子を見ましょう";
+  } else if (emoji === "🔴") {
+    label = "病院をおすすめします";
+  }
+  contentDiv.textContent = `${emoji} ${label}`;
+
+  summaryCard.style.display = "block";
 }
 
 // Show initial message
@@ -663,9 +638,10 @@ async function handleUserInput() {
     try {
       // Call OpenAI API
       const data = await callOpenAI(userText);
-      console.log("[DEBUG] response data", data);
-      console.log("[DEBUG] responseData.judgeMeta", data.judgeMeta);
-      const aiResponse = data.response;
+      const aiResponse = data;
+      console.log("[DEBUG] full aiResponse", aiResponse);
+      console.log("[DEBUG] judgeMeta", aiResponse.judgeMeta);
+      const aiMessage = aiResponse.message;
 
       // Remove loading message
       const loadingMsg = document.getElementById(loadingId);
@@ -674,11 +650,11 @@ async function handleUserInput() {
       }
 
       // Show AI response immediately
-      addMessage(aiResponse);
+      addMessage(aiMessage);
 
-      if (data.judgeMeta && data.judgeMeta.shouldJudge) {
-        console.log("[DEBUG] force summary render", { judgeMeta: data.judgeMeta });
-        updateSummaryCard(data.judgeMeta);
+      if (aiResponse.judgeMeta?.shouldJudge === true) {
+        console.log("[DEBUG] force summary render");
+        updateSummaryCard(aiResponse.judgeMeta);
       }
       } catch (error) {
         // Remove loading message
