@@ -806,6 +806,10 @@ function buildRepairPrompt(requiredLevel) {
 - 共感・寄り添いは必ず入れる
 - 緊急度は必ず「${requiredLevel}」に合わせる
 - 選択肢や箇条書きの記号は必ず「・」を使う
+- ❗どのブロックも欠けてはいけない（1ブロックのみの出力は禁止）
+- ❗見出しは必ず以下を全て含める（順番厳守）：
+  - 🟢 まず安心してください / 🤝 今の状態について / ✅ 今すぐやること（これだけでOK） / ⏳ 今後の見通し / 🚨 もし次の症状が出たら / 🌱 最後に
+  - または 📝 いまの状態を整理します（メモ） / ⚠️ Kairoが気になっているポイント / 🏥 Kairoの判断 / 💬 最後に
 
 🤝 今の状態について（順番厳守）：
 1) ユーザーのつらさ・不安への一文の寄り添い
@@ -1133,6 +1137,19 @@ app.post("/api/chat", async (req, res) => {
         max_tokens: 1000,
       });
       aiResponse = forced.choices[0].message.content;
+      if (!hasAllSummaryBlocks(aiResponse)) {
+        const strictMessages = [
+          { role: "system", content: buildRepairPrompt(level) + "\n\n不足ブロックがある場合は必ず補完して、全ブロックを完成させてください。" },
+          ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
+        ];
+        const strict = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: strictMessages,
+          temperature: 0.7,
+          max_tokens: 1000,
+        });
+        aiResponse = strict.choices[0].message.content;
+      }
       conversationState[conversationId].finalQuestionPending = false;
     }
 
