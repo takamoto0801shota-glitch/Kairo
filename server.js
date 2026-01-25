@@ -752,6 +752,36 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 // Store conversation history (in production, use a database)
 const conversationHistory = {};
 
+const REPAIR_PROMPT = `
+あなたはKairoです。以下の会話内容を踏まえ、最後に出すべき「まとめブロック」を**必ず全ブロック**で出力してください。
+
+要件：
+- 出力はまとめブロックのみ（質問や追加の会話はしない）
+- ブロック構成は必ずフルセット
+  - 様子見/市販薬の場合：🟢→🤝→✅→⏳→🚨→🌱 の6ブロック
+  - 病院推奨の場合：📝→⚠️→🏥→💬 の4ブロック
+- 文章はテンプレ禁止。会話内容に即して自然に書く
+- 断定しすぎない表現（「現時点では」「今の情報を見る限り」など）を使う
+- 質問・判断の丸投げは禁止
+- 共感・寄り添いは必ず入れる
+`;
+
+function isHospitalFlow(text) {
+  return (
+    text.includes("🏥 Kairoの判断") ||
+    text.includes("病院をおすすめします") ||
+    text.includes("病院に行くことをおすすめします") ||
+    text.includes("病院に行きましょう")
+  );
+}
+
+function hasAllSummaryBlocks(text) {
+  const hospitalHeaders = ["📝 いまの状態を整理します", "⚠️ Kairoが気になっているポイント", "🏥 Kairoの判断", "💬 最後に"];
+  const normalHeaders = ["🟢 まず安心してください", "🤝 今の状態について", "✅ 今すぐやること", "⏳ 今後の見通し", "🚨 もし次の症状が出たら", "🌱 最後に"];
+  const required = isHospitalFlow(text) ? hospitalHeaders : normalHeaders;
+  return required.every((header) => text.includes(header));
+}
+
 // Root route - serve index.html
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
@@ -793,7 +823,22 @@ app.post("/api/chat", async (req, res) => {
       max_tokens: 1000,
     });
 
-    const aiResponse = completion.choices[0].message.content;
+    let aiResponse = completion.choices[0].message.content;
+
+    // まとめブロックが欠けている場合は、修正用の再生成を行う
+    if (!hasAllSummaryBlocks(aiResponse)) {
+      const repairMessages = [
+        { role: "system", content: REPAIR_PROMPT },
+        ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
+      ];
+      const repaired = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: repairMessages,
+        temperature: 0.7,
+        max_tokens: 1000,
+      });
+      aiResponse = repaired.choices[0].message.content;
+    }
 
     // Add AI response to history
     conversationHistory[conversationId].push({
