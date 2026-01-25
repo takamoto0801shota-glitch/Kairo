@@ -1232,7 +1232,15 @@ app.post("/api/chat", async (req, res) => {
       content: aiResponse,
     });
 
-    res.json({ response: aiResponse });
+    const judgeMeta = {
+      judgement: level,
+      confidence,
+      ratio: Number(ratio.toFixed(2)),
+      shouldJudge,
+      questionCount: conversationState[conversationId].questionCount,
+    };
+    console.log("[DEBUG] response payload", { response: aiResponse, judgeMeta });
+    res.json({ response: aiResponse, judgeMeta });
   } catch (error) {
     console.error("OpenAI API Error:", error);
     console.error("Error details:", {

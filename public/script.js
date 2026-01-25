@@ -612,7 +612,7 @@ async function callOpenAI(message) {
     }
 
     const data = await response.json();
-    return data.response;
+    return data;
   } catch (error) {
     console.error("API呼び出しエラー:", error);
     console.error("エラーの詳細:", {
@@ -651,7 +651,9 @@ async function handleUserInput() {
 
     try {
       // Call OpenAI API
-      const aiResponse = await callOpenAI(userText);
+      const data = await callOpenAI(userText);
+      console.log("[DEBUG] response data", data);
+      const aiResponse = data.response;
 
       // Remove loading message
       const loadingMsg = document.getElementById(loadingId);
@@ -661,6 +663,14 @@ async function handleUserInput() {
 
       // Show AI response immediately
       addMessage(aiResponse);
+
+      if (data.judgeMeta && data.judgeMeta.shouldJudge) {
+        const summary = extractSummary(aiResponse);
+        console.log("[DEBUG] force summary render", { summary, judgeMeta: data.judgeMeta });
+        if (summary) {
+          updateSummaryCard(summary);
+        }
+      }
       } catch (error) {
         // Remove loading message
         const loadingMsg = document.getElementById(loadingId);
