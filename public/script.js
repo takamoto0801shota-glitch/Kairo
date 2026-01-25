@@ -549,17 +549,28 @@ function updateSummaryCard(summary) {
       contentDiv.className = "summary-card-content";
       summaryCard.appendChild(contentDiv);
     }
-    const summaryText = summary.trim();
-    const emojiMatch = summaryText.match(/[🟢🟡🔴]/);
-    let emoji = emojiMatch ? emojiMatch[0] : '';
-    if (!emoji) {
-      const level = getUrgencyLevel(summaryText);
-      emoji = level === 'high' ? '🔴' : level === 'medium' ? '🟡' : '🟢';
-    }
-    if (emojiMatch) {
-      contentDiv.textContent = summaryText;
+    if (typeof summary === "object" && summary.judgement) {
+      const emoji = summary.judgement;
+      let label = "安心してください";
+      if (emoji === "🟡") {
+        label = "注意して様子を見ましょう";
+      } else if (emoji === "🔴") {
+        label = "病院をおすすめします";
+      }
+      contentDiv.textContent = `${emoji} ${label}`;
     } else {
-      contentDiv.textContent = `${emoji} ${summaryText}`;
+      const summaryText = summary.trim();
+      const emojiMatch = summaryText.match(/[🟢🟡🔴]/);
+      let emoji = emojiMatch ? emojiMatch[0] : '';
+      if (!emoji) {
+        const level = getUrgencyLevel(summaryText);
+        emoji = level === 'high' ? '🔴' : level === 'medium' ? '🟡' : '🟢';
+      }
+      if (emojiMatch) {
+        contentDiv.textContent = summaryText;
+      } else {
+        contentDiv.textContent = `${emoji} ${summaryText}`;
+      }
     }
     
     // サマリーカードを表示
@@ -653,6 +664,7 @@ async function handleUserInput() {
       // Call OpenAI API
       const data = await callOpenAI(userText);
       console.log("[DEBUG] response data", data);
+      console.log("[DEBUG] responseData.judgeMeta", data.judgeMeta);
       const aiResponse = data.response;
 
       // Remove loading message
@@ -665,11 +677,8 @@ async function handleUserInput() {
       addMessage(aiResponse);
 
       if (data.judgeMeta && data.judgeMeta.shouldJudge) {
-        const summary = extractSummary(aiResponse);
-        console.log("[DEBUG] force summary render", { summary, judgeMeta: data.judgeMeta });
-        if (summary) {
-          updateSummaryCard(summary);
-        }
+        console.log("[DEBUG] force summary render", { judgeMeta: data.judgeMeta });
+        updateSummaryCard(data.judgeMeta);
       }
       } catch (error) {
         // Remove loading message
