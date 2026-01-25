@@ -374,6 +374,7 @@ function extractSummary(text) {
 }
 
 // Add message to chat (AIは即時表示)
+let isCollecting = true;
 function addMessage(text, isUser = false, save = true) {
   const messagesContainer = document.getElementById("chatMessages");
   const messageDiv = document.createElement("div");
@@ -423,6 +424,9 @@ function addMessage(text, isUser = false, save = true) {
     
     // 判断が完了している場合は、必ずまとめブロックを追加
     if (decisionCompleted) {
+      console.log("[DEBUG] isCollecting will be set false");
+      isCollecting = false;
+      console.log("[Kairo] decision completed, addSummaryBlock", { decisionCompleted });
       addSummaryBlock(messageDiv, text);
     }
     
@@ -434,6 +438,7 @@ function addMessage(text, isUser = false, save = true) {
     // 安心サマリーを抽出して表示
     const summary = extractSummary(text);
     if (summary) {
+      console.log("[Kairo] updateSummaryCard called", { summary, isCollecting });
       updateSummaryCard(summary);
     }
   };
@@ -536,6 +541,7 @@ function updateSummaryCard(summary) {
   const summaryCard = document.getElementById("summaryCard");
   
   if (summary && summaryCard) {
+    console.log("[Kairo] renderSummaryCard", { summary });
     let contentDiv = document.getElementById("summaryCardContent");
     if (!contentDiv) {
       contentDiv = document.createElement("div");

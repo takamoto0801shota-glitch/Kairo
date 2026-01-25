@@ -953,6 +953,35 @@ function computeUrgencyLevel(questionCount, totalScore) {
   return { ratio, level: "🟢" };
 }
 
+function judgeDecision(state, summaryRequested, maxQuestions) {
+  console.log("[DEBUG] judge function entered");
+  const { ratio, level } = computeUrgencyLevel(
+    state.questionCount,
+    state.totalScore
+  );
+  const confidence = state.confidence;
+  const shouldJudge =
+    confidence >= 95 ||
+    state.questionCount >= maxQuestions ||
+    summaryRequested ||
+    state.finalQuestionPending;
+
+  console.log(
+    "[DEBUG] shouldJudge=",
+    shouldJudge,
+    "questionCount=",
+    state.questionCount,
+    "pain=",
+    state.confidenceContributions.pain_strength ? "captured" : "missing",
+    "duration=",
+    state.confidenceContributions.duration ? "captured" : "missing",
+    "worsening=",
+    state.confidenceContributions.worsening ? "captured" : "missing"
+  );
+
+  return { ratio, level, confidence, shouldJudge };
+}
+
 function shouldAvoidSummary(text, questionCount, minQuestions, maxQuestions) {
   if (questionCount >= minQuestions || questionCount >= maxQuestions) {
     return false;
@@ -1046,11 +1075,16 @@ app.post("/api/chat", async (req, res) => {
     });
 
     // Call OpenAI API
-    const { ratio, level } = computeUrgencyLevel(
-      conversationState[conversationId].questionCount,
-      conversationState[conversationId].totalScore
+    const minQuestions = 5;
+    const maxQuestions = 9;
+    const currentQuestionCount = conversationState[conversationId].questionCount;
+    const summaryRequested = userAskedSummary(message);
+    const finalQuestionPending = conversationState[conversationId].finalQuestionPending;
+    const { ratio, level, confidence, shouldJudge } = judgeDecision(
+      conversationState[conversationId],
+      summaryRequested,
+      maxQuestions
     );
-    const confidence = conversationState[conversationId].confidence;
     const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n合計スコア: ${conversationState[conversationId].totalScore}\n最大スコア: ${conversationState[conversationId].questionCount * 2}\n緊急度比率: ${ratio.toFixed(2)}\n判定: ${level}\n確信度: ${confidence}%\n※スコアや計算はユーザーに表示しないこと。最終判断は必ずこの判定に従うこと。`;
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini", // Cost-effective model
@@ -1064,19 +1098,8 @@ app.post("/api/chat", async (req, res) => {
 
     let aiResponse = completion.choices[0].message.content;
 
-    const minQuestions = 5;
-    const maxQuestions = 9;
-    const currentQuestionCount = conversationState[conversationId].questionCount;
-    const summaryRequested = userAskedSummary(message);
-    const finalQuestionPending = conversationState[conversationId].finalQuestionPending;
-    const triggerReached =
-      confidence >= 95 ||
-      currentQuestionCount >= maxQuestions ||
-      summaryRequested ||
-      finalQuestionPending;
-
     // 判定確定トリガー発動時は、まとめを強制生成
-    if (triggerReached) {
+    if (shouldJudge) {
       const { level } = computeUrgencyLevel(
         conversationState[conversationId].questionCount,
         conversationState[conversationId].totalScore
@@ -1097,7 +1120,7 @@ app.post("/api/chat", async (req, res) => {
 
     // まとめが早すぎる／助言が混ざる場合は質問に差し戻す
     if (
-      !triggerReached &&
+      !shouldJudge &&
       shouldAvoidSummary(aiResponse, currentQuestionCount, minQuestions, maxQuestions)
     ) {
       const questionOnlyPrompt = `
@@ -1136,7 +1159,7 @@ app.post("/api/chat", async (req, res) => {
 
     // 最後の質問は「最後に〜」で始める（AIが終盤と判断した場合）
     if (
-      !triggerReached &&
+      !shouldJudge &&
       currentQuestionCount >= minQuestions &&
       confidence >= 80 &&
       isQuestionResponse(aiResponse) &&
