@@ -1134,7 +1134,42 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].lastQuestionType = detectQuestionType(aiResponse);
     }
 
-    // 最後の質問フラグを立てる（AIが最後の質問と判断した場合のみ）
+    // 最後の質問は「最後に〜」で始める（AIが終盤と判断した場合）
+    if (
+      !triggerReached &&
+      currentQuestionCount >= minQuestions &&
+      confidence >= 80 &&
+      isQuestionResponse(aiResponse) &&
+      !hasFinalQuestionPrefix(aiResponse)
+    ) {
+      const finalQuestionPrompt = `
+あなたはKairoです。今は最後の質問です。
+必ず以下を守って、次の質問だけを出してください：
+- 文頭は必ず「最後に」または「最後の質問です」から始める
+- 質問は1つだけ
+- 必ず選択式（3択）
+- 選択肢は意味のある具体表現で並べる（低/中/高は禁止）
+- 記号は必ず「・」を使う
+- 判断・助言・原因推測は一切入れない
+- まとめブロックは出さない
+`;
+      const finalMessages = [
+        { role: "system", content: finalQuestionPrompt },
+        ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
+      ];
+      const finalAsk = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          ...finalMessages,
+          { role: "system", content: scoreContext },
+        ],
+        temperature: 0.7,
+        max_tokens: 400,
+      });
+      aiResponse = finalAsk.choices[0].message.content;
+    }
+
+    // 最後の質問フラグを立てる（「最後に〜」が出たら次でまとめ）
     if (
       currentQuestionCount >= minQuestions &&
       isQuestionResponse(aiResponse) &&
