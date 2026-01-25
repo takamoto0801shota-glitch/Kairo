@@ -401,13 +401,14 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 4. 「大丈夫」「安心してください」などの表現は判断の後にのみ使用可能。
 5. どんな症状や場合でも、必ず共感・寄り添いの一文を入れて「一人じゃない」と感じられるようにする。
 
-【質問数の下限 - 最重要】
+【質問数の下限・上限 - 最重要】
 - 判断・まとめを出す前に、質問は**最低4回**行う。
 - ただし急変フラグ = true の場合も、緊急性確認を最優先しつつ、必要情報を4問まで必ず集める。
 - 緊急性が低そうだと判断した場合は、質問数を**最低6回**に増やし、途中で寄り添い文を必ず挟む。
  - いかなる場合も、質問は**最低5回**行う。
  - 質問回数は固定しない。AIが判断に十分だと感じるまで質問してよい。
  - ただし最低質問回数は5回。
+ - 質問の上限は9回。9回に達したら、これ以上質問せず必ずまとめブロックを出す。
 
 【最後の質問の宣言 - 最重要】
 - まとめブロック直前の「最後の質問」は、必ず「最後に〜」「最後の質問です」などの前置きから始める。
@@ -881,8 +882,8 @@ function computeUrgencyLevel(questionCount, totalScore) {
   return { ratio, level: "🟢" };
 }
 
-function shouldAvoidSummary(text, questionCount, minQuestions) {
-  if (questionCount >= minQuestions) {
+function shouldAvoidSummary(text, questionCount, minQuestions, maxQuestions) {
+  if (questionCount >= minQuestions || questionCount >= maxQuestions) {
     return false;
   }
   const adviceIndicators = [
@@ -971,10 +972,11 @@ app.post("/api/chat", async (req, res) => {
     let aiResponse = completion.choices[0].message.content;
 
     const minQuestions = 5;
+    const maxQuestions = 9;
     const currentQuestionCount = conversationState[conversationId].questionCount;
 
     // まとめが早すぎる／助言が混ざる場合は質問に差し戻す
-    if (shouldAvoidSummary(aiResponse, currentQuestionCount, minQuestions)) {
+    if (shouldAvoidSummary(aiResponse, currentQuestionCount, minQuestions, maxQuestions)) {
       const questionOnlyPrompt = `
 あなたはKairoです。今は情報収集中のフェーズです。
 必ず以下を守って、次の質問だけを出してください：
@@ -1005,6 +1007,25 @@ app.post("/api/chat", async (req, res) => {
     const options = extractOptionsFromAssistant(aiResponse);
     if (options.length === 3) {
       conversationState[conversationId].lastOptions = options;
+    }
+
+    // 質問上限に達しているのに質問が返った場合は、まとめを強制生成
+    if (currentQuestionCount >= maxQuestions && isQuestionResponse(aiResponse)) {
+      const { level } = computeUrgencyLevel(
+        conversationState[conversationId].questionCount,
+        conversationState[conversationId].totalScore
+      );
+      const summaryOnlyMessages = [
+        { role: "system", content: buildRepairPrompt(level) },
+        ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
+      ];
+      const forced = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: summaryOnlyMessages,
+        temperature: 0.7,
+        max_tokens: 1000,
+      });
+      aiResponse = forced.choices[0].message.content;
     }
 
     // まとめブロックが欠けている場合は、修正用の再生成を行う（質問数を満たした後のみ）
