@@ -847,6 +847,18 @@ function normalizeAnswerText(text) {
   return text.replace(/\s+/g, "").trim();
 }
 
+function userAskedSummary(message) {
+  return /まとめ|要約|サマリー/.test(message || "");
+}
+
+function hasFinalQuestionPrefix(text) {
+  const firstLine = (text || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0) || "";
+  return firstLine.startsWith("最後に") || firstLine.startsWith("最後の質問");
+}
+
 function matchAnswerToOption(answer, options) {
   const normalizedAnswer = normalizeAnswerText(answer);
   if (!normalizedAnswer) {
@@ -933,6 +945,7 @@ app.post("/api/chat", async (req, res) => {
         questionCount: 0,
         totalScore: 0,
         lastOptions: [],
+        finalQuestionPending: false,
       };
     }
 
@@ -942,11 +955,10 @@ app.post("/api/chat", async (req, res) => {
         message,
         conversationState[conversationId].lastOptions
       );
-      if (selectedIndex !== null) {
-        const score = selectedIndex === 0 ? 1.0 : selectedIndex === 1 ? 1.5 : 2.0;
-        conversationState[conversationId].questionCount += 1;
-        conversationState[conversationId].totalScore += score;
-      }
+      const score =
+        selectedIndex === 0 ? 1.0 : selectedIndex === 1 ? 1.5 : selectedIndex === 2 ? 2.0 : 1.5;
+      conversationState[conversationId].questionCount += 1;
+      conversationState[conversationId].totalScore += score;
       conversationState[conversationId].lastOptions = [];
     }
 
@@ -977,9 +989,35 @@ app.post("/api/chat", async (req, res) => {
     const minQuestions = 5;
     const maxQuestions = 9;
     const currentQuestionCount = conversationState[conversationId].questionCount;
+    const summaryRequested = userAskedSummary(message);
+    const finalQuestionPending = conversationState[conversationId].finalQuestionPending;
+
+    // まとめ要求・質問上限・最後の質問後なら、まとめを強制生成
+    if (summaryRequested || currentQuestionCount >= maxQuestions || finalQuestionPending) {
+      const { level } = computeUrgencyLevel(
+        conversationState[conversationId].questionCount,
+        conversationState[conversationId].totalScore
+      );
+      const summaryOnlyMessages = [
+        { role: "system", content: buildRepairPrompt(level) },
+        ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
+      ];
+      const forced = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: summaryOnlyMessages,
+        temperature: 0.7,
+        max_tokens: 1000,
+      });
+      aiResponse = forced.choices[0].message.content;
+      conversationState[conversationId].finalQuestionPending = false;
+    }
 
     // まとめが早すぎる／助言が混ざる場合は質問に差し戻す
-    if (shouldAvoidSummary(aiResponse, currentQuestionCount, minQuestions, maxQuestions)) {
+    if (
+      !summaryRequested &&
+      !finalQuestionPending &&
+      shouldAvoidSummary(aiResponse, currentQuestionCount, minQuestions, maxQuestions)
+    ) {
       const questionOnlyPrompt = `
 あなたはKairoです。今は情報収集中のフェーズです。
 必ず以下を守って、次の質問だけを出してください：
@@ -1011,47 +1049,38 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].lastOptions = options;
     }
 
-    // 質問上限に達しているのに質問が返った場合は、まとめを強制生成
-    if (currentQuestionCount >= maxQuestions && isQuestionResponse(aiResponse)) {
-      const { level } = computeUrgencyLevel(
-        conversationState[conversationId].questionCount,
-        conversationState[conversationId].totalScore
-      );
-      const summaryOnlyMessages = [
-        { role: "system", content: buildRepairPrompt(level) },
-        ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
-      ];
-      const forced = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: summaryOnlyMessages,
-        temperature: 0.7,
-        max_tokens: 1000,
-      });
-      aiResponse = forced.choices[0].message.content;
+    // 最後の質問フラグを立てる（AIが最後の質問と判断した場合のみ）
+    if (
+      currentQuestionCount >= minQuestions &&
+      isQuestionResponse(aiResponse) &&
+      hasFinalQuestionPrefix(aiResponse)
+    ) {
+      conversationState[conversationId].finalQuestionPending = true;
+    } else if (isQuestionResponse(aiResponse)) {
+      conversationState[conversationId].finalQuestionPending = false;
     }
 
-    // まとめブロックが欠けている場合は、修正用の再生成を行う（質問数を満たした後のみ）
+    // まとめブロックが欠けている/出ていない場合は再生成（質問数を満たした後のみ）
     const updatedQuestionCount = conversationState[conversationId].questionCount;
     const updatedLevel = computeUrgencyLevel(
       updatedQuestionCount,
       conversationState[conversationId].totalScore
     ).level;
-    if (
-      updatedQuestionCount >= minQuestions &&
-      hasAnySummaryBlocks(aiResponse) &&
-      !hasAllSummaryBlocks(aiResponse)
-    ) {
-      const repairMessages = [
-        { role: "system", content: buildRepairPrompt(updatedLevel) },
-        ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
-      ];
-      const repaired = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: repairMessages,
-        temperature: 0.7,
-        max_tokens: 1000,
-      });
-      aiResponse = repaired.choices[0].message.content;
+    if (updatedQuestionCount >= minQuestions && !isQuestionResponse(aiResponse)) {
+      const needsRepair = !hasAllSummaryBlocks(aiResponse);
+      if (needsRepair) {
+        const repairMessages = [
+          { role: "system", content: buildRepairPrompt(updatedLevel) },
+          ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
+        ];
+        const repaired = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: repairMessages,
+          temperature: 0.7,
+          max_tokens: 1000,
+        });
+        aiResponse = repaired.choices[0].message.content;
+      }
     }
 
     // Add AI response to history
