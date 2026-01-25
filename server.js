@@ -85,6 +85,7 @@ AI：「頭が痛いのはつらいですよね。
 - 専門用語は一切使わない
 - やさしい言葉だけを使う
 - kairoはユーザーの味方になる
+- 質問はテンプレ化しない（毎回同じ文面を使わない）
 
 【まとめ前の出力制限 - 最重要】
 - まとめブロックを出す前の返答は、**共感・寄り添い + 情報収集の質問のみ**に限定する。
@@ -409,6 +410,12 @@ contextFlag = true の場合、次のKairoの発話のどこかで
  - 質問回数は固定しない。AIが判断に十分だと感じるまで質問してよい。
  - ただし最低質問回数は5回。
  - 質問の上限は9回。9回に達したら、これ以上質問せず必ずまとめブロックを出す。
+
+【判定確定トリガー - 最重要】
+- 判定確信度（0〜100%）を内部で更新し、以下のいずれかで質問フェーズを強制終了する：
+  - 判定確信度が85%以上
+  - 質問回数が上限（9回）に達した場合
+- トリガー発動後は追加質問を一切行わず、必ず🟢🟡🔴の判定とまとめブロックを出す。
 
 【最後の質問の宣言 - 最重要】
 - まとめブロック直前の「最後の質問」は、必ず「最後に〜」「最後の質問です」などの前置きから始める。
@@ -843,6 +850,38 @@ function isQuestionResponse(text) {
   return extractOptionsFromAssistant(text).length === 3;
 }
 
+function detectQuestionType(text) {
+  const normalized = (text || "").replace(/\s+/g, "");
+  if (normalized.match(/痛みの強さ|どのくらい痛い|我慢できる|動けないほど/)) {
+    return "pain_strength";
+  }
+  if (normalized.match(/悪化|ひどくなる|強くなる|増えている|だんだん/)) {
+    return "worsening";
+  }
+  if (normalized.match(/いつから|どのくらい前|何時間前|経過時間/)) {
+    return "duration";
+  }
+  if (normalized.match(/日常生活|眠れない|動ける|支障|仕事|学校|活動/)) {
+    return "daily_impact";
+  }
+  if (normalized.match(/発熱|熱|吐き気|嘔吐|しびれ|めまい|ふらつき/)) {
+    return "associated_symptoms";
+  }
+  if (normalized.match(/原因|きっかけ|思い当たる|普段と違う/)) {
+    return "cause";
+  }
+  return "other";
+}
+
+const CONFIDENCE_CONTRIBUTIONS = {
+  pain_strength: 25,
+  worsening: 20,
+  duration: 20,
+  daily_impact: 15,
+  associated_symptoms: 5,
+  cause: 10,
+};
+
 function normalizeAnswerText(text) {
   return text.replace(/\s+/g, "").trim();
 }
@@ -946,6 +985,9 @@ app.post("/api/chat", async (req, res) => {
         totalScore: 0,
         lastOptions: [],
         finalQuestionPending: false,
+        confidence: 0,
+        confidenceContributions: {},
+        lastQuestionType: null,
       };
     }
 
@@ -960,6 +1002,19 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].questionCount += 1;
       conversationState[conversationId].totalScore += score;
       conversationState[conversationId].lastOptions = [];
+
+      // 確信度の更新（質問タイプごとの寄与度）
+      const type = conversationState[conversationId].lastQuestionType;
+      if (type && CONFIDENCE_CONTRIBUTIONS[type]) {
+        if (!conversationState[conversationId].confidenceContributions[type]) {
+          conversationState[conversationId].confidenceContributions[type] = true;
+          conversationState[conversationId].confidence += CONFIDENCE_CONTRIBUTIONS[type];
+          if (conversationState[conversationId].confidence > 100) {
+            conversationState[conversationId].confidence = 100;
+          }
+        }
+      }
+      conversationState[conversationId].lastQuestionType = null;
     }
 
     // Add user message to history
@@ -973,7 +1028,8 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].questionCount,
       conversationState[conversationId].totalScore
     );
-    const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n合計スコア: ${conversationState[conversationId].totalScore}\n最大スコア: ${conversationState[conversationId].questionCount * 2}\n緊急度比率: ${ratio.toFixed(2)}\n判定: ${level}\n※スコアや計算はユーザーに表示しないこと。最終判断は必ずこの判定に従うこと。`;
+    const confidence = conversationState[conversationId].confidence;
+    const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n合計スコア: ${conversationState[conversationId].totalScore}\n最大スコア: ${conversationState[conversationId].questionCount * 2}\n緊急度比率: ${ratio.toFixed(2)}\n判定: ${level}\n確信度: ${confidence}%\n※スコアや計算はユーザーに表示しないこと。最終判断は必ずこの判定に従うこと。`;
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini", // Cost-effective model
       messages: [
@@ -991,9 +1047,14 @@ app.post("/api/chat", async (req, res) => {
     const currentQuestionCount = conversationState[conversationId].questionCount;
     const summaryRequested = userAskedSummary(message);
     const finalQuestionPending = conversationState[conversationId].finalQuestionPending;
+    const triggerReached =
+      confidence >= 95 ||
+      currentQuestionCount >= maxQuestions ||
+      summaryRequested ||
+      finalQuestionPending;
 
-    // まとめ要求・質問上限・最後の質問後なら、まとめを強制生成
-    if (summaryRequested || currentQuestionCount >= maxQuestions || finalQuestionPending) {
+    // 判定確定トリガー発動時は、まとめを強制生成
+    if (triggerReached) {
       const { level } = computeUrgencyLevel(
         conversationState[conversationId].questionCount,
         conversationState[conversationId].totalScore
@@ -1014,8 +1075,7 @@ app.post("/api/chat", async (req, res) => {
 
     // まとめが早すぎる／助言が混ざる場合は質問に差し戻す
     if (
-      !summaryRequested &&
-      !finalQuestionPending &&
+      !triggerReached &&
       shouldAvoidSummary(aiResponse, currentQuestionCount, minQuestions, maxQuestions)
     ) {
       const questionOnlyPrompt = `
@@ -1043,10 +1103,11 @@ app.post("/api/chat", async (req, res) => {
       aiResponse = reask.choices[0].message.content;
     }
 
-    // 次の質問の選択肢を保存
+    // 次の質問の選択肢と質問タイプを保存
     const options = extractOptionsFromAssistant(aiResponse);
     if (options.length === 3) {
       conversationState[conversationId].lastOptions = options;
+      conversationState[conversationId].lastQuestionType = detectQuestionType(aiResponse);
     }
 
     // 最後の質問フラグを立てる（AIが最後の質問と判断した場合のみ）
