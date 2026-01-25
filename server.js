@@ -406,6 +406,8 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 - ただし急変フラグ = true の場合も、緊急性確認を最優先しつつ、必要情報を4問まで必ず集める。
 - 緊急性が低そうだと判断した場合は、質問数を**最低6回**に増やし、途中で寄り添い文を必ず挟む。
  - いかなる場合も、質問は**最低5回**行う。
+ - 質問回数は固定しない。AIが判断に十分だと感じるまで質問してよい。
+ - ただし最低質問回数は5回。
 
 【最後の質問の宣言 - 最重要】
 - まとめブロック直前の「最後の質問」は、必ず「最後に〜」「最後の質問です」などの前置きから始める。
@@ -440,6 +442,21 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 - 「今は緊急性は低そう」
 - 症状に応じた市販薬のカテゴリ＋具体例1つ
 - 今夜やることは1〜2個だけ
+
+【緊急度判定：スコア比率方式 - 最重要】
+- すべての質問が終了した後にのみ、緊急度を判定する（途中で結論を出さない）。
+- 最終判定は必ず1回のみ表示する。
+- 各質問は必ず3択で提示し、上から「低→中→高」の順で緊急度が上がるようにする。
+- 各選択肢の内部スコアは以下：
+  - 1つ目：1.0
+  - 2つ目：1.5
+  - 3つ目：2.0
+- ユーザーにはスコアや計算過程を一切表示しない。
+- 合計スコア ÷（質問回数 × 2）で「緊急度比率」を算出する。
+- 判定基準：
+  - 0.8〜1.0 → 🔴 病院受診をすすめる
+  - 0.6〜0.79 → 🟡 市販薬＋自宅ケアを具体的に提示
+  - 0.0〜0.59 → 🟢 様子見
 
 【強制拾い条件 - 最重要】
 以下の語がユーザー発言に含まれる場合、次のKairo発話で必ず1回は感情に寄り添う文を入れる：
@@ -755,7 +772,8 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 const conversationHistory = {};
 const conversationState = {};
 
-const REPAIR_PROMPT = `
+function buildRepairPrompt(requiredLevel) {
+  return `
 あなたはKairoです。以下の会話内容を踏まえ、最後に出すべき「まとめブロック」を**必ず全ブロック**で出力してください。
 
 要件：
@@ -767,7 +785,9 @@ const REPAIR_PROMPT = `
 - 断定しすぎない表現（「現時点では」「今の情報を見る限り」など）を使う
 - 質問・判断の丸投げは禁止
 - 共感・寄り添いは必ず入れる
+- 緊急度は必ず「${requiredLevel}」に合わせる
 `;
+}
 
 function isHospitalFlow(text) {
   return (
@@ -800,8 +820,65 @@ function hasAllSummaryBlocks(text) {
   return required.every((header) => text.includes(header));
 }
 
+function extractOptionsFromAssistant(text) {
+  const options = [];
+  const lines = text.split("\n");
+  for (const line of lines) {
+    const match = line.match(/^[\s　]*[•・]\s*(.+)$/);
+    if (match && match[1]) {
+      options.push(match[1].trim());
+    }
+    if (options.length >= 3) {
+      break;
+    }
+  }
+  return options.length === 3 ? options : [];
+}
+
 function isQuestionResponse(text) {
-  return (text.includes("？") || text.includes("?")) && text.includes("•");
+  return extractOptionsFromAssistant(text).length === 3;
+}
+
+function normalizeAnswerText(text) {
+  return text.replace(/\s+/g, "").trim();
+}
+
+function matchAnswerToOption(answer, options) {
+  const normalizedAnswer = normalizeAnswerText(answer);
+  if (!normalizedAnswer) {
+    return null;
+  }
+
+  const indexByNumber = (() => {
+    if (/[1１]/.test(normalizedAnswer) || normalizedAnswer.includes("一番上") || normalizedAnswer.includes("上")) return 0;
+    if (/[2２]/.test(normalizedAnswer) || normalizedAnswer.includes("真ん中") || normalizedAnswer.includes("中")) return 1;
+    if (/[3３]/.test(normalizedAnswer) || normalizedAnswer.includes("一番下") || normalizedAnswer.includes("下")) return 2;
+    return null;
+  })();
+
+  if (indexByNumber !== null) {
+    return indexByNumber;
+  }
+
+  for (let i = 0; i < options.length; i += 1) {
+    const normalizedOption = normalizeAnswerText(options[i]);
+    if (normalizedOption && normalizedAnswer.includes(normalizedOption)) {
+      return i;
+    }
+  }
+
+  return null;
+}
+
+function computeUrgencyLevel(questionCount, totalScore) {
+  if (questionCount <= 0) {
+    return { ratio: 0, level: "🟢" };
+  }
+  const maxScore = questionCount * 2;
+  const ratio = totalScore / maxScore;
+  if (ratio >= 0.8) return { ratio, level: "🔴" };
+  if (ratio >= 0.6) return { ratio, level: "🟡" };
+  return { ratio, level: "🟢" };
 }
 
 function shouldAvoidSummary(text, questionCount, minQuestions) {
@@ -848,7 +925,25 @@ app.post("/api/chat", async (req, res) => {
       ];
     }
     if (!conversationState[conversationId]) {
-      conversationState[conversationId] = { questionCount: 0 };
+      conversationState[conversationId] = {
+        questionCount: 0,
+        totalScore: 0,
+        lastOptions: [],
+      };
+    }
+
+    // ユーザー回答のスコアを集計
+    if (conversationState[conversationId].lastOptions.length === 3) {
+      const selectedIndex = matchAnswerToOption(
+        message,
+        conversationState[conversationId].lastOptions
+      );
+      if (selectedIndex !== null) {
+        const score = selectedIndex === 0 ? 1.0 : selectedIndex === 1 ? 1.5 : 2.0;
+        conversationState[conversationId].questionCount += 1;
+        conversationState[conversationId].totalScore += score;
+      }
+      conversationState[conversationId].lastOptions = [];
     }
 
     // Add user message to history
@@ -858,9 +953,17 @@ app.post("/api/chat", async (req, res) => {
     });
 
     // Call OpenAI API
+    const { ratio, level } = computeUrgencyLevel(
+      conversationState[conversationId].questionCount,
+      conversationState[conversationId].totalScore
+    );
+    const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n合計スコア: ${conversationState[conversationId].totalScore}\n最大スコア: ${conversationState[conversationId].questionCount * 2}\n緊急度比率: ${ratio.toFixed(2)}\n判定: ${level}\n※スコアや計算はユーザーに表示しないこと。最終判断は必ずこの判定に従うこと。`;
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini", // Cost-effective model
-      messages: conversationHistory[conversationId],
+      messages: [
+        ...conversationHistory[conversationId],
+        { role: "system", content: scoreContext },
+      ],
       temperature: 0.7,
       max_tokens: 1000,
     });
@@ -878,6 +981,7 @@ app.post("/api/chat", async (req, res) => {
 - 共感・寄り添いの一文を最初に入れる
 - 質問は1つだけ
 - 必ず選択式（箇条書き3つ）
+- 選択肢は「低→中→高」の順で並べる
 - 判断や提案、助言は一切出さない
 - まとめブロックは出さない
 `;
@@ -887,23 +991,35 @@ app.post("/api/chat", async (req, res) => {
       ];
       const reask = await openai.chat.completions.create({
         model: "gpt-4o-mini",
-        messages: questionMessages,
+        messages: [
+          ...questionMessages,
+          { role: "system", content: scoreContext },
+        ],
         temperature: 0.7,
         max_tokens: 400,
       });
       aiResponse = reask.choices[0].message.content;
     }
 
-    // 質問数カウント
-    if (isQuestionResponse(aiResponse)) {
-      conversationState[conversationId].questionCount += 1;
+    // 次の質問の選択肢を保存
+    const options = extractOptionsFromAssistant(aiResponse);
+    if (options.length === 3) {
+      conversationState[conversationId].lastOptions = options;
     }
 
     // まとめブロックが欠けている場合は、修正用の再生成を行う（質問数を満たした後のみ）
     const updatedQuestionCount = conversationState[conversationId].questionCount;
-    if (updatedQuestionCount >= minQuestions && hasAnySummaryBlocks(aiResponse) && !hasAllSummaryBlocks(aiResponse)) {
+    const updatedLevel = computeUrgencyLevel(
+      updatedQuestionCount,
+      conversationState[conversationId].totalScore
+    ).level;
+    if (
+      updatedQuestionCount >= minQuestions &&
+      hasAnySummaryBlocks(aiResponse) &&
+      !hasAllSummaryBlocks(aiResponse)
+    ) {
       const repairMessages = [
-        { role: "system", content: REPAIR_PROMPT },
+        { role: "system", content: buildRepairPrompt(updatedLevel) },
         ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
       ];
       const repaired = await openai.chat.completions.create({
