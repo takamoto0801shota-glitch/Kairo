@@ -10,6 +10,7 @@
 :root {
     --header-height: 56px;
     --input-height: 56px;
+    --summary-height: 72px;
 }
 
 html, body {
@@ -93,7 +94,7 @@ body {
 
 .chat-messages {
     position: absolute;
-    top: calc(var(--header-height) + env(safe-area-inset-top));
+    top: calc(var(--header-height) + var(--summary-height) + env(safe-area-inset-top));
     bottom: var(--input-height);
     left: 0;
     right: 0;
@@ -269,16 +270,24 @@ body {
 
 /* 安心サマリー（固定表示） */
 .summary-card {
-    position: sticky;
-    top: 0;
-    z-index: 100;
+    position: fixed;
+    top: calc(var(--header-height) + env(safe-area-inset-top));
+    z-index: 1000;
     background-color: #e8f4f1;
-    padding: 18px 24px;
+    padding: 12px 24px;
     margin: 0;
     border-bottom: 2px solid #b8d4ce;
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
     border-radius: 0 0 12px 12px;
     width: 100%;
+    max-width: 600px;
+    height: var(--summary-height);
+    left: 0;
+    right: 0;
+    margin: 0 auto;
+    display: block;
+    opacity: 0;
+    visibility: hidden;
 }
 
 .summary-card-content {

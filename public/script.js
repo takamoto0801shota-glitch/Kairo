@@ -78,6 +78,7 @@ function clearHistory() {
   })
     .catch((err) => console.error("履歴クリアエラー:", err))
     .finally(() => {
+      hideSummaryCard();
       window.location.reload();
     });
 }
@@ -559,6 +560,8 @@ function updateSummaryCard(judgeMeta) {
   contentDiv.textContent = `${emoji} ${label}`;
 
   summaryCard.style.display = "block";
+  summaryCard.style.opacity = "1";
+  summaryCard.style.visibility = "visible";
 }
 
 // Show initial message
@@ -566,6 +569,14 @@ function showInitialMessage() {
   const initialMessage = `あなたの不安と体調を一番に、一緒に考えます`;
 
   addMessage(initialMessage);
+}
+
+function hideSummaryCard() {
+  const summaryCard = document.getElementById("summaryCard");
+  if (summaryCard) {
+    summaryCard.style.opacity = "0";
+    summaryCard.style.visibility = "hidden";
+  }
 }
 
 // Call OpenAI API
@@ -686,6 +697,7 @@ async function handleUserInput() {
 // Initialize
 function init() {
   // Start fresh without re-rendering history
+  hideSummaryCard();
   showInitialMessage();
 
   // Send button event
