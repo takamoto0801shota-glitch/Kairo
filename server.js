@@ -753,6 +753,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 
 // Store conversation history (in production, use a database)
 const conversationHistory = {};
+const conversationState = {};
 
 const REPAIR_PROMPT = `
 あなたはKairoです。以下の会話内容を踏まえ、最後に出すべき「まとめブロック」を**必ず全ブロック**で出力してください。
@@ -777,11 +778,47 @@ function isHospitalFlow(text) {
   );
 }
 
+function hasAnySummaryBlocks(text) {
+  return (
+    text.includes("🟢 まず安心してください") ||
+    text.includes("🤝 今の状態について") ||
+    text.includes("✅ 今すぐやること") ||
+    text.includes("⏳ 今後の見通し") ||
+    text.includes("🚨 もし次の症状が出たら") ||
+    text.includes("🌱 最後に") ||
+    text.includes("📝 いまの状態を整理します") ||
+    text.includes("⚠️ Kairoが気になっているポイント") ||
+    text.includes("🏥 Kairoの判断") ||
+    text.includes("💬 最後に")
+  );
+}
+
 function hasAllSummaryBlocks(text) {
   const hospitalHeaders = ["📝 いまの状態を整理します", "⚠️ Kairoが気になっているポイント", "🏥 Kairoの判断", "💬 最後に"];
   const normalHeaders = ["🟢 まず安心してください", "🤝 今の状態について", "✅ 今すぐやること", "⏳ 今後の見通し", "🚨 もし次の症状が出たら", "🌱 最後に"];
   const required = isHospitalFlow(text) ? hospitalHeaders : normalHeaders;
   return required.every((header) => text.includes(header));
+}
+
+function isQuestionResponse(text) {
+  return (text.includes("？") || text.includes("?")) && text.includes("•");
+}
+
+function shouldAvoidSummary(text, questionCount, minQuestions) {
+  if (questionCount >= minQuestions) {
+    return false;
+  }
+  const adviceIndicators = [
+    "おすすめ",
+    "意識してください",
+    "今すぐ",
+    "様子見",
+    "市販薬",
+    "病院",
+    "受診",
+  ];
+  const hasAdvice = adviceIndicators.some((indicator) => text.includes(indicator));
+  return hasAnySummaryBlocks(text) || hasAdvice || !isQuestionResponse(text);
 }
 
 // Root route - serve index.html
@@ -810,6 +847,9 @@ app.post("/api/chat", async (req, res) => {
         { role: "system", content: SYSTEM_PROMPT },
       ];
     }
+    if (!conversationState[conversationId]) {
+      conversationState[conversationId] = { questionCount: 0 };
+    }
 
     // Add user message to history
     conversationHistory[conversationId].push({
@@ -827,8 +867,41 @@ app.post("/api/chat", async (req, res) => {
 
     let aiResponse = completion.choices[0].message.content;
 
-    // まとめブロックが欠けている場合は、修正用の再生成を行う
-    if (!hasAllSummaryBlocks(aiResponse)) {
+    const minQuestions = 5;
+    const currentQuestionCount = conversationState[conversationId].questionCount;
+
+    // まとめが早すぎる／助言が混ざる場合は質問に差し戻す
+    if (shouldAvoidSummary(aiResponse, currentQuestionCount, minQuestions)) {
+      const questionOnlyPrompt = `
+あなたはKairoです。今は情報収集中のフェーズです。
+必ず以下を守って、次の質問だけを出してください：
+- 共感・寄り添いの一文を最初に入れる
+- 質問は1つだけ
+- 必ず選択式（箇条書き3つ）
+- 判断や提案、助言は一切出さない
+- まとめブロックは出さない
+`;
+      const questionMessages = [
+        { role: "system", content: questionOnlyPrompt },
+        ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
+      ];
+      const reask = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: questionMessages,
+        temperature: 0.7,
+        max_tokens: 400,
+      });
+      aiResponse = reask.choices[0].message.content;
+    }
+
+    // 質問数カウント
+    if (isQuestionResponse(aiResponse)) {
+      conversationState[conversationId].questionCount += 1;
+    }
+
+    // まとめブロックが欠けている場合は、修正用の再生成を行う（質問数を満たした後のみ）
+    const updatedQuestionCount = conversationState[conversationId].questionCount;
+    if (updatedQuestionCount >= minQuestions && hasAnySummaryBlocks(aiResponse) && !hasAllSummaryBlocks(aiResponse)) {
       const repairMessages = [
         { role: "system", content: REPAIR_PROMPT },
         ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
@@ -881,6 +954,9 @@ app.post("/api/clear", (req, res) => {
   const { conversationId } = req.body;
   if (conversationId && conversationHistory[conversationId]) {
     delete conversationHistory[conversationId];
+  }
+  if (conversationId && conversationState[conversationId]) {
+    delete conversationState[conversationId];
   }
   res.json({ success: true });
 });
