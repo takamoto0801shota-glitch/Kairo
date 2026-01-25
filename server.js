@@ -492,7 +492,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 6. 質問の中でユーザーに行動を促す・進める・選ばせることは一切禁止。
 7. 質問フェーズでは「共感・寄り添い・判断・助言」を混ぜない。情報収集の質問のみを行う。
 8. 原因の推測・緊急性の示唆・行動指示は、質問フェーズでは一切禁止。
-9. 質問は必ず3択の選択式（低→中→高）で提示する。
+9. 質問は必ず3択の選択式で提示する（低/中/高などの単語だけは使わない）。
 
 【Kairoの立ち位置の再定義】
 - Kairoは「一緒に迷う存在」ではない
@@ -850,6 +850,17 @@ function isQuestionResponse(text) {
   return extractOptionsFromAssistant(text).length === 3;
 }
 
+function containsQuestionPhaseForbidden(text) {
+  const forbiddenPatterns = [
+    /つらい|辛い|不安|心配|怖い|安心|大丈夫|寄り添|共感/,
+    /おすすめ|様子見|市販薬|病院|受診|医療機関/,
+    /休む|水分|運動|食事|温める|冷やす/,
+    /原因|かもしれません|可能性/,
+    /どう思いますか|どうしますか|感じますか/,
+  ];
+  return forbiddenPatterns.some((pattern) => pattern.test(text || ""));
+}
+
 function detectQuestionType(text) {
   const normalized = (text || "").replace(/\s+/g, "");
   if (normalized.match(/痛みの強さ|どのくらい痛い|我慢できる|動けないほど/)) {
@@ -950,7 +961,12 @@ function shouldAvoidSummary(text, questionCount, minQuestions, maxQuestions) {
     "受診",
   ];
   const hasAdvice = adviceIndicators.some((indicator) => text.includes(indicator));
-  return hasAnySummaryBlocks(text) || hasAdvice || !isQuestionResponse(text);
+  return (
+    hasAnySummaryBlocks(text) ||
+    hasAdvice ||
+    !isQuestionResponse(text) ||
+    containsQuestionPhaseForbidden(text)
+  );
 }
 
 // Root route - serve index.html
@@ -1084,8 +1100,9 @@ app.post("/api/chat", async (req, res) => {
 - 共感・寄り添い・判断・助言は一切入れない
 - 質問は1つだけ
 - 必ず選択式（箇条書き3つ）
-- 選択肢は「低→中→高」の順で並べる
+- 選択肢は「軽い→中くらい→強い」など意味のある表現で並べる（低/中/高は禁止）
 - まとめブロックは出さない
+- 原因の推測や「〜かもしれません」は禁止
 `;
       const questionMessages = [
         { role: "system", content: questionOnlyPrompt },
