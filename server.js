@@ -948,7 +948,7 @@ function computeUrgencyLevel(questionCount, totalScore) {
   }
   const maxScore = questionCount * 2;
   const ratio = totalScore / maxScore;
-  if (ratio >= 0.8) return { ratio, level: "🔴" };
+  if (ratio >= 0.85) return { ratio, level: "🔴" };
   if (ratio >= 0.6) return { ratio, level: "🟡" };
   return { ratio, level: "🟢" };
 }
