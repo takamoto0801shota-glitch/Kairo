@@ -910,14 +910,28 @@ function detectQuestionType(text) {
   return "other";
 }
 
-const CONFIDENCE_CONTRIBUTIONS = {
-  pain_strength: 25,
-  worsening: 20,
-  duration: 20,
-  daily_impact: 15,
-  associated_symptoms: 5,
-  cause: 10,
-};
+const SLOT_KEYS = [
+  "pain_strength",
+  "worsening",
+  "duration",
+  "daily_impact",
+  "associated_symptoms",
+  "cause",
+  "other",
+];
+
+function countFilledSlots(slotFilled) {
+  return SLOT_KEYS.filter((key) => slotFilled && slotFilled[key]).length;
+}
+
+function computeConfidenceFromSlots(slotFilled) {
+  const filled = countFilledSlots(slotFilled);
+  return Math.round((filled / SLOT_KEYS.length) * 100);
+}
+
+function getMissingSlots(slotFilled) {
+  return SLOT_KEYS.filter((key) => !slotFilled || !slotFilled[key]);
+}
 
 function normalizeAnswerText(text) {
   return text.replace(/\s+/g, "").trim();
@@ -980,7 +994,8 @@ function judgeDecision(state) {
     state.totalScore
   );
   const confidence = state.confidence;
-  const decisionCompleted = confidence >= 95;
+  const slotsFilledCount = countFilledSlots(state.slotFilled);
+  const decisionCompleted = slotsFilledCount === SLOT_KEYS.length;
   const shouldJudge = decisionCompleted;
 
   console.log(
@@ -988,15 +1003,13 @@ function judgeDecision(state) {
     shouldJudge,
     "questionCount=",
     state.questionCount,
-    "pain=",
-    state.confidenceContributions.pain_strength ? "captured" : "missing",
-    "duration=",
-    state.confidenceContributions.duration ? "captured" : "missing",
-    "worsening=",
-    state.confidenceContributions.worsening ? "captured" : "missing"
+    "slotsFilled=",
+    slotsFilledCount,
+    "missingSlots=",
+    getMissingSlots(state.slotFilled).join(",")
   );
 
-  return { ratio, level, confidence, shouldJudge };
+  return { ratio, level, confidence, shouldJudge, slotsFilledCount };
 }
 
 function shouldAvoidSummary(text, shouldJudge) {
@@ -1054,7 +1067,7 @@ app.post("/api/chat", async (req, res) => {
         lastOptions: [],
         finalQuestionPending: false,
         confidence: 0,
-        confidenceContributions: {},
+        slotFilled: {},
         lastQuestionType: null,
       };
     }
@@ -1071,16 +1084,15 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].totalScore += score;
       conversationState[conversationId].lastOptions = [];
 
-      // 確信度の更新（質問タイプごとの寄与度）
+      // 判断スロットの更新（埋まったスロットを記録）
       const type = conversationState[conversationId].lastQuestionType;
-      if (type && CONFIDENCE_CONTRIBUTIONS[type]) {
-        if (!conversationState[conversationId].confidenceContributions[type]) {
-          conversationState[conversationId].confidenceContributions[type] = true;
-          conversationState[conversationId].confidence += CONFIDENCE_CONTRIBUTIONS[type];
-          if (conversationState[conversationId].confidence > 100) {
-            conversationState[conversationId].confidence = 100;
-          }
+      if (type && SLOT_KEYS.includes(type)) {
+        if (!conversationState[conversationId].slotFilled[type]) {
+          conversationState[conversationId].slotFilled[type] = true;
         }
+        conversationState[conversationId].confidence = computeConfidenceFromSlots(
+          conversationState[conversationId].slotFilled
+        );
       }
       conversationState[conversationId].lastQuestionType = null;
     }
@@ -1093,11 +1105,13 @@ app.post("/api/chat", async (req, res) => {
 
     // Call OpenAI API
     const minQuestions = 5;
+    const maxQuestions = 8;
     const currentQuestionCount = conversationState[conversationId].questionCount;
-    const { ratio, level, confidence, shouldJudge } = judgeDecision(
+    const { ratio, level, confidence, shouldJudge, slotsFilledCount } = judgeDecision(
       conversationState[conversationId]
     );
-    const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n合計スコア: ${conversationState[conversationId].totalScore}\n最大スコア: ${conversationState[conversationId].questionCount * 2}\n緊急度比率: ${ratio.toFixed(2)}\n判定: ${level}\n確信度: ${confidence}%\n※スコアや計算はユーザーに表示しないこと。最終判断は必ずこの判定に従うこと。`;
+    const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled);
+    const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n合計スコア: ${conversationState[conversationId].totalScore}\n最大スコア: ${conversationState[conversationId].questionCount * 2}\n緊急度比率: ${ratio.toFixed(2)}\n判定: ${level}\n判断スロット埋まり数: ${slotsFilledCount}/7\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。7スロットが全て埋まるまでまとめは出さない。\n※スコアや計算はユーザーに表示しないこと。最終判断は必ずこの判定に従うこと。`;
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini", // Cost-effective model
       messages: [
@@ -1186,7 +1200,8 @@ app.post("/api/chat", async (req, res) => {
     if (
       !shouldJudge &&
       currentQuestionCount >= minQuestions &&
-      confidence >= 80 &&
+      currentQuestionCount < maxQuestions &&
+      missingSlots.length === 1 &&
       isQuestionResponse(aiResponse) &&
       !hasFinalQuestionPrefix(aiResponse)
     ) {
