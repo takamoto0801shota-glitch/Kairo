@@ -93,6 +93,7 @@ function parseAIMessage(text) {
     { icon: '✅', name: '今すぐやること' },
     { icon: '⏳', name: '今後の見通し' },
     { icon: '🚨', name: 'もし次の症状が出たら' },
+    { icon: '💊', name: '一般的な市販薬' },
     { icon: '🌱', name: '最後に' },
     // 病院をおすすめする場合
     { icon: '📝', name: 'いまの状態を整理します（メモ）' },
