@@ -559,7 +559,8 @@ function updateSummaryCard(judgeMeta) {
     label = "病院をおすすめします";
   }
   const summaryLine = judgeMeta?.summaryLine;
-  contentDiv.textContent = summaryLine ? `${emoji} ${summaryLine}` : `${emoji} ${label}`;
+  const rawText = summaryLine ? `${emoji} ${summaryLine}` : `${emoji} ${label}`;
+  contentDiv.textContent = rawText.length > 20 ? `${rawText.slice(0, 20)}` : rawText;
 
   summaryCard.style.display = "block";
   summaryCard.style.opacity = "1";
