@@ -973,19 +973,14 @@ function computeUrgencyLevel(questionCount, totalScore) {
   return { ratio, level: "🟢" };
 }
 
-function judgeDecision(state, summaryRequested, maxQuestions) {
+function judgeDecision(state) {
   console.log("[DEBUG] judge function entered");
   const { ratio, level } = computeUrgencyLevel(
     state.questionCount,
     state.totalScore
   );
   const confidence = state.confidence;
-  const decisionCompleted =
-    state.questionCount >= 5 ||
-    ratio >= 0.8 ||
-    state.questionCount >= maxQuestions ||
-    summaryRequested ||
-    state.finalQuestionPending;
+  const decisionCompleted = confidence >= 95;
   const shouldJudge = decisionCompleted;
 
   console.log(
@@ -1004,8 +999,8 @@ function judgeDecision(state, summaryRequested, maxQuestions) {
   return { ratio, level, confidence, shouldJudge };
 }
 
-function shouldAvoidSummary(text, questionCount, minQuestions, maxQuestions) {
-  if (questionCount >= minQuestions || questionCount >= maxQuestions) {
+function shouldAvoidSummary(text, shouldJudge) {
+  if (shouldJudge) {
     return false;
   }
   const adviceIndicators = [
@@ -1098,14 +1093,9 @@ app.post("/api/chat", async (req, res) => {
 
     // Call OpenAI API
     const minQuestions = 5;
-    const maxQuestions = 9;
     const currentQuestionCount = conversationState[conversationId].questionCount;
-    const summaryRequested = userAskedSummary(message);
-    const finalQuestionPending = conversationState[conversationId].finalQuestionPending;
     const { ratio, level, confidence, shouldJudge } = judgeDecision(
-      conversationState[conversationId],
-      summaryRequested,
-      maxQuestions
+      conversationState[conversationId]
     );
     const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n合計スコア: ${conversationState[conversationId].totalScore}\n最大スコア: ${conversationState[conversationId].questionCount * 2}\n緊急度比率: ${ratio.toFixed(2)}\n判定: ${level}\n確信度: ${confidence}%\n※スコアや計算はユーザーに表示しないこと。最終判断は必ずこの判定に従うこと。`;
     const completion = await openai.chat.completions.create({
@@ -1156,7 +1146,7 @@ app.post("/api/chat", async (req, res) => {
     // まとめが早すぎる／助言が混ざる場合は質問に差し戻す
     if (
       !shouldJudge &&
-      shouldAvoidSummary(aiResponse, currentQuestionCount, minQuestions, maxQuestions)
+      shouldAvoidSummary(aiResponse, shouldJudge)
     ) {
       const questionOnlyPrompt = `
 あなたはKairoです。今は情報収集中のフェーズです。
