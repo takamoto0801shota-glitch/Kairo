@@ -1,3 +1,4 @@
+console.log("🚀 Kairo server version: 2026-01-27-A");
 const express = require("express");
 const cors = require("cors");
 const OpenAI = require("openai");
