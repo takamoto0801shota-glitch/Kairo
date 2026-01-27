@@ -558,7 +558,8 @@ function updateSummaryCard(judgeMeta) {
   } else if (emoji === "🔴") {
     label = "病院をおすすめします";
   }
-  contentDiv.textContent = `${emoji} ${label}`;
+  const summaryLine = judgeMeta?.summaryLine;
+  contentDiv.textContent = summaryLine ? `${emoji} ${summaryLine}` : `${emoji} ${label}`;
 
   summaryCard.style.display = "block";
   summaryCard.style.opacity = "1";

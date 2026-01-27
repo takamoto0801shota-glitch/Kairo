@@ -873,6 +873,23 @@ function hasAllSummaryBlocks(text) {
   return required.every((header) => text.includes(header));
 }
 
+function extractSummaryLine(text) {
+  const lines = (text || "").split("\n").map((line) => line.trim()).filter(Boolean);
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].startsWith("🟢") || lines[i].startsWith("🟡") || lines[i].startsWith("🔴")) {
+      for (let j = i + 1; j < lines.length; j += 1) {
+        const candidate = lines[j];
+        if (candidate === "⸻") continue;
+        if (candidate.startsWith("🤝") || candidate.startsWith("✅") || candidate.startsWith("⏳") || candidate.startsWith("🚨") || candidate.startsWith("💊") || candidate.startsWith("🌱")) {
+          return null;
+        }
+        return candidate;
+      }
+    }
+  }
+  return null;
+}
+
 function extractOptionsFromAssistant(text) {
   const options = [];
   const lines = text.split("\n");
@@ -1424,6 +1441,7 @@ app.post("/api/chat", async (req, res) => {
       slotsFilledCount,
       decisionAllowed,
       questionCount: conversationState[conversationId].questionCount,
+      summaryLine: shouldJudgeNow ? extractSummaryLine(aiResponse) : null,
     };
     console.log("[DEBUG] response payload", { response: aiResponse, judgeMeta });
     res.json({ message: aiResponse, response: aiResponse, judgeMeta });
