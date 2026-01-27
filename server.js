@@ -613,10 +613,10 @@ contextFlag = true の場合、次のKairoの発話のどこかで
   - 必ず箇条書きで改行する（• を使う）
 - ③は必ず1〜2文で書き、**「一般的には」「よく知られていることとして」「信頼できる医療情報では」**のいずれかで必ず前置きする
   - 読みやすく改行する
-- ③では以下を必ず含める（原因の断定禁止）
-  - • 首・肩の緊張
-  - • 目の使いすぎ
-  - • 画面の光による疲れ
+- ③は症状・文脈に合う一般的な可能性のみを書く（無関係な情報は禁止）
+  - 例：腹痛/便秘なら「腸の動きの低下」「ガスや張り」など
+  - 例：のどの痛みなら「乾燥や刺激」「炎症が続くとき」など
+  - 例：頭痛なら「首肩の緊張」「目の疲れ」「睡眠不足やストレス」など
 - 診断・確定表現は禁止
 - 原因は一つに断定しない
 - ④は必ず「今の情報を見る限り」「現時点では」の前置きを使い、Kairoが判断を示す
@@ -820,7 +820,10 @@ function buildRepairPrompt(requiredLevel) {
 1) ユーザーのつらさ・不安への一文の寄り添い
 2) ユーザーが話した事実の要約（箇条書き・改行）
 3) 一般的な医療情報の可能性説明（必ず前置き「一般的には／よく知られていることとして／信頼できる医療情報では」）
-   - 「首・肩の緊張」「目の使いすぎ」「画面の光による疲れ」を必ず含める
+   - 症状・文脈に合う一般的な可能性のみを書く（無関係な情報は禁止）
+   - 例：腹痛/便秘なら「腸の動きの低下」「ガスや張り」など
+   - 例：のどの痛みなら「乾燥や刺激」「炎症が続くとき」など
+   - 例：頭痛なら「首肩の緊張」「目の疲れ」「睡眠不足やストレス」など
    - 診断・確定表現は禁止、原因は一つに断定しない
 4) Kairoとしての判断（「今の情報を見る限り」「現時点では」の前置き必須）
 
@@ -944,6 +947,114 @@ function getMissingSlots(slotFilled) {
   return SLOT_KEYS.filter((key) => !slotFilled || !slotFilled[key]);
 }
 
+function detectSymptomCategory(text) {
+  const normalized = (text || "").replace(/\s+/g, "");
+  if (normalized.match(/腹|お腹|胃|下痢|便秘|吐き気/)) return "stomach";
+  if (normalized.match(/頭痛|頭が痛|頭が重|こめかみ|片頭痛/)) return "head";
+  if (normalized.match(/喉|のど|咳|せき|鼻水|鼻づまり/)) return "throat";
+  return "other";
+}
+
+function buildFallbackQuestion(slotKey, lastUserText, useFinalPrefix) {
+  const prefix = useFinalPrefix ? "最後に、" : "";
+  const empathy = lastUserText
+    ? `${lastUserText}とのことですね。`
+    : "今の状況を少しだけ整理させてください。";
+
+  const questions = {
+    pain_strength: {
+      q: `${prefix}今の痛みで、普段の動きはどの程度できますか？`,
+      options: ["普通に動ける", "少しつらいが動ける", "動けないほどつらい"],
+    },
+    worsening: {
+      q: `${prefix}症状の変化はどれに近いですか？`,
+      options: ["少し良くなっている", "あまり変わらない", "悪化している"],
+    },
+    duration: {
+      q: `${prefix}いつからその症状が続いていますか？`,
+      options: ["さっき", "数時間前", "一日前"],
+    },
+    daily_impact: {
+      q: `${prefix}日常生活への影響はどれに近いですか？`,
+      options: ["普段どおり過ごせる", "少し無理をして過ごせる", "ほとんど動けない"],
+    },
+    associated_symptoms: {
+      q: `${prefix}他に気になる症状はありますか？`,
+      options: ["特にない", "少しある", "強く気になる症状がある"],
+    },
+    cause: {
+      q: `${prefix}前後で心当たりはありますか？`,
+      options: ["思い当たることがある", "少しだけ思い当たる", "よく分からない"],
+    },
+    other: {
+      q: `${prefix}今の状況に近いのはどれですか？`,
+      options: ["自宅で落ち着いている", "外出中・移動中", "一人で不安が強い"],
+    },
+  };
+
+  const selected = questions[slotKey] || questions.other;
+  return `${empathy}\n${selected.q}\n・${selected.options[0]}\n・${selected.options[1]}\n・${selected.options[2]}`;
+}
+
+function buildLocalSummaryFallback(level, history) {
+  const historyText = history
+    .filter((msg) => msg.role === "user")
+    .map((msg) => msg.content)
+    .join("\n");
+  const category = detectSymptomCategory(historyText);
+  const facts = history
+    .filter((msg) => msg.role === "user")
+    .slice(-3)
+    .map((msg) => `・${msg.content}`) || [];
+  const empathy =
+    historyText.includes("不安") || historyText.includes("心配")
+      ? "不安になる状況ですよね。"
+      : "つらい状態ですよね。";
+
+  const medicalInfoByCategory = {
+    stomach: "一般的には、腹部の不調は腸の動きの低下やガスの張りなどで起こることが多いとされています。原因は一つに断定できません。",
+    head: "一般的には、頭の重さは首肩の緊張や目の疲れ、睡眠不足が重なって起こることが多いとされています。原因は一つに断定できません。",
+    throat: "一般的には、のどの違和感は乾燥や刺激で起こることが多いとされています。原因は一つに断定できません。",
+    other: "一般的には、体調の変化は疲れや刺激、生活リズムの乱れが重なって起こることが多いとされています。原因は一つに断定できません。",
+  };
+
+  const otcByCategory = {
+    stomach: "一般的には、お腹の不調には整腸剤や胃腸薬が使われることが多いです。",
+    head: "一般的には、頭の痛みには解熱鎮痛薬が使われることが多いです。",
+    throat: "一般的には、のどの痛みにはトローチやのど飴、のど用スプレーが使われることが多いです。",
+    other: "一般的には、痛みやだるさには解熱鎮痛薬が使われることが多いです。",
+  };
+
+  const baseBlocks = [
+    `${level} まず安心してください\n今の情報を見る限り、緊急性は高くなさそうです。`,
+    `🤝 今の状態について\n${empathy}\n${facts.join("\n")}\n${medicalInfoByCategory[category]}\n今の情報を見る限り、無理をせず様子を見る判断で大丈夫そうです。`,
+    `✅ 今すぐやること（これだけでOK）\n今日は次の3つだけ意識してください。\n・こまめに水分をとる\n・できるだけ体を休める\n・刺激になる行動を避ける`,
+    `⏳ 今後の見通し\n多くの場合、時間の経過で少しずつ落ち着いてくることがあります。`,
+    `🚨 もし次の症状が出たら\n強い痛みが続く／水分がとれない／ぐったりする場合は受診を検討してください。`,
+  ];
+
+  const otcBlock = `💊 一般的な市販薬\n${otcByCategory[category]}\nこれは診断ではありませんが、薬局で相談する際の参考になります。`;
+  const closing = `🌱 最後に\nまた不安になったら、いつでもここで聞いてください。`;
+
+  if (level === "🟡") {
+    return [...baseBlocks, otcBlock, closing].join("\n");
+  }
+  if (level === "🔴") {
+    return [
+      "📝 いまの状態を整理します（メモ）",
+      facts.join("\n") || "・現在の症状について相談されています",
+      "⚠️ Kairoが気になっているポイント",
+      "急に悪化している可能性があり、様子見と言い切れない点があります。",
+      "🏥 Kairoの判断",
+      "今の情報を見る限り、病院で相談する判断が安心です。",
+      "💬 最後に",
+      "不安な状況だと思います。迷ったときは受診する判断は慎重で正しいです。",
+    ].join("\n");
+  }
+
+  return [...baseBlocks, closing].join("\n");
+}
+
 function normalizeAnswerText(text) {
   return text.replace(/\s+/g, "").trim();
 }
@@ -1006,7 +1117,7 @@ function judgeDecision(state) {
   );
   const confidence = state.confidence;
   const slotsFilledCount = countFilledSlots(state.slotFilled);
-  const decisionCompleted = slotsFilledCount === SLOT_KEYS.length;
+  const decisionCompleted = state.questionCount >= 8 || slotsFilledCount >= 6;
   const shouldJudge = decisionCompleted;
 
   console.log(
@@ -1116,13 +1227,16 @@ app.post("/api/chat", async (req, res) => {
 
     // Call OpenAI API
     const minQuestions = 5;
-    const maxQuestions = 8;
+    const maxQuestions = 9;
     const currentQuestionCount = conversationState[conversationId].questionCount;
     const { ratio, level, confidence, shouldJudge, slotsFilledCount } = judgeDecision(
       conversationState[conversationId]
     );
+    const decisionAllowed =
+      conversationState[conversationId].questionCount >= 8 || slotsFilledCount >= 6;
+    const shouldJudgeNow = shouldJudge && decisionAllowed;
     const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled);
-    const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n合計スコア: ${conversationState[conversationId].totalScore}\n最大スコア: ${conversationState[conversationId].questionCount * 2}\n緊急度比率: ${ratio.toFixed(2)}\n判定: ${level}\n判断スロット埋まり数: ${slotsFilledCount}/7\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。7スロットが全て埋まるまでまとめは出さない。\n※スコアや計算はユーザーに表示しないこと。最終判断は必ずこの判定に従うこと。`;
+    const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n合計スコア: ${conversationState[conversationId].totalScore}\n最大スコア: ${conversationState[conversationId].questionCount * 2}\n緊急度比率: ${ratio.toFixed(2)}\n判定: ${level}\n判断スロット埋まり数: ${slotsFilledCount}/7\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が8以上、または判断スロットが6つ埋まった時点で必ず判定・まとめへ移行する。\n※スコアや計算はユーザーに表示しないこと。最終判断は必ずこの判定に従うこと。`;
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini", // Cost-effective model
       messages: [
@@ -1136,7 +1250,7 @@ app.post("/api/chat", async (req, res) => {
     let aiResponse = completion.choices[0].message.content;
 
     // 判定確定トリガー発動時は、まとめを強制生成
-    if (shouldJudge) {
+    if (shouldJudgeNow) {
       const { level } = computeUrgencyLevel(
         conversationState[conversationId].questionCount,
         conversationState[conversationId].totalScore
@@ -1165,13 +1279,16 @@ app.post("/api/chat", async (req, res) => {
         });
         aiResponse = strict.choices[0].message.content;
       }
+      if (!hasAllSummaryBlocks(aiResponse)) {
+        aiResponse = buildLocalSummaryFallback(level, conversationHistory[conversationId]);
+      }
       conversationState[conversationId].finalQuestionPending = false;
     }
 
     // まとめが早すぎる／助言が混ざる場合は質問に差し戻す
     if (
-      !shouldJudge &&
-      shouldAvoidSummary(aiResponse, shouldJudge)
+      !shouldJudgeNow &&
+      shouldAvoidSummary(aiResponse, shouldJudgeNow)
     ) {
       const questionOnlyPrompt = `
 あなたはKairoです。今は情報収集中のフェーズです。
@@ -1200,6 +1317,21 @@ app.post("/api/chat", async (req, res) => {
       aiResponse = reask.choices[0].message.content;
     }
 
+    // 6スロット埋めを保証するため、質問が不適切なら補正する
+    if (!shouldJudgeNow) {
+      const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled);
+      const detectedType = detectQuestionType(aiResponse);
+      const isValidQuestion = isQuestionResponse(aiResponse) && missingSlots.includes(detectedType);
+      if (!isValidQuestion && missingSlots.length > 0) {
+        const lastUserText = conversationHistory[conversationId]
+          .filter((msg) => msg.role === "user")
+          .slice(-1)[0]?.content;
+        const useFinalPrefix =
+          currentQuestionCount >= minQuestions && missingSlots.length === 1;
+        aiResponse = buildFallbackQuestion(missingSlots[0], lastUserText, useFinalPrefix);
+      }
+    }
+
     // 次の質問の選択肢と質問タイプを保存
     const options = extractOptionsFromAssistant(aiResponse);
     if (options.length === 3) {
@@ -1209,9 +1341,9 @@ app.post("/api/chat", async (req, res) => {
 
     // 最後の質問は「最後に〜」で始める（AIが終盤と判断した場合）
     if (
-      !shouldJudge &&
+      !shouldJudgeNow &&
       currentQuestionCount >= minQuestions &&
-      currentQuestionCount < maxQuestions &&
+      currentQuestionCount < 8 &&
       missingSlots.length === 1 &&
       isQuestionResponse(aiResponse) &&
       !hasFinalQuestionPrefix(aiResponse)
@@ -1287,7 +1419,9 @@ app.post("/api/chat", async (req, res) => {
       judgement: level,
       confidence,
       ratio: Number(ratio.toFixed(2)),
-      shouldJudge,
+      shouldJudge: shouldJudgeNow,
+      slotsFilledCount,
+      decisionAllowed,
       questionCount: conversationState[conversationId].questionCount,
     };
     console.log("[DEBUG] response payload", { response: aiResponse, judgeMeta });
