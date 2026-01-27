@@ -667,6 +667,8 @@ async function handleUserInput() {
       if (aiResponse.judgeMeta && aiResponse.judgeMeta.shouldJudge === true) {
         console.log("[DEBUG] force summary render");
         updateSummaryCard(aiResponse.judgeMeta);
+      } else {
+        hideSummaryCard();
       }
       } catch (error) {
         // Remove loading message
