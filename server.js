@@ -633,19 +633,20 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 今日は次の3つだけ意識してください。
 
 必ず以下のルールで生成すること：
-- 項目数は必ず3つまで
-- 表現は医師の断定ではなく「一般的に」「〜とされています」などの中立表現を使う
-- 不安を煽る表現や専門用語の多用は禁止
-- ユーザーが“今すぐ実行できる行動”に落とし込むこと
-- 3つのうち1つだけ、一般的な医療・健康知識を含める
-  - Google検索で裏取りできるレベルの内容に限定
-  - 診断・治療・原因の断定は禁止
-  - 「炎症」「粘膜」「刺激」など一般向け用語は使用可
-- 構造の目安：
-  - 水分補給 → 理由を一言添える
-  - 休める行動 → 注意点を一言添える
-  - 刺激や炎症を悪化させない行動 → 具体例を1〜2個入れる
-- 各項目は1〜2行で簡潔に
+- 項目は最大3つ
+- 各項目は「行動 + 理由（1文）」のセット
+- 理由は不安を下げる説明に限定（正しさの証明・詳細な医学説明は禁止）
+- 口調はやわらかく、選択肢を残す
+  - 「〜してみてください」「〜すると楽になることがあります」を使う
+- 命令形・断定は禁止
+- 不安を煽る表現・専門用語は禁止
+- 構成の目安：
+  1) 体を守る行動（例：水分・姿勢・温める）
+  2) 休む・様子を見る行動
+  3) 刺激や負担を減らす行動
+- 3つのうち1つだけ一般的な医療・健康知識を含める
+  - 必ず「一般的に」「〜とされています」を付ける
+- 「今この状態なら、まずはこれでいい」という暫定的な行動として提示する
 
 	•	[具体的な行動1]
 
@@ -829,10 +830,20 @@ function buildRepairPrompt(requiredLevel) {
 4) Kairoとしての判断（「今の情報を見る限り」「現時点では」の前置き必須）
 
 ✅ 今すぐやること（これだけでOK）：
-- 3項目まで
-- 中立表現（「一般的に」「〜とされています」）
-- 1つだけ一般的医療・健康知識を含める
-- 水分補給／休める行動／刺激を避ける構造を目安にする
+- 項目は最大3つ
+- 各項目は「行動 + 理由（1文）」のセット
+- 理由は不安を下げる説明に限定（正しさの証明・詳細な医学説明は禁止）
+- 口調はやわらかく、選択肢を残す
+  - 「〜してみてください」「〜すると楽になることがあります」を使う
+- 命令形・断定は禁止
+- 不安を煽る表現・専門用語は禁止
+- 構成の目安：
+  1) 体を守る行動（例：水分・姿勢・温める）
+  2) 休む・様子を見る行動
+  3) 刺激や負担を減らす行動
+- 3つのうち1つだけ一般的な医療・健康知識を含める
+  - 必ず「一般的に」「〜とされています」を付ける
+- 「今この状態なら、まずはこれでいい」という暫定的な行動として提示する
 `;
 }
 
@@ -1046,7 +1057,7 @@ function buildLocalSummaryFallback(level, history) {
   const baseBlocks = [
     `${level} まず安心してください\n今の情報を見る限り、緊急性は高くなさそうです。`,
     `🤝 今の状態について\n${empathy}\n${facts.join("\n")}\n${medicalInfoByCategory[category]}\n今の情報を見る限り、無理をせず様子を見る判断で大丈夫そうです。`,
-    `✅ 今すぐやること（これだけでOK）\n今日は次の3つだけ意識してください。\n・こまめに水分をとる\n・できるだけ体を休める\n・刺激になる行動を避ける`,
+    `✅ 今すぐやること（これだけでOK）\n今日は次の3つだけ意識してみてください。\n・少しずつ水分をとってみてください。一般的に、体が乾くと刺激を感じやすいとされています。\n・横になれるなら体を休めてみてください。力を抜くと楽になることがあります。\n・刺激になる飲食や冷えを避けてみてください。負担を減らすと落ち着くことがあります。`,
     `⏳ 今後の見通し\n多くの場合、時間の経過で少しずつ落ち着いてくることがあります。`,
     `🚨 もし次の症状が出たら\n強い痛みが続く／水分がとれない／ぐったりする場合は受診を検討してください。`,
   ];
@@ -1113,6 +1124,57 @@ function matchAnswerToOption(answer, options) {
     }
   }
 
+  for (let i = 0; i < options.length; i += 1) {
+    const normalizedOption = normalizeAnswerText(options[i]);
+    if (normalizedOption && normalizedOption.includes(normalizedAnswer)) {
+      return i;
+    }
+  }
+
+  const bigramScore = (a, b) => {
+    if (!a || !b) return 0;
+    const bigrams = (str) => {
+      const arr = [];
+      for (let i = 0; i < str.length - 1; i += 1) {
+        arr.push(str.slice(i, i + 2));
+      }
+      return arr;
+    };
+    const aBigrams = bigrams(a);
+    const bBigrams = bigrams(b);
+    if (aBigrams.length === 0 || bBigrams.length === 0) return 0;
+    const bSet = new Set(bBigrams);
+    let hit = 0;
+    for (const bg of aBigrams) {
+      if (bSet.has(bg)) hit += 1;
+    }
+    return hit / Math.max(aBigrams.length, bBigrams.length);
+  };
+
+  let bestIndex = null;
+  let bestScore = 0;
+  for (let i = 0; i < options.length; i += 1) {
+    const normalizedOption = normalizeAnswerText(options[i]);
+    const score = bigramScore(normalizedAnswer, normalizedOption);
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = i;
+    }
+  }
+  if (bestIndex !== null && bestScore >= 0.2) {
+    return bestIndex;
+  }
+
+  if (normalizedAnswer.match(/動けない|無理|強い|ひどい|悪化|辛い|つらい/)) {
+    return 2;
+  }
+  if (normalizedAnswer.match(/少し|やや|中|真ん中|そこそこ/)) {
+    return 1;
+  }
+  if (normalizedAnswer.match(/普通|軽い|問題ない|大丈夫|上/)) {
+    return 0;
+  }
+
   return null;
 }
 
@@ -1123,7 +1185,7 @@ function computeUrgencyLevel(questionCount, totalScore) {
   const maxScore = questionCount * 2;
   const ratio = totalScore / maxScore;
   if (ratio >= 0.85) return { ratio, level: "🔴" };
-  if (ratio >= 0.6) return { ratio, level: "🟡" };
+  if (ratio >= 0.66) return { ratio, level: "🟡" };
   return { ratio, level: "🟢" };
 }
 
