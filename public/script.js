@@ -552,11 +552,11 @@ function updateSummaryCard(judgeMeta) {
   }
 
   const emoji = judgeMeta?.judgement || "🟢";
-  let label = "安心してください";
+  let label = "様子を見ましょう";
   if (emoji === "🟡") {
-    label = "注意して様子を見ましょう";
+    label = "注意して様子見をしてください";
   } else if (emoji === "🔴") {
-    label = "病院をおすすめします";
+    label = "病院を推奨します";
   }
   const slotsFilledCount = judgeMeta?.slotsFilledCount ?? 0;
   const rawText = `${emoji} ${label}（判断スロット${slotsFilledCount}/7）`;

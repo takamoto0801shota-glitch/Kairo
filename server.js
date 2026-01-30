@@ -901,6 +901,28 @@ function extractSummaryLine(text) {
   return null;
 }
 
+function ensureYellowOtcBlock(text) {
+  if (!text || !text.includes("🟡")) return text;
+  if (text.includes("💊 一般的な市販薬")) return text;
+  const lines = text.split("\n");
+  const otcLines = [
+    "💊 一般的な市販薬",
+    "一般的には、症状に合わせた市販薬カテゴリが使われることが多いです。",
+    "これは診断ではありませんが、薬局で相談する際の参考になります。",
+  ];
+  const insertAfterIndex = lines.findIndex((line) => line.includes("🚨 もし次の症状が出たら"));
+  const beforeLastIndex = lines.findIndex((line) => line.includes("🌱 最後に"));
+  if (insertAfterIndex >= 0 && beforeLastIndex > insertAfterIndex) {
+    return [
+      ...lines.slice(0, insertAfterIndex + 1),
+      ...lines.slice(insertAfterIndex + 1, beforeLastIndex),
+      ...otcLines,
+      ...lines.slice(beforeLastIndex),
+    ].join("\n");
+  }
+  return `${text}\n${otcLines.join("\n")}`;
+}
+
 function extractOptionsFromAssistant(text) {
   const options = [];
   const lines = text.split("\n");
@@ -1004,8 +1026,8 @@ function buildFallbackQuestion(slotKey, lastUserText, useFinalPrefix) {
       options: ["さっき", "数時間前", "一日前"],
     },
     daily_impact: {
-      q: `${prefix}日常生活への影響はどれに近いですか？`,
-      options: ["普段どおり過ごせる", "少し無理をして過ごせる", "ほとんど動けない"],
+      q: `${prefix}睡眠や仕事・学校への影響はどれに近いですか？`,
+      options: ["普段どおり過ごせる", "少し無理をして続けている", "休まないと難しい"],
     },
     associated_symptoms: {
       q: `${prefix}他に気になる症状はありますか？`,
@@ -1271,6 +1293,7 @@ app.post("/api/chat", async (req, res) => {
         confidence: 0,
         slotFilled: {},
         lastQuestionType: null,
+        previousQuestionType: null,
       };
     }
 
@@ -1359,6 +1382,7 @@ app.post("/api/chat", async (req, res) => {
         });
         aiResponse = strict.choices[0].message.content;
       }
+      aiResponse = ensureYellowOtcBlock(aiResponse);
       if (!hasAllSummaryBlocks(aiResponse)) {
         aiResponse = buildLocalSummaryFallback(level, conversationHistory[conversationId]);
       }
@@ -1380,6 +1404,7 @@ app.post("/api/chat", async (req, res) => {
 - 選択肢は意味のある具体表現で並べる（低/中/高は禁止）
 - 記号は必ず「・」を使う
 - まとめブロックは出さない
+- 直前の質問と同じ意味・同じ軸の質問は禁止
 `;
       const questionMessages = [
         { role: "system", content: questionOnlyPrompt },
@@ -1401,14 +1426,20 @@ app.post("/api/chat", async (req, res) => {
     if (!shouldJudgeNow) {
       const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled);
       const detectedType = detectQuestionType(aiResponse);
+      const prevType = conversationState[conversationId].previousQuestionType;
+      const isRepeatedType = prevType && detectedType === prevType;
       const isValidQuestion = isQuestionResponse(aiResponse) && missingSlots.includes(detectedType);
-      if (!isValidQuestion && missingSlots.length > 0) {
+      if ((!isValidQuestion || isRepeatedType) && missingSlots.length > 0) {
         const lastUserText = conversationHistory[conversationId]
           .filter((msg) => msg.role === "user")
           .slice(-1)[0]?.content;
         const useFinalPrefix =
           currentQuestionCount >= minQuestions && missingSlots.length === 1;
-        aiResponse = buildFallbackQuestion(missingSlots[0], lastUserText, useFinalPrefix);
+        const nextSlot =
+          isRepeatedType && missingSlots.length > 1
+            ? missingSlots.find((slot) => slot !== detectedType) || missingSlots[0]
+            : missingSlots[0];
+        aiResponse = buildFallbackQuestion(nextSlot, lastUserText, useFinalPrefix);
       }
     }
 
@@ -1416,6 +1447,8 @@ app.post("/api/chat", async (req, res) => {
     const options = extractOptionsFromAssistant(aiResponse);
     if (options.length === 3) {
       conversationState[conversationId].lastOptions = options;
+      conversationState[conversationId].previousQuestionType =
+        conversationState[conversationId].lastQuestionType;
       conversationState[conversationId].lastQuestionType = detectQuestionType(aiResponse);
     }
 
