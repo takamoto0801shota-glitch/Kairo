@@ -901,8 +901,29 @@ function extractSummaryLine(text) {
   return null;
 }
 
-function ensureYellowOtcBlock(text) {
-  if (!text || !text.includes("🟡")) return text;
+function normalizeSummaryLevel(text, requiredLevel) {
+  if (!text || !requiredLevel) return text;
+  let updated = text
+    .replace("🟢 まず安心してください", `${requiredLevel} まず安心してください`)
+    .replace("🟡 まず安心してください", `${requiredLevel} まず安心してください`);
+
+  if ((requiredLevel === "🟢" || requiredLevel === "🔴") && updated.includes("💊 一般的な市販薬")) {
+    const lines = updated.split("\n");
+    const start = lines.findIndex((line) => line.includes("💊 一般的な市販薬"));
+    if (start >= 0) {
+      const end = lines.findIndex(
+        (line, idx) => idx > start && (line.includes("🌱 最後に") || line.startsWith("🟢") || line.startsWith("🟡"))
+      );
+      const sliceEnd = end >= 0 ? end : lines.length;
+      updated = [...lines.slice(0, start), ...lines.slice(sliceEnd)].join("\n");
+    }
+  }
+
+  return updated;
+}
+
+function ensureYellowOtcBlock(text, requiredLevel) {
+  if (!text || requiredLevel !== "🟡") return text;
   if (text.includes("💊 一般的な市販薬")) return text;
   const lines = text.split("\n");
   const otcLines = [
@@ -1382,7 +1403,8 @@ app.post("/api/chat", async (req, res) => {
         });
         aiResponse = strict.choices[0].message.content;
       }
-      aiResponse = ensureYellowOtcBlock(aiResponse);
+      aiResponse = normalizeSummaryLevel(aiResponse, level);
+      aiResponse = ensureYellowOtcBlock(aiResponse, level);
       if (!hasAllSummaryBlocks(aiResponse)) {
         aiResponse = buildLocalSummaryFallback(level, conversationHistory[conversationId]);
       }
