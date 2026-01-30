@@ -50,9 +50,9 @@ AI：「頭が痛いのはつらいですよね。
 
 今の痛みで、普段の動きはどの程度できますか？
 
-	•	普通に動ける
-	•	少しつらいが動ける
-	•	動けないほどつらい」
+	・	普通に動ける
+	・	少しつらいが動ける
+	・	動けないほどつらい」
 
 急変フラグ = false の場合（通常）：
 「[症状を言い換えて]はつらいですよね。
@@ -67,9 +67,9 @@ AI：「頭が痛いのはつらいですよね。
 
 痛みの感じ方はどれですか？
 
-	•	ズキズキする
-	•	重い感じがする
-	•	締め付けられる感じ」
+	・	ズキズキする
+	・	重い感じがする
+	・	締め付けられる感じ」
 
 【絶対に守ること】
 - 「あなたの不安と体調を一番に、一緒に考えます」というメッセージは、会話中には絶対に表示しない
@@ -105,9 +105,9 @@ AI：「頭が痛いのはつらいですよね。
 
 「[質問内容]
 
-	•	選択肢1
-	•	選択肢2
-	•	選択肢3（必要に応じて）」
+	・	選択肢1
+	・	選択肢2
+	・	選択肢3（必要に応じて）」
 
 【質問の例】
 ❌ 悪い例（複数の質問・詰まっている）：
@@ -116,25 +116,25 @@ AI：「頭が痛いのはつらいですよね。
 ⭕ 良い例（1つの質問・改行して見やすく）：
 「痛みの感じ方はどれですか？
 
-	•	ズキズキする
-	•	チクチクする
-	•	シクシクする」
+	・	ズキズキする
+	・	チクチクする
+	・	シクシクする」
 
 【タイミングに関する質問の選択肢 - 最重要】
 「いつからその痛みが始まったか」「いつから症状が出たか」などのタイミングを聞く質問をする場合は、必ず以下の選択肢を使用すること：
 
 「[質問内容]
 
-	•	さっき
-	•	数時間前
-	•	一日前」
+	・	さっき
+	・	数時間前
+	・	一日前」
 
 例：
 「いつからその痛みが始まりましたか？
 
-	•	さっき
-	•	数時間前
-	•	一日前」
+	・	さっき
+	・	数時間前
+	・	一日前」
 
 重要：
 - 「いつから」「いつ始まった」「いつから症状が出た」などのタイミングを聞く質問では、必ずこの3つの選択肢を使う
@@ -146,7 +146,7 @@ AI：「頭が痛いのはつらいですよね。
 【絶対に守ること】
 - 1回の返答では必ず1つの質問だけ
 - 複数の質問を同時にしない
-- 選択肢は必ず箇条書き（•）で表示
+- 選択肢は必ず箇条書き（・）で表示
 - 選択肢の間に必ず改行を入れる
 
 【状況の検知と質問の優先順位 - 最重要】
@@ -257,21 +257,21 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 **推奨フレーズ（選択式で提示）：**
 - 「その前後で、何かきっかけになりそうなことは思い当たりますか？
 
-	•	特に思い当たらない
-	•	何か思い当たるかも
-	•	はっきりとは分からない」
+	・	特に思い当たらない
+	・	何か思い当たるかも
+	・	はっきりとは分からない」
 
 - 「普段と少し違うことはありませんでしたか？
 
-	•	特にない
-	•	いつもと違うことがあった
-	•	分からない」
+	・	特にない
+	・	いつもと違うことがあった
+	・	分からない」
 
 - 「生活や体の使い方で、いつもと違う点はありますか？
 
-	•	特にない
-	•	いつもと違うことがあった
-	•	分からない」
+	・	特にない
+	・	いつもと違うことがあった
+	・	分からない」
 
 **選択肢の形式：**
 - 必ず3つの選択肢を提示する
@@ -283,9 +283,9 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 - 緊急度が高い場合でも、簡潔な形で必ず入れる（省略は禁止）
 - 例：「その前後で、何か思い当たることはありますか？
 
-	•	特にない
-	•	何かあったかも
-	•	分からない」
+	・	特にない
+	・	何かあったかも
+	・	分からない」
 - 長々と深掘りする必要はない。一度聞けばOK。
 - **必ず選択式で質問すること**（緊急度が高くても選択式は必須）
 
@@ -529,9 +529,9 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 
 
 [ユーザーの発言から事実のみを箇条書きで列挙]
-（例：• 夜中に突然頭が痛くなった
-• 痛みが強くて眠れない
-• 吐き気もある）
+（例：・ 夜中に突然頭が痛くなった
+・ 痛みが強くて眠れない
+・ 吐き気もある）
 
 感情的な表現や判断は一切入れない。事実のみ。
 
@@ -543,10 +543,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 
 
 なぜ注意が必要なのかを「理由ベース」で列挙する。
-
-	•	[理由1]（例：夜中に突然始まった）
-	•	[理由2]（例：いつもと違う痛み方）
-	•	[理由3]（例：自分で様子見しにくい状況）
+・理由は箇条書きで短く並べる（3つ以内）
 
 専門用語は使わない。やさしい言葉で理由を説明する。
 
@@ -562,8 +559,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 [状況を踏まえた判断を1-2行で説明]
 
 ただ、様子見と言い切れない理由：
-	•	[理由1]（例：夜中に突然始まったため、経過観察が難しい）
-	•	[理由2]（例：強い痛みが続いているため、専門家の確認が必要）
+・理由は箇条書きで2つ程度にまとめる
 
 **このため、病院に行くことをおすすめします。**
 
@@ -611,7 +607,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 
 （具体ルール）
 - ②は「〜とのこと」「〜が続いている」「〜が始まった」など、ユーザーの言葉をそのまま拾って短く要約する
-  - 必ず箇条書きで改行する（• を使う）
+  - 必ず箇条書きで改行する（・を使う）
 - ③は必ず1〜2文で書き、**「一般的には」「よく知られていることとして」「信頼できる医療情報では」**のいずれかで必ず前置きする
   - 読みやすく改行する
 - ③は症状・文脈に合う一般的な可能性のみを書く（無関係な情報は禁止）
@@ -648,12 +644,6 @@ contextFlag = true の場合、次のKairoの発話のどこかで
   - 必ず「一般的に」「〜とされています」を付ける
 - 「今この状態なら、まずはこれでいい」という暫定的な行動として提示する
 
-	•	[具体的な行動1]
-
-	•	[具体的な行動2]
-
-	•	[具体的な行動3]
-
 
 ⸻
 
@@ -662,12 +652,8 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 
 
 多くの場合、次のような経過になります。
-
-	•	数時間〜半日後
-　[具体的な状態の改善]（例：お腹のゴロゴロが少し落ち着いてくることが多いです）
-
-	•	1〜2日後
-　[OKラインの状態]（例：回数が減り、普段に近づけば心配いらないことがほとんどです）
+・数時間〜半日後の見通し
+・1〜2日後の見通し
 
 
 ⸻
@@ -677,12 +663,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 
 
 その場合は、病院に行きましょう。
-
-	•	[条件1]（例：高い熱が出てきた）
-
-	•	[条件2]（例：激しい腹痛が続く）
-
-	•	[条件3]（例：水分がほとんど取れなくなった）
+・条件は3つまで箇条書きで示す
 
 
 ⸻
@@ -705,7 +686,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 - 1ブロック＝2〜3行まで
 - 見出し＋アイコンで「目が止まる」
 - 重要な判断は**太字**にする
-- 箇条書き（•）を使って見やすく
+- 箇条書き（・）を使って見やすく
 - 数字（1,2,3）は使わない
 - 絵文字は使っていい
 - 短い段落で区切る
@@ -734,13 +715,6 @@ contextFlag = true の場合、次のKairoの発話のどこかで
      - 曖昧にしない
      - 「その時点で」と言う
      - 「今はその段階じゃない」と分かるように
-
-【表のポイント】
-- とにかく見やすく
-- 番号付きリストで明確に
-- 期間と状態を具体的に
-- 注意すべき症状や状況を明記
-- 最後に安心感を与える言葉を添える
 
 【病院をおすすめする時の禁止事項 - 最重要】
 - ❌ 冒頭でいきなり「病院に行ってください」と言わない
@@ -942,6 +916,11 @@ function ensureYellowOtcBlock(text, requiredLevel) {
     ].join("\n");
   }
   return `${text}\n${otcLines.join("\n")}`;
+}
+
+function enforceBulletSymbol(text) {
+  if (!text) return text;
+  return text.replace(/^[\s　]*[-•]\s+/gm, "・");
 }
 
 function extractOptionsFromAssistant(text) {
@@ -1315,6 +1294,7 @@ app.post("/api/chat", async (req, res) => {
         slotFilled: {},
         lastQuestionType: null,
         previousQuestionType: null,
+        recentQuestionTypes: [],
       };
     }
 
@@ -1448,8 +1428,9 @@ app.post("/api/chat", async (req, res) => {
     if (!shouldJudgeNow) {
       const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled);
       const detectedType = detectQuestionType(aiResponse);
-      const prevType = conversationState[conversationId].previousQuestionType;
-      const isRepeatedType = prevType && detectedType === prevType;
+      const recentTypes = conversationState[conversationId].recentQuestionTypes || [];
+      const isRepeatedType =
+        detectedType && recentTypes.slice(-5).includes(detectedType);
       const isValidQuestion = isQuestionResponse(aiResponse) && missingSlots.includes(detectedType);
       if ((!isValidQuestion || isRepeatedType) && missingSlots.length > 0) {
         const lastUserText = conversationHistory[conversationId]
@@ -1472,6 +1453,11 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].previousQuestionType =
         conversationState[conversationId].lastQuestionType;
       conversationState[conversationId].lastQuestionType = detectQuestionType(aiResponse);
+      if (conversationState[conversationId].lastQuestionType) {
+        const history = conversationState[conversationId].recentQuestionTypes || [];
+        history.push(conversationState[conversationId].lastQuestionType);
+        conversationState[conversationId].recentQuestionTypes = history.slice(-5);
+      }
     }
 
     // 最後の質問は「最後に〜」で始める（AIが終盤と判断した場合）
@@ -1543,6 +1529,8 @@ app.post("/api/chat", async (req, res) => {
         aiResponse = repaired.choices[0].message.content;
       }
     }
+
+    aiResponse = enforceBulletSymbol(aiResponse);
 
     // Add AI response to history
     conversationHistory[conversationId].push({
