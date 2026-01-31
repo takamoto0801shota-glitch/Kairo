@@ -79,7 +79,7 @@ AI：「頭が痛いのはつらいですよね。
 
 【聞き方のルール - 最重要】
 - **必ず1回の返答で1つの質問だけをする**（複数の質問を同時にしない）
-- **必ず選択式の質問にする**（見やすく、選びやすく）
+- **必ず二択 or 選択式の質問にする**（見やすく、選びやすく）
 - YES/NOで答えられる質問も選択式で提示
 - **選択肢を提示する時は、必ず各選択肢の間に改行を入れる**
 - 選択肢の前後にも改行を入れて、文字が詰まらないようにする
@@ -103,22 +103,29 @@ AI：「頭が痛いのはつらいですよね。
 【質問の形式】
 必ず以下の形式で質問すること：
 
-「[質問内容]
+「[共感（直前のユーザーの言葉を1語以上）]
+[目的宣言（次に進むために、判断を一段進めるために など）]
+[質問内容]
 
 	・	選択肢1
 	・	選択肢2
 	・	選択肢3（必要に応じて）」
+
+最後に「一つ整理できました」など前進の言語化を1行入れる。
 
 【質問の例】
 ❌ 悪い例（複数の質問・詰まっている）：
 「痛みの感じ方はどれですか？ズキズキ、チクチク、シクシク？いつからですか？」
 
 ⭕ 良い例（1つの質問・改行して見やすく）：
-「痛みの感じ方はどれですか？
+「それ、地味につらいやつですね。
+次に進むために、1つだけ確認させてください。
+痛みの感じ方はどれですか？
 
 	・	ズキズキする
 	・	チクチクする
-	・	シクシクする」
+	・	シクシクする
+一つ整理できました。」
 
 【タイミングに関する質問の選択肢 - 最重要】
 「いつからその痛みが始まったか」「いつから症状が出たか」などのタイミングを聞く質問をする場合は、必ず以下の選択肢を使用すること：
@@ -462,7 +469,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 【緊急度判定：スコア比率方式 - 最重要】
 - すべての質問が終了した後にのみ、緊急度を判定する（途中で結論を出さない）。
 - 最終判定は必ず1回のみ表示する。
-- 各質問は必ず3択で提示し、上から「低→中→高」の順で緊急度が上がるようにする。
+- 各質問は二択 or 選択式で提示し、上から緊急度が上がる順に並べる。
 - 各選択肢の内部スコアは以下：
   - 1つ目：1.0
   - 2つ目：1.5
@@ -500,7 +507,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 6. 質問の中でユーザーに行動を促す・進める・選ばせることは一切禁止。
 7. 質問フェーズでは「共感・寄り添い・判断・助言」を混ぜない。情報収集の質問のみを行う。
 8. 原因の推測・緊急性の示唆・行動指示は、質問フェーズでは一切禁止。
-9. 質問は必ず3択の選択式で提示する（低/中/高などの単語だけは使わない）。
+9. 質問は必ず二択 or 選択式で提示する（低/中/高などの単語だけは使わない）。
 
 【Kairoの立ち位置の再定義】
 - Kairoは「一緒に迷う存在」ではない
@@ -607,20 +614,17 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 以下の順番で必ず出力すること：
 ① ユーザーのつらさ・不安への一文の寄り添い
 ② ユーザーが話した事実の要約（箇条書き可）
-③ 信頼できる一般的な医療情報に基づく可能性の説明
+③ ユーザーの感覚を言葉にして返す（感覚の翻訳）
 ④ Kairoとしての判断（断定しすぎない）
 
 （具体ルール）
 - ②は「〜とのこと」「〜が続いている」「〜が始まった」など、ユーザーの言葉をそのまま拾って短く要約する
   - 必ず箇条書きで改行する（・を使う）
-- ③は必ず1〜2文で書き、**「一般的には」「よく知られていることとして」「信頼できる医療情報では」**のいずれかで必ず前置きする
-  - 読みやすく改行する
-- ③は症状・文脈に合う一般的な可能性のみを書く（無関係な情報は禁止）
-  - 例：腹痛/便秘なら「腸の動きの低下」「ガスや張り」など
-  - 例：のどの痛みなら「乾燥や刺激」「炎症が続くとき」など
-  - 例：頭痛なら「首肩の緊張」「目の疲れ」「睡眠不足やストレス」など
+- ③は一般論の説明ではなく、感覚の翻訳を優先する
+  - 例：「今の話を聞く限りだと、『乾燥や刺激でヒリヒリしている感じ』に近そうですね」
 - 診断・確定表現は禁止
 - 原因は一つに断定しない
+- 「注意が必要です」は禁止。代わりに「今すぐ慌てる感じではなさそうです」等を使う
 - ④は必ず「今の情報を見る限り」「現時点では」の前置きを使い、Kairoが判断を示す
 - 不安を煽らない／冷たくならない／3〜5文程度に収める
 
@@ -805,12 +809,11 @@ function buildRepairPrompt(requiredLevel) {
 🤝 今の状態について（順番厳守）：
 1) ユーザーのつらさ・不安への一文の寄り添い
 2) ユーザーが話した事実の要約（箇条書き・改行）
-3) 一般的な医療情報の可能性説明（必ず前置き「一般的には／よく知られていることとして／信頼できる医療情報では」）
-   - 症状・文脈に合う一般的な可能性のみを書く（無関係な情報は禁止）
-   - 例：腹痛/便秘なら「腸の動きの低下」「ガスや張り」など
-   - 例：のどの痛みなら「乾燥や刺激」「炎症が続くとき」など
-   - 例：頭痛なら「首肩の緊張」「目の疲れ」「睡眠不足やストレス」など
+3) ユーザーの感覚を言葉にして返す（感覚の翻訳）
+   - 一般論の説明ではなく、ユーザーの話を主語にする
+   - 例：「今の話を聞く限りだと、『乾燥や刺激でヒリヒリしている感じ』に近そうですね」
    - 診断・確定表現は禁止、原因は一つに断定しない
+   - 「注意が必要です」は禁止
 4) Kairoとしての判断（「今の情報を見る限り」「現時点では」の前置き必須）
 
 ✅ 今すぐやること（これだけでOK）：
@@ -945,11 +948,11 @@ function extractOptionsFromAssistant(text) {
       break;
     }
   }
-  return options.length === 3 ? options : [];
+  return options.length >= 2 ? options : [];
 }
 
 function isQuestionResponse(text) {
-  return extractOptionsFromAssistant(text).length === 3;
+  return extractOptionsFromAssistant(text).length >= 2;
 }
 
 function containsQuestionPhaseForbidden(text) {
@@ -1248,7 +1251,7 @@ function judgeDecision(state) {
   );
   const confidence = state.confidence;
   const slotsFilledCount = countFilledSlots(state.slotFilled);
-  const decisionCompleted = state.questionCount >= 8 || slotsFilledCount >= 6;
+  const decisionCompleted = state.questionCount >= 7 || slotsFilledCount >= 6;
   const shouldJudge = decisionCompleted;
 
   console.log(
@@ -1329,13 +1332,22 @@ app.post("/api/chat", async (req, res) => {
     }
 
     // ユーザー回答のスコアを集計
-    if (conversationState[conversationId].lastOptions.length === 3) {
+    if (conversationState[conversationId].lastOptions.length >= 2) {
       const selectedIndex = matchAnswerToOption(
         message,
         conversationState[conversationId].lastOptions
       );
+      const optionCount = conversationState[conversationId].lastOptions.length;
       const score =
-        selectedIndex === 0 ? 1.0 : selectedIndex === 1 ? 1.5 : selectedIndex === 2 ? 2.0 : 1.5;
+        selectedIndex === 0
+          ? 1.0
+          : selectedIndex === 1
+            ? optionCount === 2
+              ? 2.0
+              : 1.5
+            : selectedIndex === 2
+              ? 2.0
+              : 1.5;
       conversationState[conversationId].questionCount += 1;
       conversationState[conversationId].totalScore += score;
       conversationState[conversationId].lastOptions = [];
@@ -1361,16 +1373,16 @@ app.post("/api/chat", async (req, res) => {
 
     // Call OpenAI API
     const minQuestions = 5;
-    const maxQuestions = 9;
+    const maxQuestions = 7;
     const currentQuestionCount = conversationState[conversationId].questionCount;
     const { ratio, level, confidence, shouldJudge, slotsFilledCount } = judgeDecision(
       conversationState[conversationId]
     );
     const decisionAllowed =
-      conversationState[conversationId].questionCount >= 8 || slotsFilledCount >= 6;
+      conversationState[conversationId].questionCount >= 7 || slotsFilledCount >= 6;
     const shouldJudgeNow = shouldJudge && decisionAllowed;
     const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled);
-    const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n合計スコア: ${conversationState[conversationId].totalScore}\n最大スコア: ${conversationState[conversationId].questionCount * 2}\n緊急度比率: ${ratio.toFixed(2)}\n判定: ${level}\n判断スロット埋まり数: ${slotsFilledCount}/7\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が8以上、または判断スロットが6つ埋まった時点で必ず判定・まとめへ移行する。\n※スコアや計算はユーザーに表示しないこと。最終判断は必ずこの判定に従うこと。`;
+    const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n合計スコア: ${conversationState[conversationId].totalScore}\n最大スコア: ${conversationState[conversationId].questionCount * 2}\n緊急度比率: ${ratio.toFixed(2)}\n判定: ${level}\n判断スロット埋まり数: ${slotsFilledCount}/7\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が7以上、または判断スロットが6つ埋まった時点で必ず判定・まとめへ移行する。\n※スコアや計算はユーザーに表示しないこと。最終判断は必ずこの判定に従うこと。`;
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini", // Cost-effective model
       messages: [
@@ -1441,14 +1453,16 @@ app.post("/api/chat", async (req, res) => {
       const questionOnlyPrompt = `
 あなたはKairoです。今は情報収集中のフェーズです。
 必ず以下を守って、次の質問だけを出してください：
-- 質問の前に共感・寄り添いを1文だけ入れる（ワンクッション）
+- 質問の前に共感・寄り添いを1文だけ入れる（直前のユーザーの言葉を1語以上使う）
+- 次に進むための目的宣言を1文入れる
 - 判断・助言・原因推測は一切入れない
 - 質問は1つだけ
-- 必ず選択式（3択）
+- 必ず二択 or 選択式
 - 選択肢は意味のある具体表現で並べる（低/中/高は禁止）
 - 記号は必ず「・」を使う
 - まとめブロックは出さない
 - 直前の質問と同じ意味・同じ軸の質問は禁止
+ - 質問の最後に「一つ整理できました」など前進の言語化を1行入れる
 `;
       const questionMessages = [
         { role: "system", content: questionOnlyPrompt },
@@ -1516,7 +1530,7 @@ app.post("/api/chat", async (req, res) => {
     if (
       !shouldJudgeNow &&
       currentQuestionCount >= minQuestions &&
-      currentQuestionCount < 8 &&
+      currentQuestionCount < 7 &&
       missingSlots.length === 1 &&
       isQuestionResponse(aiResponse) &&
       !hasFinalQuestionPrefix(aiResponse)
@@ -1525,12 +1539,15 @@ app.post("/api/chat", async (req, res) => {
 あなたはKairoです。今は最後の質問です。
 必ず以下を守って、次の質問だけを出してください：
 - 文頭は必ず「最後に」または「最後の質問です」から始める
+- 共感・寄り添いを1文だけ入れる（直前のユーザーの言葉を1語以上使う）
+- 次に進むための目的宣言を1文入れる
 - 質問は1つだけ
-- 必ず選択式（3択）
+- 必ず二択 or 選択式
 - 選択肢は意味のある具体表現で並べる（低/中/高は禁止）
 - 記号は必ず「・」を使う
 - 判断・助言・原因推測は一切入れない
 - まとめブロックは出さない
+- 質問の最後に「一つ整理できました」など前進の言語化を1行入れる
 `;
       const finalMessages = [
         { role: "system", content: finalQuestionPrompt },
