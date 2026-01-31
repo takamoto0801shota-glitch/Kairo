@@ -79,7 +79,7 @@ AI：「頭が痛いのはつらいですよね。
 
 【聞き方のルール - 最重要】
 - **必ず1回の返答で1つの質問だけをする**（複数の質問を同時にしない）
-- **必ず二択 or 選択式の質問にする**（見やすく、選びやすく）
+- **必ず二択の質問にする**（見やすく、選びやすく）
 - YES/NOで答えられる質問も選択式で提示
 - **選択肢を提示する時は、必ず各選択肢の間に改行を入れる**
 - 選択肢の前後にも改行を入れて、文字が詰まらないようにする
@@ -106,11 +106,7 @@ AI：「頭が痛いのはつらいですよね。
 「[共感（直前のユーザーの言葉を1語以上）]
 [小さな前進の言語化（ここまで整理できています など）]
 [目的宣言（次は〜を一緒に確認したいです など）]
-[質問内容]
-
-	・	選択肢1
-	・	選択肢2
-	・	選択肢3（必要に応じて）」
+[質問内容（A or B の1行形式）]」
 
 【質問の例】
 ❌ 悪い例（複数の質問・詰まっている）：
@@ -118,13 +114,9 @@ AI：「頭が痛いのはつらいですよね。
 
 ⭕ 良い例（1つの質問・改行して見やすく）：
 「それ、地味につらいやつですね。
-次に進むために、1つだけ確認させてください。
-痛みの感じ方はどれですか？
-
-	・	ズキズキする
-	・	チクチクする
-	・	シクシクする
-一つ整理できました。」
+ここまで整理できています。
+次は痛み方を一緒に確認したいです。
+ズキズキする or チクチクする？」
 
 【タイミングに関する質問の選択肢 - 最重要】
 「いつからその痛みが始まったか」「いつから症状が出たか」などのタイミングを聞く質問をする場合は、必ず以下の選択肢を使用すること：
@@ -948,11 +940,18 @@ function extractOptionsFromAssistant(text) {
     if (match && match[1]) {
       options.push(match[1].trim());
     }
-    if (options.length >= 3) {
+    if (options.length >= 2) {
       break;
     }
   }
-  return options.length >= 2 ? options : [];
+  if (options.length >= 2) {
+    return options;
+  }
+  const orMatch = (text || "").match(/(.+?)\s*or\s*(.+?)[？?]?\s*$/);
+  if (orMatch) {
+    return [orMatch[1].trim(), orMatch[2].trim()];
+  }
+  return [];
 }
 
 function isQuestionResponse(text) {
@@ -974,8 +973,8 @@ function detectQuestionType(text) {
   if (normalized.match(/普段の動き|動ける|動けないほど/)) {
     return "pain_strength";
   }
-  if (normalized.match(/痛み方|ズキズキ|チクチク|締め付け|重い|刺される/)) {
-    return "pain_type";
+  if (normalized.match(/さっきより楽|変わらない|悪化/)) {
+    return "worsening";
   }
   if (normalized.match(/いつから|どのくらい前|何時間前|経過時間/)) {
     return "duration";
@@ -994,12 +993,20 @@ function detectQuestionType(text) {
 
 const SLOT_KEYS = [
   "pain_strength",
-  "pain_type",
+  "worsening",
   "duration",
   "daily_impact",
   "associated_symptoms",
   "cause_category",
-  "other",
+];
+
+const FIXED_SLOT_ORDER = [
+  "pain_strength",
+  "worsening",
+  "duration",
+  "daily_impact",
+  "associated_symptoms",
+  "cause_category",
 ];
 
 function countFilledSlots(slotFilled) {
@@ -1023,28 +1030,65 @@ function detectSymptomCategory(text) {
   return "other";
 }
 
-function buildFallbackQuestion(slotKey, lastUserText, useFinalPrefix, avoidPhrases = []) {
+const FIXED_QUESTIONS = {
+  pain_strength: {
+    q: "今の痛みを10点満点で言うと、3以下 or それ以上？",
+    options: ["3以下", "それ以上"],
+  },
+  worsening: {
+    q: "さっきより楽 or 変わらない？",
+    options: ["さっきより楽", "変わらない"],
+  },
+  duration: {
+    q: "今日だけ or 昨日から続いてる？",
+    options: ["今日だけ", "昨日から続いてる"],
+  },
+  daily_impact: {
+    q: "普段どおりに過ごせている or ちょっときつい？",
+    options: ["普段どおりに過ごせている", "ちょっときつい"],
+  },
+  associated_symptoms: {
+    q: "これ以外は特にない or 少しある？",
+    options: ["これ以外は特にない", "少しある"],
+  },
+  cause_category: {
+    q: "思い当たることある or ない？",
+    options: ["思い当たることある", "ない"],
+  },
+};
+
+function buildFixedQuestion(slotKey, lastUserText, useFinalPrefix, avoidPhrases = []) {
   const prefix = useFinalPrefix ? "最後に、" : "";
   const empathyVariants = lastUserText
     ? [
-        `${lastUserText}とのことですね。`,
-        `${lastUserText}は、気になりますよね。`,
-        `${lastUserText}が続くと、落ち着かないですよね。`,
+        `${lastUserText}は、気になってしまいますよね。`,
+        `${lastUserText}だと、落ち着きにくくなりますよね。`,
+        `${lastUserText}があると、気がかりになりますね。`,
+        `${lastUserText}のこと、引っかかりますよね。`,
+        `${lastUserText}が続くと、しんどさも出やすいですよね。`,
       ]
     : [
-        "今の状況を少しだけ整理させてください。",
-        "ここまでの話、ちゃんと受け止めています。",
-        "今の感じを一緒に整理させてください。",
+        "今の状況、ちゃんと受け止めています。",
+        "ここまでの話、丁寧に聞いています。",
+        "今の感じ、無理なく整理していきましょう。",
+        "ここまでの経緯、しっかり見ています。",
+        "今の状態、いったん落ち着いて見ていきましょう。",
       ];
   const progressVariants = [
-    "ここまでの流れは整理できています。",
-    "少しずつ整理できてきました。",
-    "いま大事なところが見えてきました。",
+    "痛みの輪郭が少し見えてきました。",
+    "時間の情報がひとつ分かりました。",
+    "日常への影響が少し把握できました。",
+    "変化の方向が少し見えてきました。",
+    "付随する様子が少し見えてきました。",
+    "原因に近い手がかりが一つ見えました。",
   ];
   const purposeVariants = [
-    "次に進むために、ここだけ確認したいです。",
-    "判断を一段進めるために、ここだけ聞かせてください。",
-    "次の一歩のために、ひとつだけ確認しますね。",
+    "ここは判断の大事なポイントなので聞きます。",
+    "状態を分ける材料になるので確認します。",
+    "この点が方向性を決める鍵になります。",
+    "今後の目安を考える材料になります。",
+    "安全に進めるために、ここだけ見せてください。",
+    "整理の軸をそろえるために聞きます。",
   ];
 
   const questions = {
@@ -1078,17 +1122,23 @@ function buildFallbackQuestion(slotKey, lastUserText, useFinalPrefix, avoidPhras
     },
   };
 
-  const selected = questions[slotKey] || questions.other;
+  const selected = FIXED_QUESTIONS[slotKey] || FIXED_QUESTIONS.cause_category;
   let chosen = null;
-  for (let i = 0; i < 3; i += 1) {
-    const empathy = empathyVariants[i % empathyVariants.length];
-    const progress = progressVariants[i % progressVariants.length];
-    const purpose = purposeVariants[i % purposeVariants.length];
-    const phraseSignature = normalizeQuestionText(`${empathy} ${progress} ${purpose}`);
-    if (!avoidPhrases.includes(phraseSignature)) {
-      chosen = { empathy, progress, purpose };
-      break;
+  for (let i = 0; i < empathyVariants.length; i += 1) {
+    for (let j = 0; j < progressVariants.length; j += 1) {
+      for (let k = 0; k < purposeVariants.length; k += 1) {
+        const empathy = empathyVariants[i];
+        const progress = progressVariants[j];
+        const purpose = purposeVariants[k];
+        const phraseSignature = normalizeQuestionText(`${empathy} ${progress} ${purpose}`);
+        if (!avoidPhrases.includes(phraseSignature)) {
+          chosen = { empathy, progress, purpose };
+          break;
+        }
+      }
+      if (chosen) break;
     }
+    if (chosen) break;
   }
   if (!chosen) {
     chosen = {
@@ -1097,7 +1147,11 @@ function buildFallbackQuestion(slotKey, lastUserText, useFinalPrefix, avoidPhras
       purpose: purposeVariants[0],
     };
   }
-  return `${chosen.empathy}\n${chosen.progress}\n${chosen.purpose}\n${selected.q}\n・${selected.options[0]}\n・${selected.options[1]}\n・${selected.options[2]}`;
+  return {
+    text: `${chosen.empathy}\n${chosen.progress}\n${chosen.purpose}\n${prefix}${selected.q}`,
+    options: selected.options,
+    type: slotKey,
+  };
 }
 
 function normalizeQuestionText(text) {
@@ -1437,7 +1491,7 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].questionCount >= 7 || slotsFilledCount >= 6;
     const shouldJudgeNow = shouldJudge && decisionAllowed;
     const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled);
-    const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n合計スコア: ${conversationState[conversationId].totalScore}\n最大スコア: ${conversationState[conversationId].questionCount * 2}\n緊急度比率: ${ratio.toFixed(2)}\n判定: ${level}\n判断スロット埋まり数: ${slotsFilledCount}/7\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が7以上、または判断スロットが6つ埋まった時点で必ず判定・まとめへ移行する。\n※スコアや計算はユーザーに表示しないこと。最終判断は必ずこの判定に従うこと。`;
+    const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n合計スコア: ${conversationState[conversationId].totalScore}\n最大スコア: ${conversationState[conversationId].questionCount * 2}\n緊急度比率: ${ratio.toFixed(2)}\n判定: ${level}\n判断スロット埋まり数: ${slotsFilledCount}/6\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が7以上、または判断スロットが6つ埋まった時点で必ず判定・まとめへ移行する。\n※スコアや計算はユーザーに表示しないこと。最終判断は必ずこの判定に従うこと。`;
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini", // Cost-effective model
       messages: [
@@ -1512,12 +1566,10 @@ app.post("/api/chat", async (req, res) => {
 - 小さな前進の言語化を1文入れる
 - 目的宣言を1文入れる（次は〜を一緒に確認したいです 等）
 - 共感・前進・目的の言い回しは直近2問と同じ表現を避ける
-- 共感・前進・目的の言い回しは直近2問と同じ表現を避ける
 - 判断・助言・原因推測は一切入れない
 - 質問は1つだけ
-- 必ず二択 or 選択式
+- 必ず二択（A or B の1行形式）
 - 選択肢は意味のある具体表現で並べる（低/中/高は禁止）
-- 記号は必ず「・」を使う
 - まとめブロックは出さない
 - 直前の質問と同じ意味・同じ軸の質問は禁止
 `;
@@ -1539,37 +1591,27 @@ app.post("/api/chat", async (req, res) => {
 
     // 6スロット埋めを保証するため、質問が不適切なら補正する
     if (!shouldJudgeNow) {
-      const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled);
-      const detectedType = detectQuestionType(aiResponse);
-      const recentTypes = conversationState[conversationId].recentQuestionTypes || [];
-      const recentTexts = conversationState[conversationId].recentQuestionTexts || [];
+      const missingSlots = FIXED_SLOT_ORDER.filter(
+        (slot) => !conversationState[conversationId].slotFilled[slot]
+      );
       const recentPhrases = conversationState[conversationId].recentQuestionPhrases || [];
-      const normalizedQuestion = normalizeQuestionText(aiResponse);
-      const phraseSignature = extractQuestionPhrases(aiResponse);
-      const isRepeatedType =
-        detectedType && recentTypes.slice(-5).includes(detectedType);
-      const isRepeatedText =
-        normalizedQuestion && recentTexts.slice(-5).includes(normalizedQuestion);
-      const isRepeatedPhrase =
-        phraseSignature && recentPhrases.slice(-2).includes(phraseSignature);
-      const isValidQuestion = isQuestionResponse(aiResponse) && missingSlots.includes(detectedType);
-      if ((!isValidQuestion || isRepeatedType || isRepeatedText || isRepeatedPhrase) && missingSlots.length > 0) {
-        const lastUserText = conversationHistory[conversationId]
-          .filter((msg) => msg.role === "user")
-          .slice(-1)[0]?.content;
+      const lastUserText = conversationHistory[conversationId]
+        .filter((msg) => msg.role === "user")
+        .slice(-1)[0]?.content;
+      const nextSlot = missingSlots[0];
+      if (nextSlot) {
         const useFinalPrefix =
           currentQuestionCount >= minQuestions && missingSlots.length === 1;
-        const nextSlot =
-          (isRepeatedType || isRepeatedText) && missingSlots.length > 1
-            ? missingSlots.find((slot) => slot !== detectedType) || missingSlots[0]
-            : missingSlots[0];
-        aiResponse = buildFallbackQuestion(nextSlot, lastUserText, useFinalPrefix, recentPhrases.slice(-2));
+        const fixed = buildFixedQuestion(nextSlot, lastUserText, useFinalPrefix, recentPhrases.slice(-5));
+        aiResponse = fixed.text;
+        conversationState[conversationId].lastOptions = fixed.options;
+        conversationState[conversationId].lastQuestionType = fixed.type;
       }
     }
 
     // 次の質問の選択肢と質問タイプを保存
     const options = extractOptionsFromAssistant(aiResponse);
-    if (options.length === 3) {
+    if (options.length >= 2) {
       conversationState[conversationId].lastOptions = options;
       conversationState[conversationId].previousQuestionType =
         conversationState[conversationId].lastQuestionType;
