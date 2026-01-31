@@ -970,8 +970,8 @@ function containsQuestionPhaseForbidden(text) {
 
 function detectQuestionType(text) {
   const normalized = (text || "").replace(/\s+/g, "");
-  if (normalized.match(/普段の動き|動ける|動けないほど/)) {
-    return "pain_strength";
+  if (normalized.match(/1から10|10点満点|何点/)) {
+    return "pain_score";
   }
   if (normalized.match(/さっきより楽|変わらない|悪化/)) {
     return "worsening";
@@ -992,7 +992,7 @@ function detectQuestionType(text) {
 }
 
 const SLOT_KEYS = [
-  "pain_strength",
+  "pain_score",
   "worsening",
   "duration",
   "daily_impact",
@@ -1001,7 +1001,7 @@ const SLOT_KEYS = [
 ];
 
 const FIXED_SLOT_ORDER = [
-  "pain_strength",
+  "pain_score",
   "worsening",
   "duration",
   "daily_impact",
@@ -1031,9 +1031,9 @@ function detectSymptomCategory(text) {
 }
 
 const FIXED_QUESTIONS = {
-  pain_strength: {
-    q: "今の痛みを10点満点で言うと、3以下 or それ以上？",
-    options: ["3以下", "それ以上"],
+  pain_score: {
+    q: "今の痛みを、1から10であらわすと何点ですか？",
+    options: [],
   },
   worsening: {
     q: "さっきより楽 or 変わらない？",
@@ -1059,13 +1059,14 @@ const FIXED_QUESTIONS = {
 
 function buildFixedQuestion(slotKey, lastUserText, useFinalPrefix, avoidPhrases = []) {
   const prefix = useFinalPrefix ? "最後に、" : "";
+  const userPhrase = formatUserPhrase(lastUserText);
   const empathyVariants = lastUserText
     ? [
-        `${lastUserText}は、気になってしまいますよね。`,
-        `${lastUserText}だと、落ち着きにくくなりますよね。`,
-        `${lastUserText}があると、気がかりになりますね。`,
-        `${lastUserText}のこと、引っかかりますよね。`,
-        `${lastUserText}が続くと、しんどさも出やすいですよね。`,
+        `${userPhrase}、気になってしまいますよね。`,
+        `${userPhrase}、落ち着きにくくなりますよね。`,
+        `${userPhrase}、気がかりになりますね。`,
+        `${userPhrase}、引っかかりますよね。`,
+        `${userPhrase}、しんどさも出やすいですよね。`,
       ]
     : [
         "今の状況、ちゃんと受け止めています。",
@@ -1091,44 +1092,14 @@ function buildFixedQuestion(slotKey, lastUserText, useFinalPrefix, avoidPhrases 
     "整理の軸をそろえるために聞きます。",
   ];
 
-  const questions = {
-    pain_strength: {
-      q: `${prefix}今の痛みで、普段の動きはどの程度できますか？`,
-      options: ["普通に動ける", "少しつらいが動ける", "動けないほどつらい"],
-    },
-    pain_type: {
-      q: `${prefix}痛み方はどれに近いですか？`,
-      options: ["ズキズキする", "重い感じがする", "締め付けられる感じ"],
-    },
-    duration: {
-      q: `${prefix}いつからその症状が続いていますか？`,
-      options: ["さっき", "数時間前", "一日前"],
-    },
-    daily_impact: {
-      q: `${prefix}睡眠や仕事・学校への影響はどれに近いですか？`,
-      options: ["普段どおり過ごせる", "少し無理をして続けている", "休まないと難しい"],
-    },
-    associated_symptoms: {
-      q: `${prefix}他に気になる症状はありますか？`,
-      options: ["特にない", "少しある", "強く気になる症状がある"],
-    },
-    cause_category: {
-      q: `${prefix}心当たりのカテゴリに近いのはどれですか？`,
-      options: ["生活リズム・疲れ", "食事や飲み物", "特に思い当たらない"],
-    },
-    other: {
-      q: `${prefix}今の状況に近いのはどれですか？`,
-      options: ["自宅で落ち着いている", "外出中・移動中", "一人で不安が強い"],
-    },
-  };
-
   const selected = FIXED_QUESTIONS[slotKey] || FIXED_QUESTIONS.cause_category;
+  const isFirstQuestion = !lastUserText;
   let chosen = null;
   for (let i = 0; i < empathyVariants.length; i += 1) {
     for (let j = 0; j < progressVariants.length; j += 1) {
       for (let k = 0; k < purposeVariants.length; k += 1) {
         const empathy = empathyVariants[i];
-        const progress = progressVariants[j];
+        const progress = isFirstQuestion ? "" : progressVariants[j];
         const purpose = purposeVariants[k];
         const phraseSignature = normalizeQuestionText(`${empathy} ${progress} ${purpose}`);
         if (!avoidPhrases.includes(phraseSignature)) {
@@ -1147,8 +1118,9 @@ function buildFixedQuestion(slotKey, lastUserText, useFinalPrefix, avoidPhrases 
       purpose: purposeVariants[0],
     };
   }
+  const progressLine = chosen.progress ? `${chosen.progress}\n` : "";
   return {
-    text: `${chosen.empathy}\n${chosen.progress}\n${chosen.purpose}\n${prefix}${selected.q}`,
+    text: `${chosen.empathy}\n${progressLine}${chosen.purpose}\n${prefix}${selected.q}`,
     options: selected.options,
     type: slotKey,
   };
@@ -1159,6 +1131,12 @@ function normalizeQuestionText(text) {
     .replace(/\s+/g, "")
     .replace(/[？?。!！]/g, "")
     .trim();
+}
+
+function formatUserPhrase(text) {
+  const cleaned = (text || "").trim().replace(/[。！？!？]+$/, "");
+  if (!cleaned) return "今の状態";
+  return `${cleaned}というのは`;
 }
 
 function extractQuestionPhrases(text) {
@@ -1437,11 +1415,39 @@ app.post("/api/chat", async (req, res) => {
         recentQuestionTypes: [],
         recentQuestionTexts: [],
         recentQuestionPhrases: [],
+        expectsPainScore: false,
+        lastPainScore: null,
+        lastPainWeight: null,
       };
     }
 
     // ユーザー回答のスコアを集計
-    if (conversationState[conversationId].lastOptions.length >= 2) {
+    if (conversationState[conversationId].expectsPainScore) {
+      const rawMatch = (message || "").match(/\b(10|[1-9])\b/);
+      const rawScore = rawMatch ? Number(rawMatch[1]) : null;
+      let weight = 1.5;
+      if (rawScore !== null) {
+        if (rawScore >= 8) weight = 2.0;
+        else if (rawScore >= 5) weight = 1.5;
+        else weight = 1.0;
+      }
+      conversationState[conversationId].questionCount += 1;
+      conversationState[conversationId].totalScore += weight;
+      conversationState[conversationId].expectsPainScore = false;
+      conversationState[conversationId].lastPainScore = rawScore;
+      conversationState[conversationId].lastPainWeight = weight;
+
+      const type = conversationState[conversationId].lastQuestionType;
+      if (type && SLOT_KEYS.includes(type)) {
+        if (!conversationState[conversationId].slotFilled[type]) {
+          conversationState[conversationId].slotFilled[type] = true;
+        }
+        conversationState[conversationId].confidence = computeConfidenceFromSlots(
+          conversationState[conversationId].slotFilled
+        );
+      }
+      conversationState[conversationId].lastQuestionType = null;
+    } else if (conversationState[conversationId].lastOptions.length >= 2) {
       const selectedIndex = matchAnswerToOption(
         message,
         conversationState[conversationId].lastOptions
@@ -1606,6 +1612,7 @@ app.post("/api/chat", async (req, res) => {
         aiResponse = fixed.text;
         conversationState[conversationId].lastOptions = fixed.options;
         conversationState[conversationId].lastQuestionType = fixed.type;
+        conversationState[conversationId].expectsPainScore = fixed.type === "pain_score";
       }
     }
 
@@ -1725,6 +1732,9 @@ app.post("/api/chat", async (req, res) => {
       decisionAllowed,
       questionCount: conversationState[conversationId].questionCount,
       summaryLine: shouldJudgeNow ? extractSummaryLine(aiResponse) : null,
+      questionType: conversationState[conversationId].lastPainScore !== null ? "pain_score" : null,
+      rawScore: conversationState[conversationId].lastPainScore,
+      painScoreRatio: conversationState[conversationId].lastPainWeight,
     };
     console.log("[DEBUG] response payload", { response: aiResponse, judgeMeta });
     res.json({ message: aiResponse, response: aiResponse, judgeMeta });
