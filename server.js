@@ -1118,7 +1118,7 @@ function buildFixedQuestion(slotKey, lastUserText, useFinalPrefix, avoidPhrases 
       purpose: purposeVariants[0],
     };
   }
-  const progressLine = chosen.progress ? `${chosen.progress}\n` : "";
+  const progressLine = isFirstQuestion ? "" : chosen.progress ? `${chosen.progress}\n` : "";
   return {
     text: `${chosen.empathy}\n${progressLine}${chosen.purpose}\n${prefix}${selected.q}`,
     options: selected.options,
@@ -1604,7 +1604,8 @@ app.post("/api/chat", async (req, res) => {
       const lastUserText = conversationHistory[conversationId]
         .filter((msg) => msg.role === "user")
         .slice(-1)[0]?.content;
-      const nextSlot = missingSlots[0];
+      const isFirstQuestion = conversationState[conversationId].questionCount === 0;
+      const nextSlot = isFirstQuestion ? "pain_score" : missingSlots[0];
       if (nextSlot) {
         const useFinalPrefix =
           currentQuestionCount >= minQuestions && missingSlots.length === 1;
