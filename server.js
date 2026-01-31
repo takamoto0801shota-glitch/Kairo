@@ -1138,8 +1138,11 @@ function formatUserPhrase(text) {
   if (/^\d+$/.test(cleaned)) {
     return "その数値は";
   }
+  if (cleaned.match(/痛いです$/)) {
+    return `${cleaned.replace(/痛いです$/, "痛いのは")}`;
+  }
   if (cleaned.endsWith("です")) {
-    return `${cleaned.replace(/です$/, "")}は`;
+    return `${cleaned.replace(/です$/, "")}のは`;
   }
   return `${cleaned}は`;
 }
@@ -1609,7 +1612,9 @@ app.post("/api/chat", async (req, res) => {
       const lastUserText = conversationHistory[conversationId]
         .filter((msg) => msg.role === "user")
         .slice(-1)[0]?.content;
-      const isFirstQuestion = conversationState[conversationId].questionCount === 0;
+      const isFirstQuestion =
+        conversationState[conversationId].questionCount === 0 &&
+        conversationState[conversationId].lastPainScore === null;
       const nextSlot = isFirstQuestion ? "pain_score" : missingSlots[0];
       if (nextSlot) {
         const useFinalPrefix =
