@@ -527,13 +527,16 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 
 📝 いまの状態を整理します（メモ）
 
-
 [ユーザーの発言から事実のみを箇条書きで列挙]
 （例：・ 夜中に突然頭が痛くなった
 ・ 痛みが強くて眠れない
 ・ 吐き気もある）
 
 感情的な表現や判断は一切入れない。事実のみ。
+抽象的・雑な箇条書きは禁止：
+- 「ない」「不明」「特になし」「休みたい」だけの記述は禁止
+- 症状・経過・生活影響など具体語を含める
+- 2〜4項目に絞り、ユーザーの言葉を短く要約する
 
 
 ⸻
@@ -557,6 +560,8 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 ここで初めて「病院をおすすめします」と明示する。
 
 [状況を踏まえた判断を1-2行で説明]
+
+受診先は症状に合わせて具体的に示す（例：歯が痛い→歯医者、耳が痛い→耳鼻科、腹痛・頭痛→病院）。
 
 ただ、様子見と言い切れない理由：
 ・理由は箇条書きで2つ程度にまとめる
@@ -791,6 +796,11 @@ function buildRepairPrompt(requiredLevel) {
 - 💊ブロックは診断・病名・商品名の断定禁止
 - 「一般的には」「ことが多い」などの表現を使う
 - 市販薬はカテゴリで提示し、✅今すぐやることと内容が被らないようにする
+- 📝 いまの状態を整理します（メモ）は事実のみ・具体的に書く
+  - 「ない」「不明」「特になし」だけの記述は禁止
+  - 症状・経過・生活影響など具体語を含める
+- 🔴の場合、🏥 Kairoの判断で受診先のカテゴリを具体的に示す
+  - 例：歯の痛み→歯医者／耳の痛み→耳鼻科／腹痛・頭痛→病院
 
 🤝 今の状態について（順番厳守）：
 1) ユーザーのつらさ・不安への一文の寄り添い
@@ -1091,13 +1101,26 @@ function buildLocalSummaryFallback(level, history) {
     return [...baseBlocks, otcBlock, closing].join("\n");
   }
   if (level === "🔴") {
+    const specialtyMap = {
+      tooth: "歯医者",
+      ear: "耳鼻科",
+      stomach: "病院",
+      head: "病院",
+      other: "病院",
+    };
+    let specialtyKey = "other";
+    if (historyText.match(/歯|歯ぐき|虫歯/)) specialtyKey = "tooth";
+    else if (historyText.match(/耳|耳鳴り|耳が痛/)) specialtyKey = "ear";
+    else if (historyText.match(/腹|お腹|胃|下痢|便秘/)) specialtyKey = "stomach";
+    else if (historyText.match(/頭痛|頭が痛|頭が重/)) specialtyKey = "head";
+    const specialty = specialtyMap[specialtyKey];
     return [
       "📝 いまの状態を整理します（メモ）",
       facts.join("\n") || "・現在の症状について相談されています",
       "⚠️ Kairoが気になっているポイント",
       "急に悪化している可能性があり、様子見と言い切れない点があります。",
       "🏥 Kairoの判断",
-      "今の情報を見る限り、病院で相談する判断が安心です。",
+      `今の情報を見る限り、${specialty}で相談する判断が安心です。`,
       "💬 最後に",
       "不安な状況だと思います。迷ったときは受診する判断は慎重で正しいです。",
     ].join("\n");

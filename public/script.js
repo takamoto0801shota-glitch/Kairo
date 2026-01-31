@@ -558,8 +558,7 @@ function updateSummaryCard(judgeMeta) {
   } else if (emoji === "🔴") {
     label = "病院を推奨します";
   }
-  const slotsFilledCount = judgeMeta?.slotsFilledCount ?? 0;
-  const rawText = `${emoji} ${label}（判断スロット${slotsFilledCount}/7）`;
+  const rawText = `${emoji} ${label}`;
   contentDiv.textContent = rawText.length > 20 ? `${rawText.slice(0, 20)}` : rawText;
 
   summaryCard.style.display = "block";
