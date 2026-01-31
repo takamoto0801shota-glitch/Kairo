@@ -1057,7 +1057,7 @@ const FIXED_QUESTIONS = {
   },
 };
 
-function buildFixedQuestion(slotKey, lastUserText, useFinalPrefix, avoidPhrases = []) {
+function buildFixedQuestion(slotKey, lastUserText, useFinalPrefix, avoidPhrases = [], isFirstQuestion = false) {
   const prefix = useFinalPrefix ? "最後に、" : "";
   const userPhrase = formatUserPhrase(lastUserText);
   const empathyVariants = lastUserText
@@ -1093,7 +1093,6 @@ function buildFixedQuestion(slotKey, lastUserText, useFinalPrefix, avoidPhrases 
   ];
 
   const selected = FIXED_QUESTIONS[slotKey] || FIXED_QUESTIONS.cause_category;
-  const isFirstQuestion = !lastUserText;
   let chosen = null;
   for (let i = 0; i < empathyVariants.length; i += 1) {
     for (let j = 0; j < progressVariants.length; j += 1) {
@@ -1136,7 +1135,13 @@ function normalizeQuestionText(text) {
 function formatUserPhrase(text) {
   const cleaned = (text || "").trim().replace(/[。！？!？]+$/, "");
   if (!cleaned) return "今の状態";
-  return `${cleaned}というのは`;
+  if (/^\d+$/.test(cleaned)) {
+    return "その数値は";
+  }
+  if (cleaned.endsWith("です")) {
+    return `${cleaned.replace(/です$/, "")}は`;
+  }
+  return `${cleaned}は`;
 }
 
 function extractQuestionPhrases(text) {
@@ -1609,11 +1614,23 @@ app.post("/api/chat", async (req, res) => {
       if (nextSlot) {
         const useFinalPrefix =
           currentQuestionCount >= minQuestions && missingSlots.length === 1;
-        const fixed = buildFixedQuestion(nextSlot, lastUserText, useFinalPrefix, recentPhrases.slice(-5));
+        const fixed = buildFixedQuestion(
+          nextSlot,
+          lastUserText,
+          useFinalPrefix,
+          recentPhrases.slice(-5),
+          isFirstQuestion
+        );
         aiResponse = fixed.text;
         conversationState[conversationId].lastOptions = fixed.options;
         conversationState[conversationId].lastQuestionType = fixed.type;
         conversationState[conversationId].expectsPainScore = fixed.type === "pain_score";
+        const phraseSignature = extractQuestionPhrases(aiResponse);
+        if (phraseSignature) {
+          const phraseHistory = conversationState[conversationId].recentQuestionPhrases || [];
+          phraseHistory.push(phraseSignature);
+          conversationState[conversationId].recentQuestionPhrases = phraseHistory.slice(-5);
+        }
       }
     }
 
