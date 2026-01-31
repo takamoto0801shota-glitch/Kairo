@@ -1206,8 +1206,8 @@ function computeUrgencyLevel(questionCount, totalScore) {
   }
   const maxScore = questionCount * 2;
   const ratio = totalScore / maxScore;
-  if (ratio >= 0.85) return { ratio, level: "🔴" };
-  if (ratio >= 0.66) return { ratio, level: "🟡" };
+  if (ratio >= 0.8) return { ratio, level: "🔴" };
+  if (ratio >= 0.69) return { ratio, level: "🟡" };
   return { ratio, level: "🟢" };
 }
 
@@ -1382,6 +1382,18 @@ app.post("/api/chat", async (req, res) => {
           max_tokens: 1000,
         });
         aiResponse = strict.choices[0].message.content;
+      }
+      if (level !== "🔴" && isHospitalFlow(aiResponse)) {
+        const repairForLevel = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: [
+            { role: "system", content: buildRepairPrompt(level) },
+            ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
+          ],
+          temperature: 0.7,
+          max_tokens: 1000,
+        });
+        aiResponse = repairForLevel.choices[0].message.content;
       }
       aiResponse = normalizeSummaryLevel(aiResponse, level);
       aiResponse = ensureYellowOtcBlock(aiResponse, level);
