@@ -1057,6 +1057,12 @@ function buildFallbackQuestion(slotKey, lastUserText, useFinalPrefix) {
   return `${empathy}\n${selected.q}\n・${selected.options[0]}\n・${selected.options[1]}\n・${selected.options[2]}`;
 }
 
+function normalizeQuestionText(text) {
+  return (text || "")
+    .replace(/\s+/g, "")
+    .replace(/[？?。!！]/g, "")
+    .trim();
+}
 function buildLocalSummaryFallback(level, history) {
   const historyText = history
     .filter((msg) => msg.role === "user")
@@ -1318,6 +1324,7 @@ app.post("/api/chat", async (req, res) => {
         lastQuestionType: null,
         previousQuestionType: null,
         recentQuestionTypes: [],
+        recentQuestionTexts: [],
       };
     }
 
@@ -1464,17 +1471,21 @@ app.post("/api/chat", async (req, res) => {
       const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled);
       const detectedType = detectQuestionType(aiResponse);
       const recentTypes = conversationState[conversationId].recentQuestionTypes || [];
+      const recentTexts = conversationState[conversationId].recentQuestionTexts || [];
+      const normalizedQuestion = normalizeQuestionText(aiResponse);
       const isRepeatedType =
         detectedType && recentTypes.slice(-5).includes(detectedType);
+      const isRepeatedText =
+        normalizedQuestion && recentTexts.slice(-5).includes(normalizedQuestion);
       const isValidQuestion = isQuestionResponse(aiResponse) && missingSlots.includes(detectedType);
-      if ((!isValidQuestion || isRepeatedType) && missingSlots.length > 0) {
+      if ((!isValidQuestion || isRepeatedType || isRepeatedText) && missingSlots.length > 0) {
         const lastUserText = conversationHistory[conversationId]
           .filter((msg) => msg.role === "user")
           .slice(-1)[0]?.content;
         const useFinalPrefix =
           currentQuestionCount >= minQuestions && missingSlots.length === 1;
         const nextSlot =
-          isRepeatedType && missingSlots.length > 1
+          (isRepeatedType || isRepeatedText) && missingSlots.length > 1
             ? missingSlots.find((slot) => slot !== detectedType) || missingSlots[0]
             : missingSlots[0];
         aiResponse = buildFallbackQuestion(nextSlot, lastUserText, useFinalPrefix);
@@ -1492,6 +1503,12 @@ app.post("/api/chat", async (req, res) => {
         const history = conversationState[conversationId].recentQuestionTypes || [];
         history.push(conversationState[conversationId].lastQuestionType);
         conversationState[conversationId].recentQuestionTypes = history.slice(-5);
+      }
+      const questionText = normalizeQuestionText(aiResponse);
+      if (questionText) {
+        const textHistory = conversationState[conversationId].recentQuestionTexts || [];
+        textHistory.push(questionText);
+        conversationState[conversationId].recentQuestionTexts = textHistory.slice(-5);
       }
     }
 
