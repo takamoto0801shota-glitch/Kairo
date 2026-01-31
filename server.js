@@ -104,14 +104,13 @@ AI：「頭が痛いのはつらいですよね。
 必ず以下の形式で質問すること：
 
 「[共感（直前のユーザーの言葉を1語以上）]
-[目的宣言（次に進むために、判断を一段進めるために など）]
+[小さな前進の言語化（ここまで整理できています など）]
+[目的宣言（次は〜を一緒に確認したいです など）]
 [質問内容]
 
 	・	選択肢1
 	・	選択肢2
 	・	選択肢3（必要に応じて）」
-
-最後に「一つ整理できました」など前進の言語化を1行入れる。
 
 【質問の例】
 ❌ 悪い例（複数の質問・詰まっている）：
@@ -805,15 +804,20 @@ function buildRepairPrompt(requiredLevel) {
   - 症状・経過・生活影響など具体語を含める
 - 🔴の場合、🏥 Kairoの判断で受診先のカテゴリを具体的に示す
   - 例：歯の痛み→歯医者／耳の痛み→耳鼻科／腹痛・頭痛→病院
+- 🤝 今の状態については一般論の説明を禁止し、感覚の翻訳にする
+  - 「今のあなたの状態なら、こう考えて大丈夫です」
+  - 「だから今日はこれでいいですよ」
 
 🤝 今の状態について（順番厳守）：
 1) ユーザーのつらさ・不安への一文の寄り添い
 2) ユーザーが話した事実の要約（箇条書き・改行）
 3) ユーザーの感覚を言葉にして返す（感覚の翻訳）
-   - 一般論の説明ではなく、ユーザーの話を主語にする
-   - 例：「今の話を聞く限りだと、『乾燥や刺激でヒリヒリしている感じ』に近そうですね」
+   - 一般論の説明はしない（医療っぽい説明は禁止）
+   - ユーザーの話を主語にする
    - 診断・確定表現は禁止、原因は一つに断定しない
    - 「注意が必要です」は禁止
+   - 「今のあなたの状態なら、こう考えて大丈夫です」を必ず含める
+   - 「だから今日はこれでいいですよ」を必ず含める
 4) Kairoとしての判断（「今の情報を見る限り」「現時点では」の前置き必須）
 
 ✅ 今すぐやること（これだけでOK）：
@@ -970,8 +974,8 @@ function detectQuestionType(text) {
   if (normalized.match(/普段の動き|動ける|動けないほど/)) {
     return "pain_strength";
   }
-  if (normalized.match(/悪化|ひどくなる|強くなる|増えている|だんだん/)) {
-    return "worsening";
+  if (normalized.match(/痛み方|ズキズキ|チクチク|締め付け|重い|刺される/)) {
+    return "pain_type";
   }
   if (normalized.match(/いつから|どのくらい前|何時間前|経過時間/)) {
     return "duration";
@@ -982,19 +986,19 @@ function detectQuestionType(text) {
   if (normalized.match(/発熱|熱|吐き気|嘔吐|しびれ|めまい|ふらつき/)) {
     return "associated_symptoms";
   }
-  if (normalized.match(/原因|きっかけ|思い当たる|普段と違う/)) {
-    return "cause";
+  if (normalized.match(/原因|きっかけ|思い当たる|普段と違う|カテゴリ/)) {
+    return "cause_category";
   }
   return "other";
 }
 
 const SLOT_KEYS = [
   "pain_strength",
-  "worsening",
+  "pain_type",
   "duration",
   "daily_impact",
   "associated_symptoms",
-  "cause",
+  "cause_category",
   "other",
 ];
 
@@ -1019,20 +1023,38 @@ function detectSymptomCategory(text) {
   return "other";
 }
 
-function buildFallbackQuestion(slotKey, lastUserText, useFinalPrefix) {
+function buildFallbackQuestion(slotKey, lastUserText, useFinalPrefix, avoidPhrases = []) {
   const prefix = useFinalPrefix ? "最後に、" : "";
-  const empathy = lastUserText
-    ? `${lastUserText}とのことですね。`
-    : "今の状況を少しだけ整理させてください。";
+  const empathyVariants = lastUserText
+    ? [
+        `${lastUserText}とのことですね。`,
+        `${lastUserText}は、気になりますよね。`,
+        `${lastUserText}が続くと、落ち着かないですよね。`,
+      ]
+    : [
+        "今の状況を少しだけ整理させてください。",
+        "ここまでの話、ちゃんと受け止めています。",
+        "今の感じを一緒に整理させてください。",
+      ];
+  const progressVariants = [
+    "ここまでの流れは整理できています。",
+    "少しずつ整理できてきました。",
+    "いま大事なところが見えてきました。",
+  ];
+  const purposeVariants = [
+    "次に進むために、ここだけ確認したいです。",
+    "判断を一段進めるために、ここだけ聞かせてください。",
+    "次の一歩のために、ひとつだけ確認しますね。",
+  ];
 
   const questions = {
     pain_strength: {
       q: `${prefix}今の痛みで、普段の動きはどの程度できますか？`,
       options: ["普通に動ける", "少しつらいが動ける", "動けないほどつらい"],
     },
-    worsening: {
-      q: `${prefix}症状の変化はどれに近いですか？`,
-      options: ["少し良くなっている", "あまり変わらない", "悪化している"],
+    pain_type: {
+      q: `${prefix}痛み方はどれに近いですか？`,
+      options: ["ズキズキする", "重い感じがする", "締め付けられる感じ"],
     },
     duration: {
       q: `${prefix}いつからその症状が続いていますか？`,
@@ -1046,9 +1068,9 @@ function buildFallbackQuestion(slotKey, lastUserText, useFinalPrefix) {
       q: `${prefix}他に気になる症状はありますか？`,
       options: ["特にない", "少しある", "強く気になる症状がある"],
     },
-    cause: {
-      q: `${prefix}前後で心当たりはありますか？`,
-      options: ["思い当たることがある", "少しだけ思い当たる", "よく分からない"],
+    cause_category: {
+      q: `${prefix}心当たりのカテゴリに近いのはどれですか？`,
+      options: ["生活リズム・疲れ", "食事や飲み物", "特に思い当たらない"],
     },
     other: {
       q: `${prefix}今の状況に近いのはどれですか？`,
@@ -1057,7 +1079,25 @@ function buildFallbackQuestion(slotKey, lastUserText, useFinalPrefix) {
   };
 
   const selected = questions[slotKey] || questions.other;
-  return `${empathy}\n${selected.q}\n・${selected.options[0]}\n・${selected.options[1]}\n・${selected.options[2]}`;
+  let chosen = null;
+  for (let i = 0; i < 3; i += 1) {
+    const empathy = empathyVariants[i % empathyVariants.length];
+    const progress = progressVariants[i % progressVariants.length];
+    const purpose = purposeVariants[i % purposeVariants.length];
+    const phraseSignature = normalizeQuestionText(`${empathy} ${progress} ${purpose}`);
+    if (!avoidPhrases.includes(phraseSignature)) {
+      chosen = { empathy, progress, purpose };
+      break;
+    }
+  }
+  if (!chosen) {
+    chosen = {
+      empathy: empathyVariants[0],
+      progress: progressVariants[0],
+      purpose: purposeVariants[0],
+    };
+  }
+  return `${chosen.empathy}\n${chosen.progress}\n${chosen.purpose}\n${selected.q}\n・${selected.options[0]}\n・${selected.options[1]}\n・${selected.options[2]}`;
 }
 
 function normalizeQuestionText(text) {
@@ -1065,6 +1105,20 @@ function normalizeQuestionText(text) {
     .replace(/\s+/g, "")
     .replace(/[？?。!！]/g, "")
     .trim();
+}
+
+function extractQuestionPhrases(text) {
+  const lines = (text || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const phraseLines = [];
+  for (const line of lines) {
+    if (line.startsWith("・")) break;
+    phraseLines.push(line);
+    if (phraseLines.length >= 3) break;
+  }
+  return normalizeQuestionText(phraseLines.join(" "));
 }
 function buildLocalSummaryFallback(level, history) {
   const historyText = history
@@ -1081,11 +1135,11 @@ function buildLocalSummaryFallback(level, history) {
       ? "不安になる状況ですよね。"
       : "つらい状態ですよね。";
 
-  const medicalInfoByCategory = {
-    stomach: "一般的には、腹部の不調は腸の動きの低下やガスの張りなどで起こることが多いとされています。原因は一つに断定できません。",
-    head: "一般的には、頭の重さは首肩の緊張や目の疲れ、睡眠不足が重なって起こることが多いとされています。原因は一つに断定できません。",
-    throat: "一般的には、のどの違和感は乾燥や刺激で起こることが多いとされています。原因は一つに断定できません。",
-    other: "一般的には、体調の変化は疲れや刺激、生活リズムの乱れが重なって起こることが多いとされています。原因は一つに断定できません。",
+  const sensoryByCategory = {
+    stomach: "今の話を聞く限りだと、「張りや重さでしんどい感じ」に近そうですね。",
+    head: "今の話を聞く限りだと、「重さや締め付けでつらい感じ」に近そうですね。",
+    throat: "今の話を聞く限りだと、「乾きや刺激でヒリヒリする感じ」に近そうですね。",
+    other: "今の話を聞く限りだと、「体がだるくてつらい感じ」に近そうですね。",
   };
 
   const otcByCategory = {
@@ -1097,7 +1151,7 @@ function buildLocalSummaryFallback(level, history) {
 
   const baseBlocks = [
     `${level} まず安心してください\n今の情報を見る限り、緊急性は高くなさそうです。`,
-    `🤝 今の状態について\n${empathy}\n${facts.join("\n")}\n${medicalInfoByCategory[category]}\n今の情報を見る限り、無理をせず様子を見る判断で大丈夫そうです。`,
+    `🤝 今の状態について\n${empathy}\n${facts.join("\n")}\n${sensoryByCategory[category]}\n今のあなたの状態なら、こう考えて大丈夫です。\nだから今日はこれでいいですよ。\n今の情報を見る限り、無理をせず様子を見る判断で大丈夫そうです。`,
     `✅ 今すぐやること（これだけでOK）\n今日は次の3つだけ意識してみてください。\n・少しずつ水分をとってみてください。一般的に、体が乾くと刺激を感じやすいとされています。\n・横になれるなら体を休めてみてください。力を抜くと楽になることがあります。\n・刺激になる飲食や冷えを避けてみてください。負担を減らすと落ち着くことがあります。`,
     `⏳ 今後の見通し\n多くの場合、時間の経過で少しずつ落ち着いてくることがあります。`,
     `🚨 もし次の症状が出たら\n強い痛みが続く／水分がとれない／ぐったりする場合は受診を検討してください。`,
@@ -1328,6 +1382,7 @@ app.post("/api/chat", async (req, res) => {
         previousQuestionType: null,
         recentQuestionTypes: [],
         recentQuestionTexts: [],
+        recentQuestionPhrases: [],
       };
     }
 
@@ -1453,8 +1508,11 @@ app.post("/api/chat", async (req, res) => {
       const questionOnlyPrompt = `
 あなたはKairoです。今は情報収集中のフェーズです。
 必ず以下を守って、次の質問だけを出してください：
-- 質問の前に共感・寄り添いを1文だけ入れる（直前のユーザーの言葉を1語以上使う）
-- 次に進むための目的宣言を1文入れる
+- 共感を1文入れる（直前のユーザーの言葉を1語以上使う）
+- 小さな前進の言語化を1文入れる
+- 目的宣言を1文入れる（次は〜を一緒に確認したいです 等）
+- 共感・前進・目的の言い回しは直近2問と同じ表現を避ける
+- 共感・前進・目的の言い回しは直近2問と同じ表現を避ける
 - 判断・助言・原因推測は一切入れない
 - 質問は1つだけ
 - 必ず二択 or 選択式
@@ -1462,7 +1520,6 @@ app.post("/api/chat", async (req, res) => {
 - 記号は必ず「・」を使う
 - まとめブロックは出さない
 - 直前の質問と同じ意味・同じ軸の質問は禁止
- - 質問の最後に「一つ整理できました」など前進の言語化を1行入れる
 `;
       const questionMessages = [
         { role: "system", content: questionOnlyPrompt },
@@ -1486,13 +1543,17 @@ app.post("/api/chat", async (req, res) => {
       const detectedType = detectQuestionType(aiResponse);
       const recentTypes = conversationState[conversationId].recentQuestionTypes || [];
       const recentTexts = conversationState[conversationId].recentQuestionTexts || [];
+      const recentPhrases = conversationState[conversationId].recentQuestionPhrases || [];
       const normalizedQuestion = normalizeQuestionText(aiResponse);
+      const phraseSignature = extractQuestionPhrases(aiResponse);
       const isRepeatedType =
         detectedType && recentTypes.slice(-5).includes(detectedType);
       const isRepeatedText =
         normalizedQuestion && recentTexts.slice(-5).includes(normalizedQuestion);
+      const isRepeatedPhrase =
+        phraseSignature && recentPhrases.slice(-2).includes(phraseSignature);
       const isValidQuestion = isQuestionResponse(aiResponse) && missingSlots.includes(detectedType);
-      if ((!isValidQuestion || isRepeatedType || isRepeatedText) && missingSlots.length > 0) {
+      if ((!isValidQuestion || isRepeatedType || isRepeatedText || isRepeatedPhrase) && missingSlots.length > 0) {
         const lastUserText = conversationHistory[conversationId]
           .filter((msg) => msg.role === "user")
           .slice(-1)[0]?.content;
@@ -1502,7 +1563,7 @@ app.post("/api/chat", async (req, res) => {
           (isRepeatedType || isRepeatedText) && missingSlots.length > 1
             ? missingSlots.find((slot) => slot !== detectedType) || missingSlots[0]
             : missingSlots[0];
-        aiResponse = buildFallbackQuestion(nextSlot, lastUserText, useFinalPrefix);
+        aiResponse = buildFallbackQuestion(nextSlot, lastUserText, useFinalPrefix, recentPhrases.slice(-2));
       }
     }
 
@@ -1524,6 +1585,12 @@ app.post("/api/chat", async (req, res) => {
         textHistory.push(questionText);
         conversationState[conversationId].recentQuestionTexts = textHistory.slice(-5);
       }
+      const phraseSignature = extractQuestionPhrases(aiResponse);
+      if (phraseSignature) {
+        const phraseHistory = conversationState[conversationId].recentQuestionPhrases || [];
+        phraseHistory.push(phraseSignature);
+        conversationState[conversationId].recentQuestionPhrases = phraseHistory.slice(-5);
+      }
     }
 
     // 最後の質問は「最後に〜」で始める（AIが終盤と判断した場合）
@@ -1539,15 +1606,15 @@ app.post("/api/chat", async (req, res) => {
 あなたはKairoです。今は最後の質問です。
 必ず以下を守って、次の質問だけを出してください：
 - 文頭は必ず「最後に」または「最後の質問です」から始める
-- 共感・寄り添いを1文だけ入れる（直前のユーザーの言葉を1語以上使う）
-- 次に進むための目的宣言を1文入れる
+- 共感を1文入れる（直前のユーザーの言葉を1語以上使う）
+- 小さな前進の言語化を1文入れる
+- 目的宣言を1文入れる（次は〜を一緒に確認したいです 等）
 - 質問は1つだけ
 - 必ず二択 or 選択式
 - 選択肢は意味のある具体表現で並べる（低/中/高は禁止）
 - 記号は必ず「・」を使う
 - 判断・助言・原因推測は一切入れない
 - まとめブロックは出さない
-- 質問の最後に「一つ整理できました」など前進の言語化を1行入れる
 `;
       const finalMessages = [
         { role: "system", content: finalQuestionPrompt },
