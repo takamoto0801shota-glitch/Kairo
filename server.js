@@ -1104,13 +1104,9 @@ const FIXED_QUESTIONS = {
 
 const TEMPLATE_ID_GROUPS = {
   EMPATHY_ONLY: [
-    "EMPATHY_ONLY_1",
-    "EMPATHY_ONLY_2",
-    "EMPATHY_ONLY_3",
-    "EMPATHY_ONLY_4",
-    "EMPATHY_ONLY_5",
-    "EMPATHY_ONLY_6",
-    "EMPATHY_ONLY_7",
+    "TEMPLATE_EMPATHY_1",
+    "TEMPLATE_EMPATHY_2",
+    "TEMPLATE_EMPATHY_3",
   ],
   EMPATHY_PROGRESS_PURPOSE: [
     "EMPATHY_PROGRESS_PURPOSE_1",
@@ -1152,7 +1148,9 @@ function pickTemplateId(state, isFirstQuestion) {
     state.progressTemplateUsed = true;
   }
   const candidates = TEMPLATE_ID_GROUPS[group];
-  const chosen = candidates.find((id) => !used.has(id)) || candidates[0];
+  const available = candidates.filter((id) => !used.has(id));
+  const pool = available.length > 0 ? available : candidates;
+  const chosen = pool[Math.floor(Math.random() * pool.length)];
   state.usedTemplateIds = [...used, chosen];
   state.lastTemplateId = chosen;
   return chosen;
@@ -1303,7 +1301,7 @@ function buildLocalSummaryFallback(level, history, state) {
 
   const baseBlocks = [
     `${level} まず安心してください\n今の情報を見る限り、緊急性は高くなさそうです。`,
-    `🤝 今の状態について\n${empathy}\n${facts.join("\n")}\n${sensoryByCategory[category]}\n今のあなたの状態なら、こう考えて大丈夫です。\nだから今日はこれでいいですよ。\n今の情報を見る限り、無理をせず様子を見る判断で大丈夫そうです。`,
+    `🤝 今の状態について\n${empathy}\n${facts.join("\n")}\n${sensoryByCategory[category]}\n今の情報を見る限り、無理をせず様子を見る判断で大丈夫そうです。`,
     `✅ 今すぐやること（これだけでOK）\n今日は次の3つだけ意識してみてください。\n・少しずつ水分をとってみてください。一般的に、体が乾くと刺激を感じやすいとされています。\n・横になれるなら体を休めてみてください。力を抜くと楽になることがあります。\n・刺激になる飲食や冷えを避けてみてください。負担を減らすと落ち着くことがあります。`,
     `⏳ 今後の見通し\n多くの場合、時間の経過で少しずつ落ち着いてくることがあります。`,
     `🚨 もし次の症状が出たら\n強い痛みが続く／水分がとれない／ぐったりする場合は受診を検討してください。`,

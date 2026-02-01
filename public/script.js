@@ -9,6 +9,12 @@ const FIRST_QUESTION_KEY = "kairo_first_question";
 
 const SUBJECTIVE_ALERT_WORDS = ["気になります", "引っかかります", "心配です", "注意が必要です"];
 
+const INITIAL_EMPATHY_TEMPLATES = {
+  TEMPLATE_EMPATHY_1: "それはつらいですよね。体の不調があると、どうしても気になりますよね。",
+  TEMPLATE_EMPATHY_2: "教えてくれてありがとうございます。まずは今の状態を一緒に整理していきましょう。",
+  TEMPLATE_EMPATHY_3: "不調があると落ち着かないですよね。ここで一つずつ確認していきましょう。",
+};
+
 const RISK_TEMPLATES = {
   LOW: {
     empathy: [
@@ -146,6 +152,9 @@ function containsSubjectiveAlertWords(text) {
 }
 
 function buildIntroLines(templateId, normalizedAnswer) {
+  if (INITIAL_EMPATHY_TEMPLATES[templateId]) {
+    return [INITIAL_EMPATHY_TEMPLATES[templateId]];
+  }
   const subject = buildSubjectFromNormalizedAnswer(normalizedAnswer);
   const riskLevel = normalizedAnswer?.riskLevel || "MEDIUM";
   const templates = getRiskTemplates(riskLevel);
