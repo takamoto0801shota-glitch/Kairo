@@ -150,7 +150,7 @@ function containsSubjectiveAlertWords(text) {
   return SUBJECTIVE_ALERT_WORDS.some((word) => (text || "").includes(word));
 }
 
-function buildIntroLines(templateId, empathyTemplateId, normalizedAnswer) {
+function buildIntroLines(templateId, empathyTemplateId, normalizedAnswer, questionIndex) {
   if (EMPATHY_OPEN_TEMPLATES[empathyTemplateId]) {
     return [EMPATHY_OPEN_TEMPLATES[empathyTemplateId]];
   }
@@ -166,11 +166,14 @@ function buildIntroLines(templateId, empathyTemplateId, normalizedAnswer) {
     empathy = RISK_TEMPLATES.LOW.empathy[index].replace("{subject}", subject);
   }
 
+  const omitProgress = typeof questionIndex === "number" && questionIndex < 3;
   const lines =
     templateId.startsWith("EMPATHY_ONLY")
       ? [empathy]
       : templateId.startsWith("EMPATHY_PROGRESS_PURPOSE")
-        ? [empathy, progress, purpose]
+        ? omitProgress
+          ? [empathy, purpose]
+          : [empathy, progress, purpose]
         : [empathy, purpose];
 
   if (riskLevel !== "HIGH" && lines.some((line) => containsSubjectiveAlertWords(line))) {
@@ -184,7 +187,12 @@ function renderQuestionPayload(payload, normalizedAnswer) {
   if (!payload || !payload.templateId || !payload.question || !payload.empathyTemplateId) {
     return payload?.question || "";
   }
-  const lines = buildIntroLines(payload.templateId, payload.empathyTemplateId, normalizedAnswer);
+  const lines = buildIntroLines(
+    payload.templateId,
+    payload.empathyTemplateId,
+    normalizedAnswer,
+    payload.questionIndex
+  );
   lines.push(payload.question);
   return lines.join("\n");
 }

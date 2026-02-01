@@ -1680,7 +1680,12 @@ app.post("/api/chat", async (req, res) => {
       const fixed = buildFixedQuestion("pain_score", false);
       const templateId = pickTemplateId(conversationState[conversationId], true);
       const empathyTemplateId = pickEmpathyTemplateId(true);
-      res.locals.questionPayload = { templateId, empathyTemplateId, question: fixed.question };
+      res.locals.questionPayload = {
+        templateId,
+        empathyTemplateId,
+        question: fixed.question,
+        questionIndex: conversationState[conversationId].questionCount,
+      };
       res.locals.isFixedQuestion = true;
       conversationState[conversationId].lastOptions = fixed.options;
       conversationState[conversationId].lastQuestionType = fixed.type;
@@ -1860,7 +1865,12 @@ app.post("/api/chat", async (req, res) => {
         const fixed = buildFixedQuestion(nextSlot, useFinalPrefix);
         const templateId = pickTemplateId(conversationState[conversationId], isFirstQuestion);
         const empathyTemplateId = pickEmpathyTemplateId(isFirstQuestion);
-        res.locals.questionPayload = { templateId, empathyTemplateId, question: fixed.question };
+        res.locals.questionPayload = {
+          templateId,
+          empathyTemplateId,
+          question: fixed.question,
+          questionIndex: conversationState[conversationId].questionCount,
+        };
         res.locals.isFixedQuestion = true;
 
         aiResponse = fixed.question;
