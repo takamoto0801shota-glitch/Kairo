@@ -249,6 +249,16 @@ TEMPLATE_EMPATHY_2:
 TEMPLATE_EMPATHY_3:  
 「不調があると落ち着かないですよね。ここで一つずつ確認していきましょう。」
 
+## 12.6 共感テンプレの役割分離（必須）
+- 共感テンプレは2種類のみ。
+  1) EMPATHY_OPEN（初回のみ）
+  2) EMPATHY_NEXT（2問目以降）
+- フォールバック用の共感文は禁止。
+- templateId / empathyTemplateId が無い場合、共感文は表示しない。
+- 共感文はLLM生成禁止。
+- questionCount により if/else で明示的に切り替える。
+- EMPATHY_NEXT は「今まで通りの共感」を使う（ただし禁止語は除外）。
+
 ## 13. 判定設計の基本原則（必須）
 - Kairoにおいて「判定完了」と「shouldJudge === true」は同義である。
 - 判断スロットが6つ以上埋まった時点、または質問回数が8以上になった時点で、必ず judgeMeta.shouldJudge を true にする。

@@ -1128,6 +1128,22 @@ const TEMPLATE_ID_GROUPS = {
   ],
 };
 
+const EMPATHY_OPEN_IDS = [
+  "TEMPLATE_EMPATHY_1",
+  "TEMPLATE_EMPATHY_2",
+  "TEMPLATE_EMPATHY_3",
+];
+
+const EMPATHY_NEXT_IDS = [
+  "EMPATHY_NEXT_1",
+  "EMPATHY_NEXT_2",
+  "EMPATHY_NEXT_3",
+  "EMPATHY_NEXT_4",
+  "EMPATHY_NEXT_5",
+  "EMPATHY_NEXT_6",
+  "EMPATHY_NEXT_7",
+];
+
 function buildFixedQuestion(slotKey, useFinalPrefix) {
   const prefix = useFinalPrefix ? "最後に、" : "";
   const selected = FIXED_QUESTIONS[slotKey] || FIXED_QUESTIONS.cause_category;
@@ -1154,6 +1170,11 @@ function pickTemplateId(state, isFirstQuestion) {
   state.usedTemplateIds = [...used, chosen];
   state.lastTemplateId = chosen;
   return chosen;
+}
+
+function pickEmpathyTemplateId(isFirstQuestion) {
+  const pool = isFirstQuestion ? EMPATHY_OPEN_IDS : EMPATHY_NEXT_IDS;
+  return pool[Math.floor(Math.random() * pool.length)];
 }
 
 function normalizeQuestionText(text) {
@@ -1658,7 +1679,8 @@ app.post("/api/chat", async (req, res) => {
     if (isInitialQuestionPhase) {
       const fixed = buildFixedQuestion("pain_score", false);
       const templateId = pickTemplateId(conversationState[conversationId], true);
-      res.locals.questionPayload = { templateId, question: fixed.question };
+      const empathyTemplateId = pickEmpathyTemplateId(true);
+      res.locals.questionPayload = { templateId, empathyTemplateId, question: fixed.question };
       res.locals.isFixedQuestion = true;
       conversationState[conversationId].lastOptions = fixed.options;
       conversationState[conversationId].lastQuestionType = fixed.type;
@@ -1837,7 +1859,8 @@ app.post("/api/chat", async (req, res) => {
           currentQuestionCount >= minQuestions && missingSlots.length === 1;
         const fixed = buildFixedQuestion(nextSlot, useFinalPrefix);
         const templateId = pickTemplateId(conversationState[conversationId], isFirstQuestion);
-        res.locals.questionPayload = { templateId, question: fixed.question };
+        const empathyTemplateId = pickEmpathyTemplateId(isFirstQuestion);
+        res.locals.questionPayload = { templateId, empathyTemplateId, question: fixed.question };
         res.locals.isFixedQuestion = true;
 
         aiResponse = fixed.question;

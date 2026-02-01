@@ -9,13 +9,13 @@ const FIRST_QUESTION_KEY = "kairo_first_question";
 
 const SUBJECTIVE_ALERT_WORDS = ["気になります", "引っかかります", "心配です", "注意が必要です"];
 
-const INITIAL_EMPATHY_TEMPLATES = {
+const EMPATHY_OPEN_TEMPLATES = {
   TEMPLATE_EMPATHY_1: "それはつらいですよね。体の不調があると、どうしても気になりますよね。",
   TEMPLATE_EMPATHY_2: "教えてくれてありがとうございます。まずは今の状態を一緒に整理していきましょう。",
   TEMPLATE_EMPATHY_3: "不調があると落ち着かないですよね。ここで一つずつ確認していきましょう。",
 };
 
-const RISK_TEMPLATES = {
+const EMPATHY_NEXT_TEMPLATES = {
   LOW: {
     empathy: [
       "{subject}、安心材料ですね。",
@@ -47,7 +47,6 @@ const RISK_TEMPLATES = {
   },
   MEDIUM: {
     empathy: [
-      "{subject}、少し気にしておきたいですね。",
       "{subject}、ここは見ておきたいです。",
       "{subject}、状況をもう少し整理したいです。",
       "{subject}、今の流れを一度まとめてみましょう。",
@@ -142,18 +141,18 @@ function buildSubjectFromNormalizedAnswer(normalized) {
 }
 
 function getRiskTemplates(riskLevel) {
-  if (riskLevel === "HIGH") return RISK_TEMPLATES.HIGH;
-  if (riskLevel === "LOW") return RISK_TEMPLATES.LOW;
-  return RISK_TEMPLATES.MEDIUM;
+  if (riskLevel === "HIGH") return EMPATHY_NEXT_TEMPLATES.HIGH;
+  if (riskLevel === "LOW") return EMPATHY_NEXT_TEMPLATES.LOW;
+  return EMPATHY_NEXT_TEMPLATES.MEDIUM;
 }
 
 function containsSubjectiveAlertWords(text) {
   return SUBJECTIVE_ALERT_WORDS.some((word) => (text || "").includes(word));
 }
 
-function buildIntroLines(templateId, normalizedAnswer) {
-  if (INITIAL_EMPATHY_TEMPLATES[templateId]) {
-    return [INITIAL_EMPATHY_TEMPLATES[templateId]];
+function buildIntroLines(templateId, empathyTemplateId, normalizedAnswer) {
+  if (EMPATHY_OPEN_TEMPLATES[empathyTemplateId]) {
+    return [EMPATHY_OPEN_TEMPLATES[empathyTemplateId]];
   }
   const subject = buildSubjectFromNormalizedAnswer(normalizedAnswer);
   const riskLevel = normalizedAnswer?.riskLevel || "MEDIUM";
@@ -175,17 +174,17 @@ function buildIntroLines(templateId, normalizedAnswer) {
         : [empathy, purpose];
 
   if (riskLevel !== "HIGH" && lines.some((line) => containsSubjectiveAlertWords(line))) {
-    lines[0] = RISK_TEMPLATES.LOW.empathy[index].replace("{subject}", subject);
+    lines[0] = EMPATHY_NEXT_TEMPLATES.LOW.empathy[index].replace("{subject}", subject);
   }
 
   return lines;
 }
 
 function renderQuestionPayload(payload, normalizedAnswer) {
-  if (!payload || !payload.templateId || !payload.question) {
+  if (!payload || !payload.templateId || !payload.question || !payload.empathyTemplateId) {
     return payload?.question || "";
   }
-  const lines = buildIntroLines(payload.templateId, normalizedAnswer);
+  const lines = buildIntroLines(payload.templateId, payload.empathyTemplateId, normalizedAnswer);
   lines.push(payload.question);
   return lines.join("\n");
 }
