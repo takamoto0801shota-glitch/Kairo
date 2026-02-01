@@ -765,45 +765,55 @@ function hideSummaryCard() {
 
 // Call OpenAI API
 async function callOpenAI(message) {
-  try {
-    const conversationId = getConversationId();
+  const conversationId = getConversationId();
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  let lastError = null;
 
-    const response = await fetch(API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        message: message,
-        conversationId: conversationId,
-      }),
-    });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await fetch(API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          message: message,
+          conversationId: conversationId,
+        }),
+      });
 
-    if (!response.ok) {
-      let errorMessage = `HTTP error! status: ${response.status}`;
-      try {
-        const errorData = await response.json();
-        errorMessage = errorData.error || errorData.details || errorMessage;
-        console.error("サーバーエラー:", errorData);
-      } catch (parseError) {
-        const text = await response.text();
-        console.error("レスポンステキスト:", text);
-        errorMessage = `サーバーエラー (${response.status}): ${text.substring(0, 100)}`;
+      if (!response.ok) {
+        let errorMessage = `HTTP error! status: ${response.status}`;
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData.error || errorData.details || errorMessage;
+          console.error("サーバーエラー:", errorData);
+        } catch (parseError) {
+          const text = await response.text();
+          console.error("レスポンステキスト:", text);
+          errorMessage = `サーバーエラー (${response.status}): ${text.substring(0, 100)}`;
+        }
+        throw new Error(errorMessage);
       }
-      throw new Error(errorMessage);
-    }
 
-    const data = await response.json();
-    return data;
-  } catch (error) {
-    console.error("API呼び出しエラー:", error);
-    console.error("エラーの詳細:", {
-      message: error.message,
-      stack: error.stack,
-      name: error.name
-    });
-    throw error;
+      const data = await response.json();
+      return data;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 0) {
+        await sleep(1000);
+        continue;
+      }
+    }
   }
+
+  console.error("API呼び出しエラー:", lastError);
+  console.error("エラーの詳細:", {
+    message: lastError?.message,
+    stack: lastError?.stack,
+    name: lastError?.name,
+  });
+  throw lastError;
 }
 
 // Handle user input
