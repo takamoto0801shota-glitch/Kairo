@@ -1093,8 +1093,8 @@ const FIXED_QUESTIONS = {
     options: ["普通に動ける", "少しつらいが動ける", "動けないほどつらい"],
   },
   associated_symptoms: {
-    q: "これ以外の症状はどれに近いですか？\n・これ以外は特にない\n・少しある\n・いくつかある",
-    options: ["これ以外は特にない", "少しある", "いくつかある"],
+    q: "これ以外の症状は他にありますか？",
+    options: [],
   },
   cause_category: {
     q: "きっかけとして近いのはどれですか？\n・特に思い当たらない\n・何か思い当たるかも\n・はっきりとは分からない",
@@ -1152,6 +1152,20 @@ function buildFixedQuestion(slotKey, useFinalPrefix) {
     options: selected.options,
     type: slotKey,
   };
+}
+
+function buildAssociatedSymptomsOptions(category) {
+  const base = ["これ以外は特にない"];
+  if (category === "stomach") {
+    return base.concat(["吐き気がある", "発熱や強いだるさがある"]);
+  }
+  if (category === "head") {
+    return base.concat(["吐き気やめまいがある", "しびれや視界の違和感がある"]);
+  }
+  if (category === "throat") {
+    return base.concat(["発熱がある", "息苦しさや強い痛みがある"]);
+  }
+  return base.concat(["少し違和感がある", "強いだるさや発熱がある"]);
 }
 
 function pickTemplateId(state, isFirstQuestion) {
@@ -1240,6 +1254,9 @@ function buildFactsFromSlotAnswers(state) {
     } else {
       facts.push(`きっかけは「${answers.cause_category}」に近い`);
     }
+  }
+  if (state?.causeDetailText) {
+    facts.push(`きっかけの具体として「${state.causeDetailText}」と話している`);
   }
   return facts.map((item) => `・${item}`);
 }
@@ -1573,6 +1590,11 @@ app.post("/api/chat", async (req, res) => {
         slotAnswers: {},
         slotNormalized: {},
         askedSlots: {},
+        causeDetailPending: false,
+        causeDetailAsked: false,
+        causeDetailAnswered: false,
+        causeDetailText: null,
+        expectsCauseDetail: false,
         expectsPainScore: false,
         lastPainScore: null,
         lastPainWeight: null,
@@ -1581,6 +1603,11 @@ app.post("/api/chat", async (req, res) => {
     }
 
     // ユーザー回答のスコアを集計
+    if (conversationState[conversationId].expectsCauseDetail) {
+      conversationState[conversationId].causeDetailText = message.trim();
+      conversationState[conversationId].expectsCauseDetail = false;
+      conversationState[conversationId].causeDetailAnswered = true;
+    }
     if (conversationState[conversationId].expectsPainScore) {
       const rawMatch = (message || "").match(/\b(10|[1-9])\b/);
       const rawScore = rawMatch ? Number(rawMatch[1]) : null;
@@ -1655,6 +1682,18 @@ app.post("/api/chat", async (req, res) => {
           }
           conversationState[conversationId].slotNormalized[type] = normalized;
           conversationState[conversationId].lastNormalizedAnswer = normalized;
+          if (type === "cause_category") {
+            const raw = lastOptionsSnapshot[selectedIndex] || "";
+            if (raw.includes("思い当たる")) {
+              conversationState[conversationId].causeDetailPending = true;
+              conversationState[conversationId].causeDetailAnswered = false;
+              conversationState[conversationId].causeDetailAsked = false;
+            } else {
+              conversationState[conversationId].causeDetailPending = false;
+              conversationState[conversationId].causeDetailAnswered = false;
+              conversationState[conversationId].causeDetailAsked = false;
+            }
+          }
         }
         conversationState[conversationId].confidence = computeConfidenceFromSlots(
           conversationState[conversationId].slotFilled
@@ -1671,6 +1710,49 @@ app.post("/api/chat", async (req, res) => {
       role: "user",
       content: message,
     });
+
+    const askedSlotsCount = countAskedSlots(conversationState[conversationId].askedSlots);
+    if (
+      conversationState[conversationId].causeDetailPending &&
+      !conversationState[conversationId].causeDetailAsked &&
+      askedSlotsCount >= 6
+    ) {
+      const followupQuestion = "具体的に教えてもらってもいいですか？";
+      conversationState[conversationId].causeDetailAsked = true;
+      conversationState[conversationId].expectsCauseDetail = true;
+
+      conversationHistory[conversationId].push({
+        role: "assistant",
+        content: followupQuestion,
+      });
+
+      const judgeMeta = {
+        judgement: "🟢",
+        confidence: conversationState[conversationId].confidence,
+        ratio: 0,
+        shouldJudge: false,
+        slotsFilledCount: countFilledSlots(conversationState[conversationId].slotFilled),
+        decisionAllowed: false,
+        questionCount: conversationState[conversationId].questionCount,
+        summaryLine: null,
+        questionType: null,
+        rawScore: null,
+        painScoreRatio: null,
+      };
+      console.log("[DEBUG] response payload", {
+        response: followupQuestion,
+        judgeMeta,
+        questionPayload: null,
+        normalizedAnswer: conversationState[conversationId].lastNormalizedAnswer || null,
+      });
+      return res.json({
+        message: followupQuestion,
+        response: followupQuestion,
+        judgeMeta,
+        questionPayload: null,
+        normalizedAnswer: conversationState[conversationId].lastNormalizedAnswer || null,
+      });
+    }
 
     const isInitialQuestionPhase =
       conversationState[conversationId].questionCount === 0 &&
@@ -1734,12 +1816,14 @@ app.post("/api/chat", async (req, res) => {
     const { ratio, level, confidence, shouldJudge, slotsFilledCount } = judgeDecision(
       conversationState[conversationId]
     );
-    const askedSlotsCount = countAskedSlots(conversationState[conversationId].askedSlots);
     const decisionAllowed =
       conversationState[conversationId].questionCount >= 7 ||
       slotsFilledCount >= 6 ||
       askedSlotsCount >= 6;
-    const shouldJudgeNow = shouldJudge && decisionAllowed;
+    const shouldJudgeNow =
+      shouldJudge &&
+      decisionAllowed &&
+      !(conversationState[conversationId].causeDetailPending && !conversationState[conversationId].causeDetailAnswered);
     const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled);
     const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n合計スコア: ${conversationState[conversationId].totalScore}\n最大スコア: ${conversationState[conversationId].questionCount * 2}\n緊急度比率: ${ratio.toFixed(2)}\n判定: ${level}\n判断スロット埋まり数: ${slotsFilledCount}/6\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が7以上、または判断スロットが6つ埋まった時点で必ず判定・まとめへ移行する。\n※スコアや計算はユーザーに表示しないこと。最終判断は必ずこの判定に従うこと。`;
     const completion = await openai.chat.completions.create({
@@ -1863,6 +1947,16 @@ app.post("/api/chat", async (req, res) => {
         const useFinalPrefix =
           currentQuestionCount >= minQuestions && missingSlots.length === 1;
         const fixed = buildFixedQuestion(nextSlot, useFinalPrefix);
+        if (nextSlot === "associated_symptoms") {
+          const historyText = conversationHistory[conversationId]
+            .filter((msg) => msg.role === "user")
+            .map((msg) => msg.content)
+            .join("\n");
+          const category = detectSymptomCategory(historyText);
+          const options = buildAssociatedSymptomsOptions(category);
+          fixed.options = options;
+          fixed.question = `${useFinalPrefix ? "最後に、" : ""}${FIXED_QUESTIONS.associated_symptoms.q}\n・${options.join("\n・")}`;
+        }
         const templateId = pickTemplateId(conversationState[conversationId], isFirstQuestion);
         const empathyTemplateId = pickEmpathyTemplateId(isFirstQuestion);
         res.locals.questionPayload = {
