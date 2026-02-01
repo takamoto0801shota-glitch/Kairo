@@ -7,6 +7,76 @@ const HISTORY_KEY = "kairo_chat_history";
 const CONVERSATION_ID_KEY = "kairo_conversation_id";
 const FIRST_QUESTION_KEY = "kairo_first_question";
 
+const EMPATHY_TEMPLATES = [
+  "{subject}、気になってしまいますよね。",
+  "{subject}、落ち着きにくくなりますよね。",
+  "{subject}、気がかりになりますね。",
+  "{subject}、引っかかりますよね。",
+  "{subject}、しんどさも出やすいですよね。",
+  "{subject}、不安になりやすいですよね。",
+  "{subject}、心配になりますよね。",
+];
+
+const PROGRESS_TEMPLATES = [
+  "痛みの感じ方は一度整理できました。",
+  "ここまでで大まかな流れはつかめています。",
+  "今の状態の輪郭が少し見えてきました。",
+  "ポイントが一つ見えてきました。",
+  "状況の軸がひとつそろいました。",
+  "ここまでの情報で形が少しはっきりしました。",
+  "今の様子が少し言葉にできています。",
+];
+
+const PURPOSE_TEMPLATES = [
+  "次に判断の材料を一つだけ確認させてください。",
+  "ここは方向を決めるために聞きますね。",
+  "いまの状態を分けるためにここだけ見せてください。",
+  "次の一歩を決めるために一点だけ伺います。",
+  "安全に整理するために、ここを確認します。",
+  "この点が判断の要なので聞きます。",
+  "迷いを減らすために、ここだけ確認します。",
+];
+
+function toSubjectPhrase(text) {
+  const trimmed = (text || "").trim();
+  if (!trimmed) return "今の状況は";
+  if (/^(10|[1-9])$/.test(trimmed)) return "その数値は";
+  let cleaned = trimmed
+    .replace(/(です|ます|でした|ました|ですか|ますか|ですね|でしたか|ましたか)$/g, "")
+    .trim();
+  if (!cleaned) return "今の状況は";
+  if (/(のは|は)$/.test(cleaned)) return cleaned;
+  if (/(痛い|つらい|苦しい|しんどい|きつい|重い|だるい|怖い|不安|心配)$/.test(cleaned)) {
+    return `${cleaned}のは`;
+  }
+  return `${cleaned}は`;
+}
+
+function buildIntroLines(templateId, userText) {
+  const subject = toSubjectPhrase(userText);
+  const index = Math.max(0, Math.min(6, Number(templateId.split("_").pop()) - 1 || 0));
+  const empathy = EMPATHY_TEMPLATES[index].replace("{subject}", subject);
+  const progress = PROGRESS_TEMPLATES[index];
+  const purpose = PURPOSE_TEMPLATES[index];
+
+  if (templateId.startsWith("EMPATHY_ONLY")) {
+    return [empathy];
+  }
+  if (templateId.startsWith("EMPATHY_PROGRESS_PURPOSE")) {
+    return [empathy, progress, purpose];
+  }
+  return [empathy, purpose];
+}
+
+function renderQuestionPayload(payload, userText) {
+  if (!payload || !payload.templateId || !payload.question) {
+    return payload?.question || "";
+  }
+  const lines = buildIntroLines(payload.templateId, userText);
+  lines.push(payload.question);
+  return lines.join("\n");
+}
+
 // Generate or get conversation ID
 function getConversationId() {
   let conversationId = localStorage.getItem(CONVERSATION_ID_KEY);
@@ -654,7 +724,9 @@ async function handleUserInput() {
       const data = await callOpenAI(userText);
       console.log("[DEBUG] full aiResponse", data);
       const aiResponse = data;
-      const aiMessage = aiResponse.message;
+      const aiMessage = aiResponse.questionPayload
+        ? renderQuestionPayload(aiResponse.questionPayload, userText)
+        : aiResponse.message;
 
       // Remove loading message
       const loadingMsg = document.getElementById(loadingId);

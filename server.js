@@ -947,7 +947,8 @@ function extractOptionsFromAssistant(text) {
   if (options.length >= 2) {
     return options;
   }
-  const orMatch = (text || "").match(/(.+?)\s*or\s*(.+?)[？?]?\s*$/);
+  const lastLine = [...(text || "").split("\n")].reverse().find((line) => line.trim());
+  const orMatch = (lastLine || "").match(/(.+?)\s*or\s*(.+?)[？?]?\s*$/);
   if (orMatch) {
     return [orMatch[1].trim(), orMatch[2].trim()];
   }
@@ -1057,72 +1058,60 @@ const FIXED_QUESTIONS = {
   },
 };
 
-function buildFixedQuestion(slotKey, lastUserText, useFinalPrefix, avoidPhrases = [], isFirstQuestion = false) {
-  const prefix = useFinalPrefix ? "最後に、" : "";
-  const userPhrase = formatUserPhrase(lastUserText);
-  const empathyVariants = lastUserText
-    ? [
-        `${userPhrase}、気になってしまいますよね。`,
-        `${userPhrase}、落ち着きにくくなりますよね。`,
-        `${userPhrase}、気がかりになりますね。`,
-        `${userPhrase}、引っかかりますよね。`,
-        `${userPhrase}、しんどさも出やすいですよね。`,
-      ]
-    : [
-        "今の状況、ちゃんと受け止めています。",
-        "ここまでの話、丁寧に聞いています。",
-        "今の感じ、無理なく整理していきましょう。",
-        "ここまでの経緯、しっかり見ています。",
-        "今の状態、いったん落ち着いて見ていきましょう。",
-      ];
-  const progressVariants = [
-    "痛みの輪郭が少し見えてきました。",
-    "時間の情報がひとつ分かりました。",
-    "日常への影響が少し把握できました。",
-    "変化の方向が少し見えてきました。",
-    "付随する様子が少し見えてきました。",
-    "原因に近い手がかりが一つ見えました。",
-  ];
-  const purposeVariants = [
-    "ここは判断の大事なポイントなので聞きます。",
-    "状態を分ける材料になるので確認します。",
-    "この点が方向性を決める鍵になります。",
-    "今後の目安を考える材料になります。",
-    "安全に進めるために、ここだけ見せてください。",
-    "整理の軸をそろえるために聞きます。",
-  ];
+const TEMPLATE_ID_GROUPS = {
+  EMPATHY_ONLY: [
+    "EMPATHY_ONLY_1",
+    "EMPATHY_ONLY_2",
+    "EMPATHY_ONLY_3",
+    "EMPATHY_ONLY_4",
+    "EMPATHY_ONLY_5",
+    "EMPATHY_ONLY_6",
+    "EMPATHY_ONLY_7",
+  ],
+  EMPATHY_PROGRESS_PURPOSE: [
+    "EMPATHY_PROGRESS_PURPOSE_1",
+    "EMPATHY_PROGRESS_PURPOSE_2",
+    "EMPATHY_PROGRESS_PURPOSE_3",
+    "EMPATHY_PROGRESS_PURPOSE_4",
+    "EMPATHY_PROGRESS_PURPOSE_5",
+    "EMPATHY_PROGRESS_PURPOSE_6",
+    "EMPATHY_PROGRESS_PURPOSE_7",
+  ],
+  EMPATHY_PURPOSE: [
+    "EMPATHY_PURPOSE_1",
+    "EMPATHY_PURPOSE_2",
+    "EMPATHY_PURPOSE_3",
+    "EMPATHY_PURPOSE_4",
+    "EMPATHY_PURPOSE_5",
+    "EMPATHY_PURPOSE_6",
+    "EMPATHY_PURPOSE_7",
+  ],
+};
 
+function buildFixedQuestion(slotKey, useFinalPrefix) {
+  const prefix = useFinalPrefix ? "最後に、" : "";
   const selected = FIXED_QUESTIONS[slotKey] || FIXED_QUESTIONS.cause_category;
-  let chosen = null;
-  for (let i = 0; i < empathyVariants.length; i += 1) {
-    for (let j = 0; j < progressVariants.length; j += 1) {
-      for (let k = 0; k < purposeVariants.length; k += 1) {
-        const empathy = empathyVariants[i];
-        const progress = isFirstQuestion ? "" : progressVariants[j];
-        const purpose = purposeVariants[k];
-        const phraseSignature = normalizeQuestionText(`${empathy} ${progress} ${purpose}`);
-        if (!avoidPhrases.includes(phraseSignature)) {
-          chosen = { empathy, progress, purpose };
-          break;
-        }
-      }
-      if (chosen) break;
-    }
-    if (chosen) break;
-  }
-  if (!chosen) {
-    chosen = {
-      empathy: empathyVariants[0],
-      progress: progressVariants[0],
-      purpose: purposeVariants[0],
-    };
-  }
-  const progressLine = isFirstQuestion ? "" : chosen.progress ? `${chosen.progress}\n` : "";
   return {
-    text: `${chosen.empathy}\n${progressLine}${chosen.purpose}\n${prefix}${selected.q}`,
+    question: `${prefix}${selected.q}`,
     options: selected.options,
     type: slotKey,
   };
+}
+
+function pickTemplateId(state, isFirstQuestion) {
+  const used = new Set(state.usedTemplateIds || []);
+  let group = "EMPATHY_PURPOSE";
+  if (isFirstQuestion) {
+    group = "EMPATHY_ONLY";
+  } else if (!state.progressTemplateUsed) {
+    group = "EMPATHY_PROGRESS_PURPOSE";
+    state.progressTemplateUsed = true;
+  }
+  const candidates = TEMPLATE_ID_GROUPS[group];
+  const chosen = candidates.find((id) => !used.has(id)) || candidates[0];
+  state.usedTemplateIds = [...used, chosen];
+  state.lastTemplateId = chosen;
+  return chosen;
 }
 
 function normalizeQuestionText(text) {
@@ -1423,6 +1412,9 @@ app.post("/api/chat", async (req, res) => {
         recentQuestionTypes: [],
         recentQuestionTexts: [],
         recentQuestionPhrases: [],
+        usedTemplateIds: [],
+        progressTemplateUsed: false,
+        lastTemplateId: null,
         expectsPainScore: false,
         lastPainScore: null,
         lastPainWeight: null,
@@ -1608,10 +1600,6 @@ app.post("/api/chat", async (req, res) => {
       const missingSlots = FIXED_SLOT_ORDER.filter(
         (slot) => !conversationState[conversationId].slotFilled[slot]
       );
-      const recentPhrases = conversationState[conversationId].recentQuestionPhrases || [];
-      const lastUserText = conversationHistory[conversationId]
-        .filter((msg) => msg.role === "user")
-        .slice(-1)[0]?.content;
       const isFirstQuestion =
         conversationState[conversationId].questionCount === 0 &&
         conversationState[conversationId].lastPainScore === null;
@@ -1619,23 +1607,14 @@ app.post("/api/chat", async (req, res) => {
       if (nextSlot) {
         const useFinalPrefix =
           currentQuestionCount >= minQuestions && missingSlots.length === 1;
-        const fixed = buildFixedQuestion(
-          nextSlot,
-          lastUserText,
-          useFinalPrefix,
-          recentPhrases.slice(-5),
-          isFirstQuestion
-        );
-        aiResponse = fixed.text;
+        const fixed = buildFixedQuestion(nextSlot, useFinalPrefix);
+        const templateId = pickTemplateId(conversationState[conversationId], isFirstQuestion);
+        res.locals.questionPayload = { templateId, question: fixed.question };
+
+        aiResponse = fixed.question;
         conversationState[conversationId].lastOptions = fixed.options;
         conversationState[conversationId].lastQuestionType = fixed.type;
         conversationState[conversationId].expectsPainScore = fixed.type === "pain_score";
-        const phraseSignature = extractQuestionPhrases(aiResponse);
-        if (phraseSignature) {
-          const phraseHistory = conversationState[conversationId].recentQuestionPhrases || [];
-          phraseHistory.push(phraseSignature);
-          conversationState[conversationId].recentQuestionPhrases = phraseHistory.slice(-5);
-        }
       }
     }
 
@@ -1759,8 +1738,9 @@ app.post("/api/chat", async (req, res) => {
       rawScore: conversationState[conversationId].lastPainScore,
       painScoreRatio: conversationState[conversationId].lastPainWeight,
     };
-    console.log("[DEBUG] response payload", { response: aiResponse, judgeMeta });
-    res.json({ message: aiResponse, response: aiResponse, judgeMeta });
+    const questionPayload = res.locals.questionPayload || null;
+    console.log("[DEBUG] response payload", { response: aiResponse, judgeMeta, questionPayload });
+    res.json({ message: aiResponse, response: aiResponse, judgeMeta, questionPayload });
   } catch (error) {
     console.error("OpenAI API Error:", error);
     console.error("Error details:", {
