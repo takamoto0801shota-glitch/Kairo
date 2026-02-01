@@ -1651,6 +1651,55 @@ app.post("/api/chat", async (req, res) => {
       content: message,
     });
 
+    const isInitialQuestionPhase =
+      conversationState[conversationId].questionCount === 0 &&
+      conversationState[conversationId].lastPainScore === null &&
+      !conversationState[conversationId].expectsPainScore;
+    if (isInitialQuestionPhase) {
+      const fixed = buildFixedQuestion("pain_score", false);
+      const templateId = pickTemplateId(conversationState[conversationId], true);
+      res.locals.questionPayload = { templateId, question: fixed.question };
+      res.locals.isFixedQuestion = true;
+      conversationState[conversationId].lastOptions = fixed.options;
+      conversationState[conversationId].lastQuestionType = fixed.type;
+      conversationState[conversationId].expectsPainScore = true;
+      conversationState[conversationId].askedSlots.pain_score = true;
+
+      conversationHistory[conversationId].push({
+        role: "assistant",
+        content: fixed.question,
+      });
+
+      const judgeMeta = {
+        judgement: "🟢",
+        confidence: conversationState[conversationId].confidence,
+        ratio: 0,
+        shouldJudge: false,
+        slotsFilledCount: countFilledSlots(conversationState[conversationId].slotFilled),
+        decisionAllowed: false,
+        questionCount: conversationState[conversationId].questionCount,
+        summaryLine: null,
+        questionType: null,
+        rawScore: null,
+        painScoreRatio: null,
+      };
+      const questionPayload = res.locals.questionPayload || null;
+      const normalizedAnswer = conversationState[conversationId].lastNormalizedAnswer || null;
+      console.log("[DEBUG] response payload", {
+        response: fixed.question,
+        judgeMeta,
+        questionPayload,
+        normalizedAnswer,
+      });
+      return res.json({
+        message: fixed.question,
+        response: fixed.question,
+        judgeMeta,
+        questionPayload,
+        normalizedAnswer,
+      });
+    }
+
     // Call OpenAI API
     const minQuestions = 5;
     const maxQuestions = 7;
