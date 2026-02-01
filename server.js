@@ -794,6 +794,9 @@ function buildRepairPrompt(requiredLevel) {
 - 📝 いまの状態を整理します（メモ）は事実のみ・具体的に書く
   - 「ない」「不明」「特になし」だけの記述は禁止
   - 症状・経過・生活影響など具体語を含める
+- 「ない／特にない／該当しない」は不安材料として扱わず、安心材料として書く
+- 「ないは気になります」などの逆転表現は絶対に使わない
+- 判断や安心コメントには、直前までの情報のうち少なくとも1つを根拠として明示的に反映する
 - 🔴の場合、🏥 Kairoの判断で受診先のカテゴリを具体的に示す
   - 例：歯の痛み→歯医者／耳の痛み→耳鼻科／腹痛・頭痛→病院
 - 🤝 今の状態については一般論の説明を禁止し、感覚の翻訳にする
@@ -983,7 +986,7 @@ function detectQuestionType(text) {
   if (normalized.match(/日常生活|眠れない|動ける|支障|仕事|学校|活動/)) {
     return "daily_impact";
   }
-  if (normalized.match(/発熱|熱|吐き気|嘔吐|しびれ|めまい|ふらつき/)) {
+  if (normalized.match(/発熱|熱|吐き気|嘔吐|しびれ|めまい|ふらつき|これ以外の症状/)) {
     return "associated_symptoms";
   }
   if (normalized.match(/原因|きっかけ|思い当たる|普段と違う|カテゴリ/)) {
@@ -1009,6 +1012,47 @@ const FIXED_SLOT_ORDER = [
   "associated_symptoms",
   "cause_category",
 ];
+
+const RISK_LEVELS = {
+  LOW: "LOW",
+  MEDIUM: "MEDIUM",
+  HIGH: "HIGH",
+};
+
+const SLOT_RISK_BY_INDEX = {
+  worsening: [RISK_LEVELS.LOW, RISK_LEVELS.MEDIUM, RISK_LEVELS.HIGH],
+  duration: [RISK_LEVELS.LOW, RISK_LEVELS.MEDIUM, RISK_LEVELS.HIGH],
+  daily_impact: [RISK_LEVELS.LOW, RISK_LEVELS.MEDIUM, RISK_LEVELS.HIGH],
+  associated_symptoms: [RISK_LEVELS.LOW, RISK_LEVELS.MEDIUM, RISK_LEVELS.HIGH],
+  cause_category: [RISK_LEVELS.LOW, RISK_LEVELS.MEDIUM, RISK_LEVELS.MEDIUM],
+};
+
+const SUBJECTIVE_ALERT_WORDS = ["気になります", "引っかかります", "心配です", "注意が必要です"];
+
+function riskFromPainScore(rawScore) {
+  if (rawScore === null || rawScore === undefined) return null;
+  if (rawScore >= 8) return RISK_LEVELS.HIGH;
+  if (rawScore >= 5) return RISK_LEVELS.MEDIUM;
+  return RISK_LEVELS.LOW;
+}
+
+function buildNormalizedAnswer(slotId, rawAnswer, selectedIndex, rawScore) {
+  if (!slotId) return null;
+  if (slotId === "pain_score") {
+    const riskLevel = riskFromPainScore(rawScore);
+    if (!riskLevel) return null;
+    return { slotId, rawAnswer: rawAnswer ?? "", riskLevel };
+  }
+  const riskMap = SLOT_RISK_BY_INDEX[slotId];
+  if (!riskMap || selectedIndex === null || selectedIndex === undefined) return null;
+  const riskLevel = riskMap[selectedIndex];
+  if (!riskLevel) return null;
+  return { slotId, rawAnswer: rawAnswer ?? "", riskLevel };
+}
+
+function countAskedSlots(askedSlots) {
+  return SLOT_KEYS.filter((key) => askedSlots && askedSlots[key]).length;
+}
 
 function countFilledSlots(slotFilled) {
   return SLOT_KEYS.filter((key) => slotFilled && slotFilled[key]).length;
@@ -1149,16 +1193,95 @@ function extractQuestionPhrases(text) {
   }
   return normalizeQuestionText(phraseLines.join(" "));
 }
-function buildLocalSummaryFallback(level, history) {
+function buildFactsFromSlotAnswers(state) {
+  const answers = state?.slotAnswers || {};
+  const facts = [];
+  if (state?.lastPainScore !== null) {
+    facts.push(`痛みは「${state.lastPainScore} / 10」くらい`);
+  }
+  if (answers.daily_impact) {
+    facts.push(`日常の動きは「${answers.daily_impact}」に近い`);
+  }
+  if (answers.worsening) {
+    facts.push(`変化は「${answers.worsening}」に近い`);
+  }
+  if (answers.duration) {
+    facts.push(`始まりは「${answers.duration}」に近い`);
+  }
+  if (answers.associated_symptoms) {
+    if (answers.associated_symptoms.includes("ない")) {
+      facts.push("これ以外の症状は特にない");
+    } else {
+      facts.push(`これ以外の症状は「${answers.associated_symptoms}」に近い`);
+    }
+  }
+  if (answers.cause_category) {
+    if (answers.cause_category.includes("思い当たらない")) {
+      facts.push("きっかけは特に思い当たらない");
+    } else {
+      facts.push(`きっかけは「${answers.cause_category}」に近い`);
+    }
+  }
+  return facts.map((item) => `・${item}`);
+}
+
+function sanitizeSummaryBullets(text, state) {
+  if (!text) return text;
+  const answers = state?.slotAnswers || {};
+  return text
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("・")) return line;
+      if (/^・(ない|特にない|なし)$/.test(trimmed)) {
+        if (answers.associated_symptoms?.includes("ない")) {
+          return "・これ以外の症状は特にない";
+        }
+        return "・特にない点がある";
+      }
+      return line;
+    })
+    .join("\n");
+}
+
+function hasForbiddenSubjectiveWords(text) {
+  return SUBJECTIVE_ALERT_WORDS.some((word) => (text || "").includes(word));
+}
+
+function validateSummaryAgainstNormalized(text, state) {
+  if (!text) return false;
+  const normalized = Object.values(state?.slotNormalized || {});
+  const hasHigh = normalized.some((entry) => entry.riskLevel === RISK_LEVELS.HIGH);
+  const hasLowNegative = normalized.some((entry) =>
+    /^(ない|特にない|なし)$/.test((entry.rawAnswer || "").trim())
+  );
+  if (!hasHigh && hasForbiddenSubjectiveWords(text)) {
+    return false;
+  }
+  if (hasLowNegative && hasForbiddenSubjectiveWords(text)) {
+    return false;
+  }
+  if ((text || "").split("\n").some((line) => /^・(ない|特にない|なし)$/.test(line.trim()))) {
+    return false;
+  }
+  return true;
+}
+
+function buildLocalSummaryFallback(level, history, state) {
   const historyText = history
     .filter((msg) => msg.role === "user")
     .map((msg) => msg.content)
     .join("\n");
   const category = detectSymptomCategory(historyText);
-  const facts = history
-    .filter((msg) => msg.role === "user")
-    .slice(-3)
-    .map((msg) => `・${msg.content}`) || [];
+  const factsFromSlots = buildFactsFromSlotAnswers(state);
+  const facts = factsFromSlots.length
+    ? factsFromSlots
+    : history
+        .filter((msg) => msg.role === "user")
+        .slice(-3)
+        .map((msg) => msg.content)
+        .filter((msg) => !/^(ない|なし|特になし|特にない)$/.test((msg || "").trim()))
+        .map((msg) => `・${msg}`) || [];
   const empathy =
     historyText.includes("不安") || historyText.includes("心配")
       ? "不安になる状況ですよね。"
@@ -1190,7 +1313,7 @@ function buildLocalSummaryFallback(level, history) {
   const closing = `🌱 最後に\nまた不安になったら、いつでもここで聞いてください。`;
 
   if (level === "🟡") {
-    return [...baseBlocks, otcBlock, closing].join("\n");
+    return sanitizeSummaryBullets([...baseBlocks, otcBlock, closing].join("\n"), state);
   }
   if (level === "🔴") {
     const specialtyMap = {
@@ -1206,7 +1329,7 @@ function buildLocalSummaryFallback(level, history) {
     else if (historyText.match(/腹|お腹|胃|下痢|便秘/)) specialtyKey = "stomach";
     else if (historyText.match(/頭痛|頭が痛|頭が重/)) specialtyKey = "head";
     const specialty = specialtyMap[specialtyKey];
-    return [
+    return sanitizeSummaryBullets([
       "📝 いまの状態を整理します（メモ）",
       facts.join("\n") || "・現在の症状について相談されています",
       "⚠️ Kairoが気になっているポイント",
@@ -1215,10 +1338,10 @@ function buildLocalSummaryFallback(level, history) {
       `今の情報を見る限り、${specialty}で相談する判断が安心です。`,
       "💬 最後に",
       "不安な状況だと思います。迷ったときは受診する判断は慎重で正しいです。",
-    ].join("\n");
+    ].join("\n"), state);
   }
 
-  return [...baseBlocks, closing].join("\n");
+  return sanitizeSummaryBullets([...baseBlocks, closing].join("\n"), state);
 }
 
 function normalizeAnswerText(text) {
@@ -1241,6 +1364,15 @@ function matchAnswerToOption(answer, options) {
   const normalizedAnswer = normalizeAnswerText(answer);
   if (!normalizedAnswer) {
     return null;
+  }
+
+  if (normalizedAnswer.match(/^(ない|なし|特になし|特にない|いない)$/)) {
+    const negativeIndex = options.findIndex((opt) =>
+      normalizeAnswerText(opt).match(/(ない|なし|思い当たらない|特になし|特にない)$/)
+    );
+    if (negativeIndex !== -1) {
+      return negativeIndex;
+    }
   }
 
   const indexByNumber = (() => {
@@ -1334,7 +1466,9 @@ function judgeDecision(state) {
   );
   const confidence = state.confidence;
   const slotsFilledCount = countFilledSlots(state.slotFilled);
-  const decisionCompleted = state.questionCount >= 7 || slotsFilledCount >= 6;
+  const askedSlotsCount = countAskedSlots(state.askedSlots);
+  const decisionCompleted =
+    state.questionCount >= 7 || slotsFilledCount >= 6 || askedSlotsCount >= 6;
   const shouldJudge = decisionCompleted;
 
   console.log(
@@ -1344,6 +1478,8 @@ function judgeDecision(state) {
     state.questionCount,
     "slotsFilled=",
     slotsFilledCount,
+    "askedSlots=",
+    askedSlotsCount,
     "missingSlots=",
     getMissingSlots(state.slotFilled).join(",")
   );
@@ -1415,9 +1551,13 @@ app.post("/api/chat", async (req, res) => {
         usedTemplateIds: [],
         progressTemplateUsed: false,
         lastTemplateId: null,
+        slotAnswers: {},
+        slotNormalized: {},
+        askedSlots: {},
         expectsPainScore: false,
         lastPainScore: null,
         lastPainWeight: null,
+        lastNormalizedAnswer: null,
       };
     }
 
@@ -1442,30 +1582,40 @@ app.post("/api/chat", async (req, res) => {
         if (!conversationState[conversationId].slotFilled[type]) {
           conversationState[conversationId].slotFilled[type] = true;
         }
+        const normalized = buildNormalizedAnswer(
+          type,
+          rawScore !== null ? String(rawScore) : "",
+          0,
+          rawScore
+        );
+        if (!normalized) {
+          throw new Error("riskLevel 未定義: pain_score");
+        }
+        conversationState[conversationId].slotNormalized[type] = normalized;
+        conversationState[conversationId].lastNormalizedAnswer = normalized;
         conversationState[conversationId].confidence = computeConfidenceFromSlots(
           conversationState[conversationId].slotFilled
         );
       }
       conversationState[conversationId].lastQuestionType = null;
     } else if (conversationState[conversationId].lastOptions.length >= 2) {
-      const selectedIndex = matchAnswerToOption(
-        message,
-        conversationState[conversationId].lastOptions
-      );
-      const optionCount = conversationState[conversationId].lastOptions.length;
-      const score =
-        selectedIndex === 0
-          ? 1.0
-          : selectedIndex === 1
-            ? optionCount === 2
-              ? 2.0
-              : 1.5
-            : selectedIndex === 2
-              ? 2.0
-              : 1.5;
-      conversationState[conversationId].questionCount += 1;
-      conversationState[conversationId].totalScore += score;
-      conversationState[conversationId].lastOptions = [];
+      const lastOptionsSnapshot = conversationState[conversationId].lastOptions;
+      const selectedIndex = matchAnswerToOption(message, lastOptionsSnapshot);
+      if (selectedIndex !== null) {
+        const optionCount = lastOptionsSnapshot.length;
+        const score =
+          selectedIndex === 0
+            ? 1.0
+            : selectedIndex === 1
+              ? optionCount === 2
+                ? 2.0
+                : 1.5
+              : selectedIndex === 2
+                ? 2.0
+                : 1.5;
+        conversationState[conversationId].questionCount += 1;
+        conversationState[conversationId].totalScore += score;
+      }
 
       // 判断スロットの更新（埋まったスロットを記録）
       const type = conversationState[conversationId].lastQuestionType;
@@ -1473,9 +1623,26 @@ app.post("/api/chat", async (req, res) => {
         if (!conversationState[conversationId].slotFilled[type]) {
           conversationState[conversationId].slotFilled[type] = true;
         }
+        if (selectedIndex !== null && lastOptionsSnapshot[selectedIndex]) {
+          conversationState[conversationId].slotAnswers[type] =
+            lastOptionsSnapshot[selectedIndex];
+          const normalized = buildNormalizedAnswer(
+            type,
+            lastOptionsSnapshot[selectedIndex],
+            selectedIndex
+          );
+          if (!normalized) {
+            throw new Error(`riskLevel 未定義: ${type}`);
+          }
+          conversationState[conversationId].slotNormalized[type] = normalized;
+          conversationState[conversationId].lastNormalizedAnswer = normalized;
+        }
         conversationState[conversationId].confidence = computeConfidenceFromSlots(
           conversationState[conversationId].slotFilled
         );
+      }
+      if (selectedIndex !== null) {
+        conversationState[conversationId].lastOptions = [];
       }
       conversationState[conversationId].lastQuestionType = null;
     }
@@ -1493,8 +1660,11 @@ app.post("/api/chat", async (req, res) => {
     const { ratio, level, confidence, shouldJudge, slotsFilledCount } = judgeDecision(
       conversationState[conversationId]
     );
+    const askedSlotsCount = countAskedSlots(conversationState[conversationId].askedSlots);
     const decisionAllowed =
-      conversationState[conversationId].questionCount >= 7 || slotsFilledCount >= 6;
+      conversationState[conversationId].questionCount >= 7 ||
+      slotsFilledCount >= 6 ||
+      askedSlotsCount >= 6;
     const shouldJudgeNow = shouldJudge && decisionAllowed;
     const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled);
     const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n合計スコア: ${conversationState[conversationId].totalScore}\n最大スコア: ${conversationState[conversationId].questionCount * 2}\n緊急度比率: ${ratio.toFixed(2)}\n判定: ${level}\n判断スロット埋まり数: ${slotsFilledCount}/6\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が7以上、または判断スロットが6つ埋まった時点で必ず判定・まとめへ移行する。\n※スコアや計算はユーザーに表示しないこと。最終判断は必ずこの判定に従うこと。`;
@@ -1554,8 +1724,19 @@ app.post("/api/chat", async (req, res) => {
       }
       aiResponse = normalizeSummaryLevel(aiResponse, level);
       aiResponse = ensureYellowOtcBlock(aiResponse, level);
+      if (!validateSummaryAgainstNormalized(aiResponse, conversationState[conversationId])) {
+        aiResponse = buildLocalSummaryFallback(
+          level,
+          conversationHistory[conversationId],
+          conversationState[conversationId]
+        );
+      }
       if (!hasAllSummaryBlocks(aiResponse)) {
-        aiResponse = buildLocalSummaryFallback(level, conversationHistory[conversationId]);
+        aiResponse = buildLocalSummaryFallback(
+          level,
+          conversationHistory[conversationId],
+          conversationState[conversationId]
+        );
       }
       conversationState[conversationId].finalQuestionPending = false;
     }
@@ -1598,7 +1779,7 @@ app.post("/api/chat", async (req, res) => {
     // 6スロット埋めを保証するため、質問が不適切なら補正する
     if (!shouldJudgeNow) {
       const missingSlots = FIXED_SLOT_ORDER.filter(
-        (slot) => !conversationState[conversationId].slotFilled[slot]
+        (slot) => !conversationState[conversationId].askedSlots?.[slot]
       );
       const isFirstQuestion =
         conversationState[conversationId].questionCount === 0 &&
@@ -1610,11 +1791,13 @@ app.post("/api/chat", async (req, res) => {
         const fixed = buildFixedQuestion(nextSlot, useFinalPrefix);
         const templateId = pickTemplateId(conversationState[conversationId], isFirstQuestion);
         res.locals.questionPayload = { templateId, question: fixed.question };
+        res.locals.isFixedQuestion = true;
 
         aiResponse = fixed.question;
         conversationState[conversationId].lastOptions = fixed.options;
         conversationState[conversationId].lastQuestionType = fixed.type;
         conversationState[conversationId].expectsPainScore = fixed.type === "pain_score";
+        conversationState[conversationId].askedSlots[nextSlot] = true;
       }
     }
 
@@ -1622,25 +1805,27 @@ app.post("/api/chat", async (req, res) => {
     const options = extractOptionsFromAssistant(aiResponse);
     if (options.length >= 2) {
       conversationState[conversationId].lastOptions = options;
-      conversationState[conversationId].previousQuestionType =
-        conversationState[conversationId].lastQuestionType;
-      conversationState[conversationId].lastQuestionType = detectQuestionType(aiResponse);
-      if (conversationState[conversationId].lastQuestionType) {
-        const history = conversationState[conversationId].recentQuestionTypes || [];
-        history.push(conversationState[conversationId].lastQuestionType);
-        conversationState[conversationId].recentQuestionTypes = history.slice(-5);
-      }
-      const questionText = normalizeQuestionText(aiResponse);
-      if (questionText) {
-        const textHistory = conversationState[conversationId].recentQuestionTexts || [];
-        textHistory.push(questionText);
-        conversationState[conversationId].recentQuestionTexts = textHistory.slice(-5);
-      }
-      const phraseSignature = extractQuestionPhrases(aiResponse);
-      if (phraseSignature) {
-        const phraseHistory = conversationState[conversationId].recentQuestionPhrases || [];
-        phraseHistory.push(phraseSignature);
-        conversationState[conversationId].recentQuestionPhrases = phraseHistory.slice(-5);
+      if (!res.locals.isFixedQuestion) {
+        conversationState[conversationId].previousQuestionType =
+          conversationState[conversationId].lastQuestionType;
+        conversationState[conversationId].lastQuestionType = detectQuestionType(aiResponse);
+        if (conversationState[conversationId].lastQuestionType) {
+          const history = conversationState[conversationId].recentQuestionTypes || [];
+          history.push(conversationState[conversationId].lastQuestionType);
+          conversationState[conversationId].recentQuestionTypes = history.slice(-5);
+        }
+        const questionText = normalizeQuestionText(aiResponse);
+        if (questionText) {
+          const textHistory = conversationState[conversationId].recentQuestionTexts || [];
+          textHistory.push(questionText);
+          conversationState[conversationId].recentQuestionTexts = textHistory.slice(-5);
+        }
+        const phraseSignature = extractQuestionPhrases(aiResponse);
+        if (phraseSignature) {
+          const phraseHistory = conversationState[conversationId].recentQuestionPhrases || [];
+          phraseHistory.push(phraseSignature);
+          conversationState[conversationId].recentQuestionPhrases = phraseHistory.slice(-5);
+        }
       }
     }
 
@@ -1739,8 +1924,20 @@ app.post("/api/chat", async (req, res) => {
       painScoreRatio: conversationState[conversationId].lastPainWeight,
     };
     const questionPayload = res.locals.questionPayload || null;
-    console.log("[DEBUG] response payload", { response: aiResponse, judgeMeta, questionPayload });
-    res.json({ message: aiResponse, response: aiResponse, judgeMeta, questionPayload });
+    const normalizedAnswer = conversationState[conversationId].lastNormalizedAnswer || null;
+    console.log("[DEBUG] response payload", {
+      response: aiResponse,
+      judgeMeta,
+      questionPayload,
+      normalizedAnswer,
+    });
+    res.json({
+      message: aiResponse,
+      response: aiResponse,
+      judgeMeta,
+      questionPayload,
+      normalizedAnswer,
+    });
   } catch (error) {
     console.error("OpenAI API Error:", error);
     console.error("Error details:", {
