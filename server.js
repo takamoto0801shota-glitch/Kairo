@@ -1092,8 +1092,8 @@ const FIXED_QUESTIONS = {
     options: [],
   },
   worsening: {
-    q: "今の状態はどれに近いですか？\n・さっきより楽\n・変わらない\n・悪化している",
-    options: ["さっきより楽", "変わらない", "悪化している"],
+    q: "今の痛み方はどれに近いですか？",
+    options: [],
   },
   duration: {
     q: "いつから始まりましたか\n・さっき\n・数時間前\n・一日前",
@@ -1192,6 +1192,19 @@ function buildAssociatedSymptomsOptions(category) {
     return base.concat(["発熱がある", "息苦しさや強い痛みがある"]);
   }
   return base.concat(["少し違和感がある", "強いだるさや発熱がある"]);
+}
+
+function buildPainQualityOptions(category) {
+  if (category === "stomach") {
+    return ["キリキリする", "張る感じ", "締め付けられる感じ"];
+  }
+  if (category === "head") {
+    return ["ズキズキする", "重い感じ", "締め付けられる感じ"];
+  }
+  if (category === "throat") {
+    return ["ヒリヒリする", "ズキッとする", "しみる感じ"];
+  }
+  return ["ズキズキする", "チクチクする", "重だるい感じ"];
 }
 
 function pickTemplateId(state, isFirstQuestion) {
@@ -2080,15 +2093,20 @@ app.post("/api/chat", async (req, res) => {
         const useFinalPrefix =
           currentQuestionCount >= minQuestions && missingSlots.length === 1;
         const fixed = buildFixedQuestion(nextSlot, useFinalPrefix);
+        const historyText = conversationHistory[conversationId]
+          .filter((msg) => msg.role === "user")
+          .map((msg) => msg.content)
+          .join("\n");
+        const category = detectSymptomCategory(historyText);
         if (nextSlot === "associated_symptoms") {
-          const historyText = conversationHistory[conversationId]
-            .filter((msg) => msg.role === "user")
-            .map((msg) => msg.content)
-            .join("\n");
-          const category = detectSymptomCategory(historyText);
           const options = buildAssociatedSymptomsOptions(category);
           fixed.options = options;
           fixed.question = `${useFinalPrefix ? "最後に、" : ""}${FIXED_QUESTIONS.associated_symptoms.q}\n・${options.join("\n・")}`;
+        }
+        if (nextSlot === "worsening") {
+          const options = buildPainQualityOptions(category);
+          fixed.options = options;
+          fixed.question = `${useFinalPrefix ? "最後に、" : ""}${FIXED_QUESTIONS.worsening.q}\n・${options.join("\n・")}`;
         }
         const introTemplateIds = buildIntroTemplateIds(
           conversationState[conversationId],
