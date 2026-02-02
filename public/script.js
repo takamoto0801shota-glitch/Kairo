@@ -27,11 +27,6 @@ const INTRO_TEMPLATE_TEXTS = {
   FOCUS_3: "次に進むために、ここだけ教えてください。",
   FOCUS_4: "今の判断に必要な点だけ見せてください。",
   FOCUS_5: "ここは整理の要なので確認します。",
-  TRANSITION_1: "では質問です。",
-  TRANSITION_2: "次に進みますね。",
-  TRANSITION_3: "この点について伺います。",
-  TRANSITION_4: "ここから確認に入りますね。",
-  TRANSITION_5: "それでは一つ聞かせてください。",
 };
 
 function renderQuestionPayload(payload) {

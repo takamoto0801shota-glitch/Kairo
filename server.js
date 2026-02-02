@@ -1157,13 +1157,6 @@ const FOCUS_IDS = [
   "FOCUS_5",
 ];
 
-const TRANSITION_IDS = [
-  "TRANSITION_1",
-  "TRANSITION_2",
-  "TRANSITION_3",
-  "TRANSITION_4",
-  "TRANSITION_5",
-];
 
 function buildFixedQuestion(slotKey, useFinalPrefix) {
   const prefix = useFinalPrefix ? "最後に、" : "";
@@ -1232,24 +1225,22 @@ function buildIntroTemplateIds(state, questionIndex, slotKey) {
     let roles = [];
     const progressUsed = (state.introRoleUsage?.PROGRESS || 0) > 0;
     if (slotKey === "duration" || slotKey === "worsening") {
-      roles = ["TRANSITION", "FOCUS"];
+      roles = ["FOCUS"];
     } else if (slotKey === "daily_impact") {
       roles = progressUsed ? ["FOCUS"] : ["PROGRESS", "FOCUS"];
     } else if (slotKey === "associated_symptoms") {
-      roles = ["TRANSITION", "FOCUS"];
+      roles = ["FOCUS"];
     } else if (slotKey === "cause_category") {
       roles = progressUsed ? ["FOCUS"] : ["PROGRESS", "FOCUS"];
     } else {
-      roles = ["TRANSITION", "FOCUS"];
+      roles = ["FOCUS"];
     }
 
     for (const role of roles) {
       const pool =
         role === "PROGRESS"
           ? PROGRESS_IDS
-          : role === "FOCUS"
-            ? FOCUS_IDS
-            : TRANSITION_IDS;
+          : FOCUS_IDS;
       const picked = pickUniqueTemplateId(pool, used);
       introIds.push(picked);
       used.add(picked);

@@ -239,7 +239,7 @@ normalizedAnswer = {
 - 下記3つの静的テンプレからランダムで1つを使用する。
 - 文言の改変・結合・追加は禁止。
 - 共感テンプレの直後に、痛みスコア質問を表示する。
-- 初回は EMPATHY_ONLY のみ使用し、TRANSITION / PROGRESS / FOCUS は使用禁止。
+- 初回は EMPATHY_ONLY のみ使用し、PROGRESS / FOCUS は使用禁止。
 
 TEMPLATE_EMPATHY_1:  
 「それはつらいですよね。体の不調があると、どうしても気になりますよね。」
@@ -331,7 +331,6 @@ LLMの自由生成は禁止。
 - EMPATHY（受け止め）
 - PROGRESS（小さな前進）
 - FOCUS（今見るポイント）
-- TRANSITION（次に進む合図）
 
 #### ルール
 - 質問ブロックは「導入文（最大2文）→ 質問文 → 選択肢」の順。
@@ -340,15 +339,15 @@ LLMの自由生成は禁止。
 
 #### 質問スロット × 導入テンプレ対応表（必須）
 1) 初回（痛みスコア）  
-  - 使用可：EMPATHY（必須・1つ）／TRANSITION（任意・1つ）  
+  - 使用可：EMPATHY（必須・1つ）  
   - 禁止：PROGRESS／FOCUS  
 
 2) 経過時間  
-  - 使用可：TRANSITION／FOCUS  
+  - 使用可：FOCUS  
   - 禁止：EMPATHY／PROGRESS  
 
 3) 悪化傾向  
-  - 使用可：FOCUS／TRANSITION  
+  - 使用可：FOCUS  
   - 禁止：EMPATHY／PROGRESS  
 
 4) 日常生活への影響  
@@ -356,7 +355,7 @@ LLMの自由生成は禁止。
   - 禁止：EMPATHY  
 
 5) 付随症状  
-  - 使用可：FOCUS／TRANSITION  
+  - 使用可：FOCUS  
   - 禁止：EMPATHY／PROGRESS（既に使用済みなら不可）  
 
 6) 原因・きっかけ  
