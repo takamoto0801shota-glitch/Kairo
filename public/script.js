@@ -36,7 +36,8 @@ function renderQuestionPayload(payload) {
   const introLines = payload.introTemplateIds
     .map((id) => INTRO_TEMPLATE_TEXTS[id])
     .filter(Boolean);
-  return introLines.concat(payload.question).join("\n");
+  const empathyLine = payload.empathyLine ? [payload.empathyLine] : [];
+  return empathyLine.concat(introLines, payload.question).join("\n");
 }
 
 // Generate or get conversation ID

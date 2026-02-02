@@ -889,9 +889,10 @@ function extractSummaryLine(text) {
 
 function normalizeSummaryLevel(text, requiredLevel) {
   if (!text || !requiredLevel) return text;
+  const headingLevel = requiredLevel === "🟡" ? "🟢" : requiredLevel;
   let updated = text
-    .replace("🟢 まず安心してください", `${requiredLevel} まず安心してください`)
-    .replace("🟡 まず安心してください", `${requiredLevel} まず安心してください`);
+    .replace("🟢 まず安心してください", `${headingLevel} まず安心してください`)
+    .replace("🟡 まず安心してください", `${headingLevel} まず安心してください`);
 
   if ((requiredLevel === "🟢" || requiredLevel === "🔴") && updated.includes("💊 一般的な市販薬")) {
     const lines = updated.split("\n");
@@ -1156,6 +1157,45 @@ const FOCUS_IDS = [
   "FOCUS_4",
   "FOCUS_5",
 ];
+
+const EMPATHY_AFTER_SLOTS = new Set([
+  "worsening",
+  "duration",
+  "daily_impact",
+  "associated_symptoms",
+]);
+
+async function generateEmpathyLine(openaiClient, slotId, rawAnswer, usedLines) {
+  const usedList = (usedLines || []).slice(-5).join("\n");
+  const prompt = `あなたはKairoです。
+制約:
+- 1文のみ、20文字〜40文字程度。
+- 事実への感情の一言のみ。
+- 判断・安心保証・助言は入れない。
+- 「大丈夫」「心配ありません」「安心」など断定は禁止。
+- 直前の表現と同じ文言は禁止。
+- 質問文にしない。
+
+文脈:
+スロット: ${slotId}
+ユーザー回答: ${rawAnswer}
+
+直近の共感文（再利用禁止）:
+${usedList}
+
+出力は共感文1文のみ。`;
+
+  const completion = await openaiClient.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [{ role: "system", content: prompt }],
+    temperature: 0.7,
+    max_tokens: 60,
+  });
+  const text = completion.choices[0].message.content.trim();
+  if (!text) return null;
+  if (usedLines && usedLines.includes(text)) return null;
+  return text.replace(/\n/g, " ");
+}
 
 
 function buildFixedQuestion(slotKey, useFinalPrefix) {
@@ -1666,6 +1706,10 @@ app.post("/api/chat", async (req, res) => {
         lastIntroPattern: null,
         prevIntroPattern: null,
         lastIntroRoles: [],
+        empathyAfterCount: 0,
+        empathyAfterUsed: [],
+        empathyAfterDue: false,
+        empathyAfterContext: null,
         expectsPainScore: false,
         lastPainScore: null,
         lastPainWeight: null,
@@ -1764,6 +1808,16 @@ app.post("/api/chat", async (req, res) => {
               conversationState[conversationId].causeDetailAnswered = false;
               conversationState[conversationId].causeDetailAsked = false;
             }
+          }
+          if (
+            EMPATHY_AFTER_SLOTS.has(type) &&
+            conversationState[conversationId].empathyAfterCount < 2
+          ) {
+            conversationState[conversationId].empathyAfterDue = true;
+            conversationState[conversationId].empathyAfterContext = {
+              slotId: type,
+              rawAnswer: lastOptionsSnapshot[selectedIndex],
+            };
           }
         }
         conversationState[conversationId].confidence = computeConfidenceFromSlots(
@@ -2034,8 +2088,29 @@ app.post("/api/chat", async (req, res) => {
           conversationState[conversationId].questionCount,
           nextSlot
         );
+        let empathyLine = null;
+        if (
+          conversationState[conversationId].empathyAfterDue &&
+          conversationState[conversationId].empathyAfterCount < 2
+        ) {
+          const context = conversationState[conversationId].empathyAfterContext || {};
+          const generated = await generateEmpathyLine(
+            openai,
+            context.slotId || "",
+            context.rawAnswer || "",
+            conversationState[conversationId].empathyAfterUsed
+          );
+          if (generated) {
+            empathyLine = generated;
+            conversationState[conversationId].empathyAfterUsed.push(generated);
+            conversationState[conversationId].empathyAfterCount += 1;
+          }
+          conversationState[conversationId].empathyAfterDue = false;
+          conversationState[conversationId].empathyAfterContext = null;
+        }
         res.locals.questionPayload = {
           introTemplateIds,
+          empathyLine,
           question: fixed.question,
         };
         res.locals.isFixedQuestion = true;
