@@ -1140,8 +1140,29 @@ const EMPATHY_NEXT_IDS = [
   "EMPATHY_NEXT_3",
   "EMPATHY_NEXT_4",
   "EMPATHY_NEXT_5",
-  "EMPATHY_NEXT_6",
-  "EMPATHY_NEXT_7",
+];
+
+const PROGRESS_IDS = [
+  "PROGRESS_1",
+  "PROGRESS_2",
+  "PROGRESS_3",
+  "PROGRESS_4",
+];
+
+const FOCUS_IDS = [
+  "FOCUS_1",
+  "FOCUS_2",
+  "FOCUS_3",
+  "FOCUS_4",
+  "FOCUS_5",
+];
+
+const TRANSITION_IDS = [
+  "TRANSITION_1",
+  "TRANSITION_2",
+  "TRANSITION_3",
+  "TRANSITION_4",
+  "TRANSITION_5",
 ];
 
 function buildFixedQuestion(slotKey, useFinalPrefix) {
@@ -1189,6 +1210,65 @@ function pickTemplateId(state, isFirstQuestion) {
 function pickEmpathyTemplateId(isFirstQuestion) {
   const pool = isFirstQuestion ? EMPATHY_OPEN_IDS : EMPATHY_NEXT_IDS;
   return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function pickUniqueTemplateId(pool, usedSet) {
+  const available = pool.filter((id) => !usedSet.has(id));
+  if (available.length === 0) {
+    throw new Error("intro template exhausted");
+  }
+  return available[Math.floor(Math.random() * available.length)];
+}
+
+function buildIntroTemplateIds(state, questionIndex, slotKey) {
+  const used = new Set(state.introTemplateUsedIds || []);
+  const introIds = [];
+
+  if (questionIndex === 0 || slotKey === "pain_score") {
+    const empathyId = pickUniqueTemplateId(EMPATHY_OPEN_IDS, used);
+    introIds.push(empathyId);
+    used.add(empathyId);
+    if (TRANSITION_IDS.length > 0 && Math.random() < 0.5) {
+      const transitionId = pickUniqueTemplateId(TRANSITION_IDS, used);
+      introIds.push(transitionId);
+      used.add(transitionId);
+    }
+  } else {
+    let roles = [];
+    const progressUsed = (state.introRoleUsage?.PROGRESS || 0) > 0;
+    if (slotKey === "duration" || slotKey === "worsening") {
+      roles = ["TRANSITION", "FOCUS"];
+    } else if (slotKey === "daily_impact") {
+      roles = progressUsed ? ["FOCUS"] : ["PROGRESS", "FOCUS"];
+    } else if (slotKey === "associated_symptoms") {
+      roles = ["TRANSITION", "FOCUS"];
+    } else if (slotKey === "cause_category") {
+      roles = progressUsed ? ["FOCUS"] : ["PROGRESS", "FOCUS"];
+    } else {
+      roles = ["TRANSITION", "FOCUS"];
+    }
+
+    for (const role of roles) {
+      const pool =
+        role === "PROGRESS"
+          ? PROGRESS_IDS
+          : role === "FOCUS"
+            ? FOCUS_IDS
+            : TRANSITION_IDS;
+      const picked = pickUniqueTemplateId(pool, used);
+      introIds.push(picked);
+      used.add(picked);
+    }
+
+    state.lastIntroRoles = roles;
+    state.introRoleUsage = state.introRoleUsage || {};
+    for (const role of roles) {
+      state.introRoleUsage[role] = (state.introRoleUsage[role] || 0) + 1;
+    }
+  }
+
+  state.introTemplateUsedIds = Array.from(used);
+  return introIds;
 }
 
 function normalizeQuestionText(text) {
@@ -1595,6 +1675,11 @@ app.post("/api/chat", async (req, res) => {
         causeDetailAnswered: false,
         causeDetailText: null,
         expectsCauseDetail: false,
+        introTemplateUsedIds: [],
+        introRoleUsage: {},
+        lastIntroPattern: null,
+        prevIntroPattern: null,
+        lastIntroRoles: [],
         expectsPainScore: false,
         lastPainScore: null,
         lastPainWeight: null,
@@ -1760,13 +1845,14 @@ app.post("/api/chat", async (req, res) => {
       !conversationState[conversationId].expectsPainScore;
     if (isInitialQuestionPhase) {
       const fixed = buildFixedQuestion("pain_score", false);
-      const templateId = pickTemplateId(conversationState[conversationId], true);
-      const empathyTemplateId = pickEmpathyTemplateId(true);
+      const introTemplateIds = buildIntroTemplateIds(
+        conversationState[conversationId],
+        conversationState[conversationId].questionCount,
+        "pain_score"
+      );
       res.locals.questionPayload = {
-        templateId,
-        empathyTemplateId,
+        introTemplateIds,
         question: fixed.question,
-        questionIndex: conversationState[conversationId].questionCount,
       };
       res.locals.isFixedQuestion = true;
       conversationState[conversationId].lastOptions = fixed.options;
@@ -1957,13 +2043,14 @@ app.post("/api/chat", async (req, res) => {
           fixed.options = options;
           fixed.question = `${useFinalPrefix ? "最後に、" : ""}${FIXED_QUESTIONS.associated_symptoms.q}\n・${options.join("\n・")}`;
         }
-        const templateId = pickTemplateId(conversationState[conversationId], isFirstQuestion);
-        const empathyTemplateId = pickEmpathyTemplateId(isFirstQuestion);
+        const introTemplateIds = buildIntroTemplateIds(
+          conversationState[conversationId],
+          conversationState[conversationId].questionCount,
+          nextSlot
+        );
         res.locals.questionPayload = {
-          templateId,
-          empathyTemplateId,
+          introTemplateIds,
           question: fixed.question,
-          questionIndex: conversationState[conversationId].questionCount,
         };
         res.locals.isFixedQuestion = true;
 

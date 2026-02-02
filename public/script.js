@@ -9,192 +9,39 @@ const FIRST_QUESTION_KEY = "kairo_first_question";
 
 const SUBJECTIVE_ALERT_WORDS = ["気になります", "引っかかります", "心配です", "注意が必要です"];
 
-const EMPATHY_OPEN_TEMPLATES = {
+const INTRO_TEMPLATE_TEXTS = {
   TEMPLATE_EMPATHY_1: "それはつらいですよね。体の不調があると、どうしても気になりますよね。",
   TEMPLATE_EMPATHY_2: "教えてくれてありがとうございます。まずは今の状態を一緒に整理していきましょう。",
   TEMPLATE_EMPATHY_3: "不調があると落ち着かないですよね。ここで一つずつ確認していきましょう。",
+  EMPATHY_NEXT_1: "今の話、ちゃんと受け止めています。",
+  EMPATHY_NEXT_2: "ここまでの流れ、大事に見ています。",
+  EMPATHY_NEXT_3: "今の状態、丁寧に整理していきましょう。",
+  EMPATHY_NEXT_4: "今の感覚、無理なく言葉にしていきましょう。",
+  EMPATHY_NEXT_5: "ここまでの内容、落ち着いて受け止めています。",
+  PROGRESS_1: "ここまでで、状況が少し見えてきました。",
+  PROGRESS_2: "ひとつ大事な材料が分かりました。",
+  PROGRESS_3: "今の話で、整理が一段進みました。",
+  PROGRESS_4: "ここまでで、ポイントが一つ見えました。",
+  FOCUS_1: "次は、判断に関わる部分だけ確認します。",
+  FOCUS_2: "ここは今後を分けるポイントなので見ておきます。",
+  FOCUS_3: "次に進むために、ここだけ教えてください。",
+  FOCUS_4: "今の判断に必要な点だけ見せてください。",
+  FOCUS_5: "ここは整理の要なので確認します。",
+  TRANSITION_1: "では質問です。",
+  TRANSITION_2: "次に進みますね。",
+  TRANSITION_3: "この点について伺います。",
+  TRANSITION_4: "ここから確認に入りますね。",
+  TRANSITION_5: "それでは一つ聞かせてください。",
 };
 
-const EMPATHY_NEXT_TEMPLATES = {
-  LOW: {
-    empathy: [
-      "{subject}、安心材料ですね。",
-      "{subject}、ひとつ大事な材料ですね。",
-      "{subject}、今の整理が進みますね。",
-      "{subject}、ここは落ち着ける情報ですね。",
-      "{subject}、状況が見えやすくなりますね。",
-      "{subject}、判断の助けになりますね。",
-      "{subject}、整理が一段進みますね。",
-    ],
-    progress: [
-      "ここまでで大まかな流れはつかめています。",
-      "状況の軸がひとつそろいました。",
-      "今の状態の輪郭が少し見えてきました。",
-      "ポイントが一つ見えてきました。",
-      "ここまでの情報で形が少しはっきりしました。",
-      "今の様子が少し言葉にできています。",
-      "整理の進み方が見えてきました。",
-    ],
-    purpose: [
-      "次に判断の材料を一つだけ確認させてください。",
-      "ここは方向を決めるために聞きますね。",
-      "いまの状態を分けるためにここだけ見せてください。",
-      "次の一歩を決めるために一点だけ伺います。",
-      "安全に整理するために、ここを確認します。",
-      "この点が判断の要なので聞きます。",
-      "迷いを減らすために、ここだけ確認します。",
-    ],
-  },
-  MEDIUM: {
-    empathy: [
-      "{subject}、ここは見ておきたいです。",
-      "{subject}、状況をもう少し整理したいです。",
-      "{subject}、今の流れを一度まとめてみましょう。",
-      "{subject}、ここは一度押さえておきたいです。",
-      "{subject}、状況が分かると安心しやすいですね。",
-      "{subject}、整理していくと見えやすくなりますね。",
-    ],
-    progress: [
-      "ここまでで大まかな流れはつかめています。",
-      "状況の軸がひとつそろいました。",
-      "今の状態の輪郭が少し見えてきました。",
-      "ポイントが一つ見えてきました。",
-      "ここまでの情報で形が少しはっきりしました。",
-      "今の様子が少し言葉にできています。",
-      "整理の進み方が見えてきました。",
-    ],
-    purpose: [
-      "次に判断の材料を一つだけ確認させてください。",
-      "ここは方向を決めるために聞きますね。",
-      "いまの状態を分けるためにここだけ見せてください。",
-      "次の一歩を決めるために一点だけ伺います。",
-      "安全に整理するために、ここを確認します。",
-      "この点が判断の要なので聞きます。",
-      "迷いを減らすために、ここだけ確認します。",
-    ],
-  },
-  HIGH: {
-    empathy: [
-      "{subject}、気になりますよね。",
-      "{subject}、引っかかりますよね。",
-      "{subject}、心配になりやすいですよね。",
-      "{subject}、注意が必要な感じに見えますね。",
-      "{subject}、ここは丁寧に見たいです。",
-      "{subject}、一度落ち着いて整理したいですね。",
-      "{subject}、いったん確認しておきたいです。",
-    ],
-    progress: [
-      "ここまでで大まかな流れはつかめています。",
-      "状況の軸がひとつそろいました。",
-      "今の状態の輪郭が少し見えてきました。",
-      "ポイントが一つ見えてきました。",
-      "ここまでの情報で形が少しはっきりしました。",
-      "今の様子が少し言葉にできています。",
-      "整理の進み方が見えてきました。",
-    ],
-    purpose: [
-      "次に判断の材料を一つだけ確認させてください。",
-      "ここは方向を決めるために聞きますね。",
-      "いまの状態を分けるためにここだけ見せてください。",
-      "次の一歩を決めるために一点だけ伺います。",
-      "安全に整理するために、ここを確認します。",
-      "この点が判断の要なので聞きます。",
-      "迷いを減らすために、ここだけ確認します。",
-    ],
-  },
-};
-
-function buildSubjectFromNormalizedAnswer(normalized) {
-  if (!normalized) return "今の状況は";
-  const { slotId, riskLevel, rawAnswer } = normalized;
-  if (slotId === "associated_symptoms") {
-    if (riskLevel === "LOW") return "これ以外の症状は特にないのは";
-    if (riskLevel === "MEDIUM") return "これ以外の症状が少しあるのは";
-    return "これ以外の症状がいくつかあるのは";
-  }
-  if (slotId === "daily_impact") {
-    if (riskLevel === "LOW") return "普通に動けるのは";
-    if (riskLevel === "MEDIUM") return "少しつらいが動けるのは";
-    return "動けないほどつらいのは";
-  }
-  if (slotId === "worsening") {
-    if (riskLevel === "LOW") return "さっきより楽なのは";
-    if (riskLevel === "MEDIUM") return "変わらないのは";
-    return "悪化しているのは";
-  }
-  if (slotId === "duration") {
-    if (riskLevel === "LOW") return "さっきからの感じは";
-    if (riskLevel === "MEDIUM") return "数時間前からの感じは";
-    return "一日前から続いているのは";
-  }
-  if (slotId === "cause_category") {
-    if ((rawAnswer || "").includes("思い当たる")) return "きっかけがありそうなのは";
-    if ((rawAnswer || "").includes("分からない")) return "きっかけがはっきりしないのは";
-    return "きっかけが特に思い当たらないのは";
-  }
-  if (slotId === "pain_score") {
-    if (riskLevel === "LOW") return "痛みが軽めの範囲なのは";
-    if (riskLevel === "MEDIUM") return "痛みが中くらいの範囲なのは";
-    return "痛みが強めの範囲なのは";
-  }
-  return "今の状況は";
-}
-
-function getRiskTemplates(riskLevel) {
-  if (riskLevel === "HIGH") return EMPATHY_NEXT_TEMPLATES.HIGH;
-  if (riskLevel === "LOW") return EMPATHY_NEXT_TEMPLATES.LOW;
-  return EMPATHY_NEXT_TEMPLATES.MEDIUM;
-}
-
-function containsSubjectiveAlertWords(text) {
-  return SUBJECTIVE_ALERT_WORDS.some((word) => (text || "").includes(word));
-}
-
-function buildIntroLines(templateId, empathyTemplateId, normalizedAnswer, questionIndex) {
-  if (EMPATHY_OPEN_TEMPLATES[empathyTemplateId]) {
-    return [EMPATHY_OPEN_TEMPLATES[empathyTemplateId]];
-  }
-  const subject = buildSubjectFromNormalizedAnswer(normalizedAnswer);
-  const riskLevel = normalizedAnswer?.riskLevel || "MEDIUM";
-  const templates = getRiskTemplates(riskLevel);
-  const index = Math.max(0, Math.min(6, Number(templateId.split("_").pop()) - 1 || 0));
-  let empathy = templates.empathy[index].replace("{subject}", subject);
-  const progress = templates.progress[index];
-  const purpose = templates.purpose[index];
-
-  if (riskLevel !== "HIGH" && containsSubjectiveAlertWords(empathy)) {
-    empathy = RISK_TEMPLATES.LOW.empathy[index].replace("{subject}", subject);
-  }
-
-  const omitProgress = typeof questionIndex === "number" && questionIndex < 3;
-  const lines =
-    templateId.startsWith("EMPATHY_ONLY")
-      ? [empathy]
-      : templateId.startsWith("EMPATHY_PROGRESS_PURPOSE")
-        ? omitProgress
-          ? [empathy, purpose]
-          : [empathy, progress, purpose]
-        : [empathy, purpose];
-
-  if (riskLevel !== "HIGH" && lines.some((line) => containsSubjectiveAlertWords(line))) {
-    lines[0] = EMPATHY_NEXT_TEMPLATES.LOW.empathy[index].replace("{subject}", subject);
-  }
-
-  return lines;
-}
-
-function renderQuestionPayload(payload, normalizedAnswer) {
-  if (!payload || !payload.templateId || !payload.question || !payload.empathyTemplateId) {
+function renderQuestionPayload(payload) {
+  if (!payload || !payload.question || !Array.isArray(payload.introTemplateIds)) {
     return payload?.question || "";
   }
-  const lines = buildIntroLines(
-    payload.templateId,
-    payload.empathyTemplateId,
-    normalizedAnswer,
-    payload.questionIndex
-  );
-  lines.push(payload.question);
-  return lines.join("\n");
+  const introLines = payload.introTemplateIds
+    .map((id) => INTRO_TEMPLATE_TEXTS[id])
+    .filter(Boolean);
+  return introLines.concat(payload.question).join("\n");
 }
 
 // Generate or get conversation ID
@@ -855,7 +702,7 @@ async function handleUserInput() {
       console.log("[DEBUG] full aiResponse", data);
       const aiResponse = data;
       const aiMessage = aiResponse.questionPayload
-        ? renderQuestionPayload(aiResponse.questionPayload, aiResponse.normalizedAnswer)
+        ? renderQuestionPayload(aiResponse.questionPayload)
         : aiResponse.message;
 
       // Remove loading message
