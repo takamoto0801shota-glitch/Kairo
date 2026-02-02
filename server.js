@@ -1086,7 +1086,7 @@ const FIXED_QUESTIONS = {
     options: ["さっきより楽", "変わらない", "悪化している"],
   },
   duration: {
-    q: "いつから近いですか？\n・さっき\n・数時間前\n・一日前",
+    q: "いつから始まりましたか\n・さっき\n・数時間前\n・一日前",
     options: ["さっき", "数時間前", "一日前"],
   },
   daily_impact: {
@@ -1098,7 +1098,7 @@ const FIXED_QUESTIONS = {
     options: [],
   },
   cause_category: {
-    q: "きっかけとして近いのはどれですか？\n・特に思い当たらない\n・何か思い当たるかも\n・はっきりとは分からない",
+    q: "何かきっかけで思い当たることはありますか？\n・特に思い当たらない\n・何か思い当たるかも\n・はっきりとは分からない",
     options: ["特に思い当たらない", "何か思い当たるかも", "はっきりとは分からない"],
   },
 };
@@ -1409,6 +1409,40 @@ function validateSummaryAgainstNormalized(text, state) {
   return true;
 }
 
+function buildStateAboutLine(state) {
+  const painScore = state?.lastPainScore;
+  const painText =
+    painScore !== null && painScore !== undefined
+      ? `痛みは${painScore}くらい`
+      : "痛みは中程度";
+  const symptomsText = state?.slotAnswers?.associated_symptoms?.includes("ない")
+    ? "他の症状は少ない"
+    : "他の症状は多くない";
+  return `今の情報を見る限り、${painText}で${symptomsText}ため、急ぐ状況ではなさそうです。`;
+}
+
+function buildStateDecisionLine(state) {
+  return "なので、今は様子を見る判断で大丈夫そうです。";
+}
+
+function normalizeStateBlockForGreenYellow(text, state) {
+  if (!text) return text;
+  const lines = text.split("\n");
+  const start = lines.findIndex((line) => line.startsWith("🤝 今の状態について"));
+  if (start === -1) return text;
+  const end = lines.findIndex(
+    (line, idx) =>
+      idx > start && (line.startsWith("✅") || line.startsWith("⏳") || line.startsWith("🚨") || line.startsWith("💊") || line.startsWith("🌱"))
+  );
+  const sliceEnd = end >= 0 ? end : lines.length;
+  const newBlock = [
+    "🤝 今の状態について",
+    buildStateAboutLine(state),
+    buildStateDecisionLine(state),
+  ];
+  return [...lines.slice(0, start), ...newBlock, ...lines.slice(sliceEnd)].join("\n");
+}
+
 function buildLocalSummaryFallback(level, history, state) {
   const historyText = history
     .filter((msg) => msg.role === "user")
@@ -1445,7 +1479,7 @@ function buildLocalSummaryFallback(level, history, state) {
 
   const baseBlocks = [
     `${level} まず安心してください\n今の情報を見る限り、緊急性は高くなさそうです。`,
-    `🤝 今の状態について\n${empathy}\n${facts.join("\n")}\n${sensoryByCategory[category]}\n今の情報を見る限り、無理をせず様子を見る判断で大丈夫そうです。`,
+    `🤝 今の状態について\n${buildStateAboutLine(state)}\n${buildStateDecisionLine(state)}`,
     `✅ 今すぐやること（これだけでOK）\n今日は次の3つだけ意識してみてください。\n・少しずつ水分をとってみてください。一般的に、体が乾くと刺激を感じやすいとされています。\n・横になれるなら体を休めてみてください。力を抜くと楽になることがあります。\n・刺激になる飲食や冷えを避けてみてください。負担を減らすと落ち着くことがあります。`,
     `⏳ 今後の見通し\n多くの場合、時間の経過で少しずつ落ち着いてくることがあります。`,
     `🚨 もし次の症状が出たら\n強い痛みが続く／水分がとれない／ぐったりする場合は受診を検討してください。`,
@@ -2008,6 +2042,12 @@ app.post("/api/chat", async (req, res) => {
       }
       aiResponse = normalizeSummaryLevel(aiResponse, level);
       aiResponse = ensureYellowOtcBlock(aiResponse, level);
+      if (level === "🟢" || level === "🟡") {
+        aiResponse = normalizeStateBlockForGreenYellow(
+          aiResponse,
+          conversationState[conversationId]
+        );
+      }
       if (!validateSummaryAgainstNormalized(aiResponse, conversationState[conversationId])) {
         aiResponse = buildLocalSummaryFallback(
           level,
