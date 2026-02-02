@@ -11,8 +11,8 @@ const SUBJECTIVE_ALERT_WORDS = ["気になります", "引っかかります", "
 
 const INTRO_TEMPLATE_TEXTS = {
   TEMPLATE_EMPATHY_1: "それはつらいですよね。体の不調があると、どうしても気になりますよね。",
-  TEMPLATE_EMPATHY_2: "教えてくれてありがとうございます。まずは今の状態を一緒に整理していきましょう。",
-  TEMPLATE_EMPATHY_3: "不調があると落ち着かないですよね。ここで一つずつ確認していきましょう。",
+  TEMPLATE_EMPATHY_2: "教えてくれてありがとうございます。ここで一緒に見ていきましょう。",
+  TEMPLATE_EMPATHY_3: "不調があると落ち着かないですよね。ここで一緒に見ていきましょう。",
   EMPATHY_NEXT_1: "今の話、ちゃんと受け止めています。",
   EMPATHY_NEXT_2: "ここまでの流れ、大事に見ています。",
   EMPATHY_NEXT_3: "今の状態、丁寧に整理していきましょう。",

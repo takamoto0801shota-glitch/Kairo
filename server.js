@@ -1228,11 +1228,6 @@ function buildIntroTemplateIds(state, questionIndex, slotKey) {
     const empathyId = pickUniqueTemplateId(EMPATHY_OPEN_IDS, used);
     introIds.push(empathyId);
     used.add(empathyId);
-    if (TRANSITION_IDS.length > 0 && Math.random() < 0.5) {
-      const transitionId = pickUniqueTemplateId(TRANSITION_IDS, used);
-      introIds.push(transitionId);
-      used.add(transitionId);
-    }
   } else {
     let roles = [];
     const progressUsed = (state.introRoleUsage?.PROGRESS || 0) > 0;
