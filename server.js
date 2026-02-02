@@ -909,6 +909,16 @@ function normalizeSummaryLevel(text, requiredLevel) {
   return updated;
 }
 
+function ensureGreenHeaderForYellow(text, requiredLevel) {
+  if (!text) return text;
+  if (requiredLevel !== "🟡") return text;
+  if (text.includes("🟢 まず安心してください")) return text;
+  if (text.includes("🟡 まず安心してください")) {
+    return text.replace("🟡 まず安心してください", "🟢 まず安心してください");
+  }
+  return `🟢 まず安心してください\n${text}`;
+}
+
 function ensureYellowOtcBlock(text, requiredLevel) {
   if (!text || requiredLevel !== "🟡") return text;
   if (text.includes("💊 一般的な市販薬")) return text;
@@ -1158,44 +1168,6 @@ const FOCUS_IDS = [
   "FOCUS_5",
 ];
 
-const EMPATHY_AFTER_SLOTS = new Set([
-  "worsening",
-  "duration",
-  "daily_impact",
-  "associated_symptoms",
-]);
-
-async function generateEmpathyLine(openaiClient, slotId, rawAnswer, usedLines) {
-  const usedList = (usedLines || []).slice(-5).join("\n");
-  const prompt = `あなたはKairoです。
-制約:
-- 1文のみ、20文字〜40文字程度。
-- 事実への感情の一言のみ。
-- 判断・安心保証・助言は入れない。
-- 「大丈夫」「心配ありません」「安心」など断定は禁止。
-- 直前の表現と同じ文言は禁止。
-- 質問文にしない。
-
-文脈:
-スロット: ${slotId}
-ユーザー回答: ${rawAnswer}
-
-直近の共感文（再利用禁止）:
-${usedList}
-
-出力は共感文1文のみ。`;
-
-  const completion = await openaiClient.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [{ role: "system", content: prompt }],
-    temperature: 0.7,
-    max_tokens: 60,
-  });
-  const text = completion.choices[0].message.content.trim();
-  if (!text) return null;
-  if (usedLines && usedLines.includes(text)) return null;
-  return text.replace(/\n/g, " ");
-}
 
 
 function buildFixedQuestion(slotKey, useFinalPrefix) {
@@ -1409,6 +1381,12 @@ function validateSummaryAgainstNormalized(text, state) {
   return true;
 }
 
+function buildStateFactsBullets(state) {
+  const facts = buildFactsFromSlotAnswers(state);
+  const filtered = facts.filter((line) => !/^・(ない|特にない|なし)$/.test(line.trim()));
+  return filtered.length > 0 ? filtered : ["・今の症状について相談されている"];
+}
+
 function buildStateAboutLine(state) {
   const painScore = state?.lastPainScore;
   const painText =
@@ -1437,6 +1415,8 @@ function normalizeStateBlockForGreenYellow(text, state) {
   const sliceEnd = end >= 0 ? end : lines.length;
   const newBlock = [
     "🤝 今の状態について",
+    ...buildStateFactsBullets(state),
+    "",
     buildStateAboutLine(state),
     buildStateDecisionLine(state),
   ];
@@ -1479,7 +1459,7 @@ function buildLocalSummaryFallback(level, history, state) {
 
   const baseBlocks = [
     `${level} まず安心してください\n今の情報を見る限り、緊急性は高くなさそうです。`,
-    `🤝 今の状態について\n${buildStateAboutLine(state)}\n${buildStateDecisionLine(state)}`,
+    `🤝 今の状態について\n${buildStateFactsBullets(state).join("\n")}\n\n${buildStateAboutLine(state)}\n${buildStateDecisionLine(state)}`,
     `✅ 今すぐやること（これだけでOK）\n今日は次の3つだけ意識してみてください。\n・少しずつ水分をとってみてください。一般的に、体が乾くと刺激を感じやすいとされています。\n・横になれるなら体を休めてみてください。力を抜くと楽になることがあります。\n・刺激になる飲食や冷えを避けてみてください。負担を減らすと落ち着くことがあります。`,
     `⏳ 今後の見通し\n多くの場合、時間の経過で少しずつ落ち着いてくることがあります。`,
     `🚨 もし次の症状が出たら\n強い痛みが続く／水分がとれない／ぐったりする場合は受診を検討してください。`,
@@ -1740,10 +1720,6 @@ app.post("/api/chat", async (req, res) => {
         lastIntroPattern: null,
         prevIntroPattern: null,
         lastIntroRoles: [],
-        empathyAfterCount: 0,
-        empathyAfterUsed: [],
-        empathyAfterDue: false,
-        empathyAfterContext: null,
         expectsPainScore: false,
         lastPainScore: null,
         lastPainWeight: null,
@@ -1842,16 +1818,6 @@ app.post("/api/chat", async (req, res) => {
               conversationState[conversationId].causeDetailAnswered = false;
               conversationState[conversationId].causeDetailAsked = false;
             }
-          }
-          if (
-            EMPATHY_AFTER_SLOTS.has(type) &&
-            conversationState[conversationId].empathyAfterCount < 2
-          ) {
-            conversationState[conversationId].empathyAfterDue = true;
-            conversationState[conversationId].empathyAfterContext = {
-              slotId: type,
-              rawAnswer: lastOptionsSnapshot[selectedIndex],
-            };
           }
         }
         conversationState[conversationId].confidence = computeConfidenceFromSlots(
@@ -2042,6 +2008,7 @@ app.post("/api/chat", async (req, res) => {
       }
       aiResponse = normalizeSummaryLevel(aiResponse, level);
       aiResponse = ensureYellowOtcBlock(aiResponse, level);
+      aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
       if (level === "🟢" || level === "🟡") {
         aiResponse = normalizeStateBlockForGreenYellow(
           aiResponse,
@@ -2128,29 +2095,8 @@ app.post("/api/chat", async (req, res) => {
           conversationState[conversationId].questionCount,
           nextSlot
         );
-        let empathyLine = null;
-        if (
-          conversationState[conversationId].empathyAfterDue &&
-          conversationState[conversationId].empathyAfterCount < 2
-        ) {
-          const context = conversationState[conversationId].empathyAfterContext || {};
-          const generated = await generateEmpathyLine(
-            openai,
-            context.slotId || "",
-            context.rawAnswer || "",
-            conversationState[conversationId].empathyAfterUsed
-          );
-          if (generated) {
-            empathyLine = generated;
-            conversationState[conversationId].empathyAfterUsed.push(generated);
-            conversationState[conversationId].empathyAfterCount += 1;
-          }
-          conversationState[conversationId].empathyAfterDue = false;
-          conversationState[conversationId].empathyAfterContext = null;
-        }
         res.locals.questionPayload = {
           introTemplateIds,
-          empathyLine,
           question: fixed.question,
         };
         res.locals.isFixedQuestion = true;
