@@ -53,6 +53,41 @@ function getConversationId() {
   return conversationId;
 }
 
+function getStoredLocation() {
+  try {
+    const raw = sessionStorage.getItem("kairo_location");
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (_) {
+    return null;
+  }
+}
+
+function storeLocation(location) {
+  try {
+    sessionStorage.setItem("kairo_location", JSON.stringify(location));
+  } catch (_) {
+    // ignore
+  }
+}
+
+function requestLocationOnce() {
+  if (!navigator.geolocation) return;
+  if (getStoredLocation()) return;
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      storeLocation({
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude,
+      });
+    },
+    () => {
+      // ignore (fallback handled server-side)
+    },
+    { enableHighAccuracy: false, timeout: 5000, maximumAge: 600000 }
+  );
+}
+
 // Save conversation history
 function saveHistory() {
   const messagesContainer = document.getElementById("chatMessages");
@@ -605,6 +640,8 @@ function showInitialMessage() {
   addMessage(initialMessage);
 }
 
+requestLocationOnce();
+
 function hideSummaryCard() {
   const summaryCard = document.getElementById("summaryCard");
   if (summaryCard) {
@@ -629,6 +666,7 @@ async function callOpenAI(message) {
         body: JSON.stringify({
           message: message,
           conversationId: conversationId,
+        location: getStoredLocation(),
         }),
       });
 

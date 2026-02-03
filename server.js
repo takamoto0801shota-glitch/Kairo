@@ -925,7 +925,19 @@ function buildPostSummaryFollowUp(state, history) {
     .slice(0, 2)
     .join("、");
   const topic = facts ? `たとえば「${facts}」の伝え方` : "今の話の伝え方";
+  if (!state?.location?.lat || !state?.location?.lng) {
+    return "差し支えなければ、今いらっしゃるエリア（例：Orchard / CBD / East）を教えてください。\n近くで行きやすいクリニックを具体名でお伝えできます。";
+  }
   return `もし、病院や薬局で${topic}に迷ったら、\nここで一緒に整理することもできます。\nやってみますか？`;
+}
+
+function ensureFollowUpAppended(text, state, history) {
+  if (!state?.followUpPending) return text;
+  const followUp = buildPostSummaryFollowUp(state, history);
+  state.followUpPending = false;
+  if (!text) return followUp;
+  if (text.includes(followUp)) return text;
+  return `${text}\n\n${followUp}`;
 }
 
 function buildOtcWarningLine(variantIndex) {
@@ -993,6 +1005,33 @@ function buildYellowOtcBlock(category, warningIndex = 0) {
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+async function fetchNearbyClinics(location, keyword) {
+  if (!process.env.GOOGLE_PLACES_API_KEY) return [];
+  if (!location?.lat || !location?.lng) return [];
+  const params = new URLSearchParams({
+    location: `${location.lat},${location.lng}`,
+    radius: "3500",
+    keyword,
+    type: "doctor",
+    key: process.env.GOOGLE_PLACES_API_KEY,
+  });
+  const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?${params.toString()}`;
+  const res = await fetch(url);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return (data.results || []).slice(0, 3).map((item) => item.name).filter(Boolean);
+}
+
+async function resolveClinicCandidates(state) {
+  if (!state?.location?.lat || !state?.location?.lng) return [];
+  const japanese = await fetchNearbyClinics(state.location, "Japanese clinic");
+  if (japanese.length > 0) return japanese;
+  const gp = await fetchNearbyClinics(state.location, "clinic");
+  if (gp.length > 0) return gp;
+  const hospital = await fetchNearbyClinics(state.location, "hospital");
+  return hospital;
 }
 
 function ensureYellowOtcBlock(text, requiredLevel, category, warningIndex = 0) {
@@ -1557,6 +1596,7 @@ function buildLocalSummaryFallback(level, history, state) {
     return sanitizeSummaryBullets([...baseBlocks, otcBlock, closing].join("\n"), state);
   }
   if (level === "🔴") {
+    const clinicName = (state?.clinicCandidates || [])[0];
     const specialtyMap = {
       tooth: "歯医者",
       ear: "耳鼻科",
@@ -1576,7 +1616,9 @@ function buildLocalSummaryFallback(level, history, state) {
       "⚠️ Kairoが気になっているポイント",
       "急に悪化している可能性があり、様子見と言い切れない点があります。",
       "🏥 Kairoの判断",
-      `今の情報を見る限り、${specialty}で相談する判断が安心です。`,
+      clinicName
+        ? `今の状態なら、まずは${specialty}で確認するのが安心です。${clinicName}が行きやすそうです。`
+        : `今の情報を見る限り、${specialty}で相談する判断が安心です。`,
       "💬 最後に",
       "不安な状況だと思います。迷ったときは受診する判断は慎重で正しいです。",
     ].join("\n"), state);
@@ -1605,6 +1647,13 @@ function matchAnswerToOption(answer, options) {
   const normalizedAnswer = normalizeAnswerText(answer);
   if (!normalizedAnswer) {
     return null;
+  }
+
+  if (options.some((opt) => (opt || "").includes("思い当たる"))) {
+    if (normalizedAnswer.match(/思い当たる|当たる|ある/)) {
+      const index = options.findIndex((opt) => (opt || "").includes("思い当たる"));
+      if (index >= 0) return index;
+    }
   }
 
   if (normalizedAnswer.match(/^(ない|なし|特になし|特にない|いない)$/)) {
@@ -1758,7 +1807,7 @@ app.get("/", (req, res) => {
 // Chat API endpoint
 app.post("/api/chat", async (req, res) => {
   try {
-    const { message, conversationId } = req.body;
+  const { message, conversationId, location } = req.body;
 
     if (!message) {
       return res.status(400).json({ error: "メッセージが必要です" });
@@ -1775,6 +1824,12 @@ app.post("/api/chat", async (req, res) => {
       conversationHistory[conversationId] = [
         { role: "system", content: SYSTEM_PROMPT },
       ];
+    }
+    if (location?.lat && location?.lng) {
+      conversationState[conversationId].location = {
+        lat: location.lat,
+        lng: location.lng,
+      };
     }
     if (!conversationState[conversationId]) {
       conversationState[conversationId] = {
@@ -1806,6 +1861,10 @@ app.post("/api/chat", async (req, res) => {
         prevIntroPattern: null,
         lastIntroRoles: [],
         followUpState: "NONE",
+        followUpPending: false,
+        summaryShown: false,
+        location: null,
+        clinicCandidates: [],
         expectsPainScore: false,
         lastPainScore: null,
         lastPainWeight: null,
@@ -2038,10 +2097,15 @@ app.post("/api/chat", async (req, res) => {
       !(conversationState[conversationId].causeDetailPending && !conversationState[conversationId].causeDetailAnswered);
     const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled);
     const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n合計スコア: ${conversationState[conversationId].totalScore}\n最大スコア: ${conversationState[conversationId].questionCount * 2}\n緊急度比率: ${ratio.toFixed(2)}\n判定: ${level}\n判断スロット埋まり数: ${slotsFilledCount}/6\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が7以上、または判断スロットが6つ埋まった時点で必ず判定・まとめへ移行する。\n※スコアや計算はユーザーに表示しないこと。最終判断は必ずこの判定に従うこと。`;
+    const followUpPrompt =
+      conversationState[conversationId].followUpState === "FOLLOW_UP_STATE"
+        ? "あなたはKairoです。まとめ後の並走フェーズです。ユーザーの質問には必ず具体的に答えてください。新しい症状の追加質問は禁止。判断を覆す質問は禁止。"
+        : null;
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini", // Cost-effective model
       messages: [
         ...conversationHistory[conversationId],
+        ...(followUpPrompt ? [{ role: "system", content: followUpPrompt }] : []),
         { role: "system", content: scoreContext },
       ],
       temperature: 0.7,
@@ -2050,8 +2114,8 @@ app.post("/api/chat", async (req, res) => {
 
     let aiResponse = completion.choices[0].message.content;
 
-    // 判定確定トリガー発動時は、まとめを強制生成
-    if (shouldJudgeNow) {
+    // 判定確定トリガー発動時は、まとめを強制生成（初回のみ）
+    if (shouldJudgeNow && !conversationState[conversationId].summaryShown) {
       const { level } = computeUrgencyLevel(
         conversationState[conversationId].questionCount,
         conversationState[conversationId].totalScore
@@ -2071,8 +2135,20 @@ app.post("/api/chat", async (req, res) => {
         return "pain_fever";
       })();
       const otcWarningIndex = Math.floor(Math.random() * 5);
+      if (level === "🔴" && conversationState[conversationId].location) {
+        conversationState[conversationId].clinicCandidates = await resolveClinicCandidates(
+          conversationState[conversationId]
+        );
+      }
+      const clinicList = (conversationState[conversationId].clinicCandidates || [])
+        .map((name) => `・${name}`)
+        .join("\n");
+      const clinicHint = clinicList
+        ? `\n以下の候補から具体名を1つ選んで提示してください。\n${clinicList}\n`
+        : "\n具体名がない場合は、近いGP/クリニックの具体名を提示してください。\n";
       const summaryOnlyMessages = [
         { role: "system", content: buildRepairPrompt(level) },
+        { role: "system", content: clinicHint },
         ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
       ];
       const forced = await openai.chat.completions.create({
@@ -2134,10 +2210,13 @@ app.post("/api/chat", async (req, res) => {
       aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
       // まとめ後も会話を継続する（FOLLOW_UP_STATE）
       conversationState[conversationId].followUpState = "FOLLOW_UP_STATE";
-      aiResponse = `${aiResponse}\n\n${buildPostSummaryFollowUp(
+      conversationState[conversationId].summaryShown = true;
+      conversationState[conversationId].followUpPending = true;
+      aiResponse = ensureFollowUpAppended(
+        aiResponse,
         conversationState[conversationId],
         conversationHistory[conversationId]
-      )}`;
+      );
       conversationState[conversationId].finalQuestionPending = false;
     }
 
@@ -2347,6 +2426,11 @@ app.post("/api/chat", async (req, res) => {
     };
     const questionPayload = res.locals.questionPayload || null;
     const normalizedAnswer = conversationState[conversationId].lastNormalizedAnswer || null;
+    aiResponse = ensureFollowUpAppended(
+      aiResponse,
+      conversationState[conversationId],
+      conversationHistory[conversationId]
+    );
     console.log("[DEBUG] response payload", {
       response: aiResponse,
       judgeMeta,
