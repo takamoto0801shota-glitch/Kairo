@@ -919,26 +919,98 @@ function ensureGreenHeaderForYellow(text, requiredLevel) {
   return `🟢 まず安心してください\n${text}`;
 }
 
-function ensureYellowOtcBlock(text, requiredLevel) {
-  if (!text || requiredLevel !== "🟡") return text;
-  if (text.includes("💊 一般的な市販薬")) return text;
-  const lines = text.split("\n");
-  const otcLines = [
-    "💊 一般的な市販薬",
-    "一般的には、症状に合わせた市販薬カテゴリが使われることが多いです。",
-    "これは診断ではありませんが、薬局で相談する際の参考になります。",
+function buildPostSummaryFollowUp(state, history) {
+  const facts = buildFactsFromSlotAnswers(state)
+    .map((line) => line.replace(/^・/, ""))
+    .slice(0, 2)
+    .join("、");
+  const topic = facts ? `たとえば「${facts}」の伝え方` : "今の話の伝え方";
+  return `もし、病院や薬局で${topic}に迷ったら、\nここで一緒に整理することもできます。\nやってみますか？`;
+}
+
+function buildOtcWarningLine(variantIndex) {
+  const variants = [
+    "これは一般的な情報であり、診断や処方を行うものではありません。症状が続く場合や不安があるときは、薬剤師や医師に相談してください。",
+    "体調や状況によって適さないこともあります。参考情報としてご覧いただき、必要に応じて専門家に確認してください。",
+    "すべての人に当てはまるわけではありません。変化がない、または悪化する場合は受診を検討してください。",
+    "市販薬は症状の緩和を目的としたものです。原因の特定や治療が必要な場合は医療機関で相談してください。",
+    "これは一般的に使われる例の紹介です。服用に不安がある場合は薬剤師に直接相談するのが安心です。",
   ];
+  const idx = Math.max(0, Math.min(variants.length - 1, variantIndex || 0));
+  return variants[idx];
+}
+
+function buildYellowOtcBlock(category, warningIndex = 0) {
+  const blocks = {
+    pain_fever: {
+      heading: "💊 1. 痛み・発熱",
+      examples: ["パラセタモール系", "イブプロフェン系"],
+      usage: "頭痛や発熱、だるさに使われることが多いです。",
+    },
+    throat: {
+      heading: "💊 2. 喉の違和感",
+      examples: ["のど飴・トローチ系", "うがい薬・のどスプレー系"],
+      usage: "喉の痛みや乾燥感の緩和に使われることが多いです。",
+    },
+    nose: {
+      heading: "💊 3. 鼻水・くしゃみ",
+      examples: ["抗ヒスタミン系", "点鼻薬系"],
+      usage: "鼻水・くしゃみ・鼻づまりの緩和に使われることが多いです。",
+    },
+    cough: {
+      heading: "💊 4. 咳",
+      examples: ["鎮咳薬系", "去痰薬系"],
+      usage: "咳や痰の不快感をやわらげる目的で使われることが多いです。",
+    },
+    stomach: {
+      heading: "💊 5. 胃の不快感",
+      examples: ["胃酸をおさえる系", "胃粘膜を保護する系"],
+      usage: "胃の重さやムカムカの緩和に使われることが多いです。",
+    },
+    bowel: {
+      heading: "💊 6. 下痢・便秘",
+      examples: ["整腸剤系", "下痢止め／便秘薬系"],
+      usage: "お腹の調子を整える目的で使われることが多いです。",
+    },
+    fatigue: {
+      heading: "💊 7. だるさ・脱水気味",
+      examples: ["経口補水液系", "電解質補給系"],
+      usage: "水分や塩分の補給目的で使われることが多いです。",
+    },
+    allergy: {
+      heading: "💊 8. アレルギー症状",
+      examples: ["抗ヒスタミン系", "点眼・点鼻系"],
+      usage: "目や鼻のアレルギー症状の緩和に使われることが多いです。",
+    },
+  };
+  const def = blocks[category] || blocks.pain_fever;
+  return [
+    def.heading,
+    `・${def.examples[0]}`,
+    def.examples[1] ? `・${def.examples[1]}` : null,
+    def.usage,
+    buildOtcWarningLine(warningIndex),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function ensureYellowOtcBlock(text, requiredLevel, category, warningIndex = 0) {
+  if (!text || requiredLevel !== "🟡") return text;
+  if (text.includes("💊 ")) return text;
+  const lines = text.split("\n");
+  const otcBlock = buildYellowOtcBlock(category, warningIndex);
   const insertAfterIndex = lines.findIndex((line) => line.includes("🚨 もし次の症状が出たら"));
   const beforeLastIndex = lines.findIndex((line) => line.includes("🌱 最後に"));
   if (insertAfterIndex >= 0 && beforeLastIndex > insertAfterIndex) {
     return [
       ...lines.slice(0, insertAfterIndex + 1),
       ...lines.slice(insertAfterIndex + 1, beforeLastIndex),
-      ...otcLines,
+      otcBlock,
       ...lines.slice(beforeLastIndex),
     ].join("\n");
   }
-  return `${text}\n${otcLines.join("\n")}`;
+  return `${text}\n${otcBlock}`;
 }
 
 function enforceBulletSymbol(text) {
@@ -1733,6 +1805,7 @@ app.post("/api/chat", async (req, res) => {
         lastIntroPattern: null,
         prevIntroPattern: null,
         lastIntroRoles: [],
+        followUpState: "NONE",
         expectsPainScore: false,
         lastPainScore: null,
         lastPainWeight: null,
@@ -1983,6 +2056,21 @@ app.post("/api/chat", async (req, res) => {
         conversationState[conversationId].questionCount,
         conversationState[conversationId].totalScore
       );
+      const historyTextForOtc = conversationHistory[conversationId]
+        .filter((msg) => msg.role === "user")
+        .map((msg) => msg.content)
+        .join("\n");
+      const otcCategory = (() => {
+        if (historyTextForOtc.match(/腹|お腹|胃|下痢|便秘/)) return "bowel";
+        if (historyTextForOtc.match(/喉|のど/)) return "throat";
+        if (historyTextForOtc.match(/鼻水|鼻づまり|くしゃみ/)) return "nose";
+        if (historyTextForOtc.match(/咳|せき/)) return "cough";
+        if (historyTextForOtc.match(/だるい|脱水|水分/)) return "fatigue";
+        if (historyTextForOtc.match(/かゆみ|アレルギー|花粉/)) return "allergy";
+        if (historyTextForOtc.match(/頭痛|頭が痛|頭が重|発熱|熱/)) return "pain_fever";
+        return "pain_fever";
+      })();
+      const otcWarningIndex = Math.floor(Math.random() * 5);
       const summaryOnlyMessages = [
         { role: "system", content: buildRepairPrompt(level) },
         ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
@@ -2020,7 +2108,7 @@ app.post("/api/chat", async (req, res) => {
         aiResponse = repairForLevel.choices[0].message.content;
       }
       aiResponse = normalizeSummaryLevel(aiResponse, level);
-      aiResponse = ensureYellowOtcBlock(aiResponse, level);
+      aiResponse = ensureYellowOtcBlock(aiResponse, level, otcCategory, otcWarningIndex);
       aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
       if (level === "🟢" || level === "🟡") {
         aiResponse = normalizeStateBlockForGreenYellow(
@@ -2044,6 +2132,12 @@ app.post("/api/chat", async (req, res) => {
         );
       }
       aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
+      // まとめ後も会話を継続する（FOLLOW_UP_STATE）
+      conversationState[conversationId].followUpState = "FOLLOW_UP_STATE";
+      aiResponse = `${aiResponse}\n\n${buildPostSummaryFollowUp(
+        conversationState[conversationId],
+        conversationHistory[conversationId]
+      )}`;
       conversationState[conversationId].finalQuestionPending = false;
     }
 
