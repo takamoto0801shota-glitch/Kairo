@@ -926,7 +926,7 @@ function buildPostSummaryFollowUp(state, history) {
     .join("、");
   const topic = facts ? `たとえば「${facts}」の伝え方` : "今の話の伝え方";
   if (!state?.location?.lat || !state?.location?.lng) {
-    return "差し支えなければ、今いらっしゃるエリア（例：Orchard / CBD / East）を教えてください。\n近くで行きやすいクリニックを具体名でお伝えできます。";
+    return "現在地が正確に取れなかったため、\n近くに多い一般的な医療機関を案内します。\n必要なら説明の整理も一緒にできます。やってみますか？";
   }
   return `もし、病院や薬局で${topic}に迷ったら、\nここで一緒に整理することもできます。\nやってみますか？`;
 }
@@ -1022,6 +1022,70 @@ async function fetchNearbyClinics(location, keyword) {
   if (!res.ok) return [];
   const data = await res.json();
   return (data.results || []).slice(0, 3).map((item) => item.name).filter(Boolean);
+}
+
+async function reverseGeocodeLocation(location) {
+  const apiKey = process.env.GOOGLE_GEOCODE_API_KEY || process.env.GOOGLE_PLACES_API_KEY;
+  if (!apiKey || !location?.lat || !location?.lng) return null;
+  const params = new URLSearchParams({
+    latlng: `${location.lat},${location.lng}`,
+    key: apiKey,
+    language: "en",
+  });
+  const url = `https://maps.googleapis.com/maps/api/geocode/json?${params.toString()}`;
+  const res = await fetch(url);
+  if (!res.ok) return null;
+  const data = await res.json();
+  const result = (data.results || [])[0];
+  if (!result) return null;
+  const comps = result.address_components || [];
+  const get = (type) => comps.find((c) => c.types.includes(type))?.long_name;
+  return {
+    country: get("country") || "",
+    city: get("locality") || get("administrative_area_level_1") || "",
+    area: get("sublocality") || "",
+  };
+}
+
+async function resolveLocationContext(state, clientMeta) {
+  if (state?.location?.lat && state?.location?.lng) {
+    const geo = await reverseGeocodeLocation(state.location);
+    state.locationContext = {
+      source: "gps",
+      ...geo,
+    };
+    return;
+  }
+  try {
+    const res = await fetch("https://ipapi.co/json/");
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.latitude && data?.longitude) {
+        state.location = { lat: data.latitude, lng: data.longitude };
+      }
+      state.locationContext = {
+        source: "ip",
+        country: data?.country_name || "",
+        city: data?.city || "",
+        area: data?.region || "",
+      };
+      return;
+    }
+  } catch (_) {
+    // ignore
+  }
+  const tz = clientMeta?.tz || "";
+  const lang = clientMeta?.lang || "";
+  let country = "";
+  if (tz.startsWith("Asia/Singapore")) country = "Singapore";
+  else if (lang.startsWith("ja")) country = "Japan";
+  else if (lang.startsWith("en-SG")) country = "Singapore";
+  state.locationContext = {
+    source: "tz",
+    country,
+    city: "",
+    area: "",
+  };
 }
 
 async function resolveClinicCandidates(state) {
@@ -1807,7 +1871,7 @@ app.get("/", (req, res) => {
 // Chat API endpoint
 app.post("/api/chat", async (req, res) => {
   try {
-  const { message, conversationId, location } = req.body;
+  const { message, conversationId, location, clientMeta } = req.body;
 
     if (!message) {
       return res.status(400).json({ error: "メッセージが必要です" });
@@ -1830,6 +1894,9 @@ app.post("/api/chat", async (req, res) => {
         lat: location.lat,
         lng: location.lng,
       };
+    }
+    if (clientMeta) {
+      conversationState[conversationId].clientMeta = clientMeta;
     }
     if (!conversationState[conversationId]) {
       conversationState[conversationId] = {
@@ -2135,6 +2202,10 @@ app.post("/api/chat", async (req, res) => {
         return "pain_fever";
       })();
       const otcWarningIndex = Math.floor(Math.random() * 5);
+      await resolveLocationContext(
+        conversationState[conversationId],
+        conversationState[conversationId].clientMeta
+      );
       if (level === "🔴" && conversationState[conversationId].location) {
         conversationState[conversationId].clinicCandidates = await resolveClinicCandidates(
           conversationState[conversationId]

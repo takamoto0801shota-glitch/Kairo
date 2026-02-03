@@ -71,14 +71,15 @@ function storeLocation(location) {
   }
 }
 
-function requestLocationOnce() {
+function requestLocationOnAction() {
   if (!navigator.geolocation) return;
-  if (getStoredLocation()) return;
+  if (window.location.protocol !== "https:" && window.location.hostname !== "localhost") return;
   navigator.geolocation.getCurrentPosition(
     (pos) => {
       storeLocation({
         lat: pos.coords.latitude,
         lng: pos.coords.longitude,
+        ts: Date.now(),
       });
     },
     () => {
@@ -640,7 +641,6 @@ function showInitialMessage() {
   addMessage(initialMessage);
 }
 
-requestLocationOnce();
 
 function hideSummaryCard() {
   const summaryCard = document.getElementById("summaryCard");
@@ -666,7 +666,11 @@ async function callOpenAI(message) {
         body: JSON.stringify({
           message: message,
           conversationId: conversationId,
-        location: getStoredLocation(),
+          location: getStoredLocation(),
+          clientMeta: {
+            lang: navigator.language || "",
+            tz: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+          },
         }),
       });
 
@@ -711,6 +715,8 @@ async function handleUserInput() {
   const userText = input.value.trim();
 
   if (!userText) return;
+
+  requestLocationOnAction();
 
   // Disable input
   input.disabled = true;
