@@ -2035,6 +2035,7 @@ app.post("/api/chat", async (req, res) => {
           conversationState[conversationId]
         );
       }
+      aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
       if (!hasAllSummaryBlocks(aiResponse)) {
         aiResponse = buildLocalSummaryFallback(
           level,
@@ -2042,6 +2043,7 @@ app.post("/api/chat", async (req, res) => {
           conversationState[conversationId]
         );
       }
+      aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
       conversationState[conversationId].finalQuestionPending = false;
     }
 
