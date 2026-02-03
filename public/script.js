@@ -716,8 +716,6 @@ async function handleUserInput() {
 
   if (!userText) return;
 
-  requestLocationOnAction();
-
   // Disable input
   input.disabled = true;
   sendButton.disabled = true;
@@ -793,12 +791,16 @@ function init() {
   showInitialMessage();
 
   // Send button event
-  document.getElementById("sendButton").addEventListener("click", handleUserInput);
+  document.getElementById("sendButton").addEventListener("click", () => {
+    requestLocationOnAction();
+    handleUserInput();
+  });
 
   // Enter key to send
   document.getElementById("userInput").addEventListener("keypress", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
+      requestLocationOnAction();
       handleUserInput();
     }
   });
