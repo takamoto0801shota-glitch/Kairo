@@ -1048,6 +1048,7 @@ async function reverseGeocodeLocation(location) {
 }
 
 async function resolveLocationContext(state, clientMeta) {
+  if (!state) return;
   if (state?.location?.lat && state?.location?.lng) {
     const geo = await reverseGeocodeLocation(state.location);
     state.locationContext = {
@@ -1889,15 +1890,6 @@ app.post("/api/chat", async (req, res) => {
         { role: "system", content: SYSTEM_PROMPT },
       ];
     }
-    if (location?.lat && location?.lng) {
-      conversationState[conversationId].location = {
-        lat: location.lat,
-        lng: location.lng,
-      };
-    }
-    if (clientMeta) {
-      conversationState[conversationId].clientMeta = clientMeta;
-    }
     if (!conversationState[conversationId]) {
       conversationState[conversationId] = {
         questionCount: 0,
@@ -1932,11 +1924,21 @@ app.post("/api/chat", async (req, res) => {
         summaryShown: false,
         location: null,
         clinicCandidates: [],
+        clientMeta: null,
         expectsPainScore: false,
         lastPainScore: null,
         lastPainWeight: null,
         lastNormalizedAnswer: null,
       };
+    }
+    if (location?.lat && location?.lng) {
+      conversationState[conversationId].location = {
+        lat: location.lat,
+        lng: location.lng,
+      };
+    }
+    if (clientMeta) {
+      conversationState[conversationId].clientMeta = clientMeta;
     }
 
     // ユーザー回答のスコアを集計
