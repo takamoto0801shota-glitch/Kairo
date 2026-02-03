@@ -1869,10 +1869,57 @@ app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
+function getOrInitConversationState(conversationId) {
+  if (!conversationState[conversationId]) {
+    conversationState[conversationId] = {
+      questionCount: 0,
+      totalScore: 0,
+      lastOptions: [],
+      finalQuestionPending: false,
+      confidence: 0,
+      slotFilled: {},
+      lastQuestionType: null,
+      previousQuestionType: null,
+      recentQuestionTypes: [],
+      recentQuestionTexts: [],
+      recentQuestionPhrases: [],
+      usedTemplateIds: [],
+      progressTemplateUsed: false,
+      lastTemplateId: null,
+      slotAnswers: {},
+      slotNormalized: {},
+      askedSlots: {},
+      causeDetailPending: false,
+      causeDetailAsked: false,
+      causeDetailAnswered: false,
+      causeDetailText: null,
+      expectsCauseDetail: false,
+      introTemplateUsedIds: [],
+      introRoleUsage: {},
+      lastIntroPattern: null,
+      prevIntroPattern: null,
+      lastIntroRoles: [],
+      followUpState: "NONE",
+      followUpPending: false,
+      summaryShown: false,
+      location: null,
+      clinicCandidates: [],
+      clientMeta: null,
+      expectsPainScore: false,
+      lastPainScore: null,
+      lastPainWeight: null,
+      lastNormalizedAnswer: null,
+    };
+  }
+  return conversationState[conversationId];
+}
+
 // Chat API endpoint
 app.post("/api/chat", async (req, res) => {
   try {
-  const { message, conversationId, location, clientMeta } = req.body;
+  const { message, conversationId: rawConversationId, location, clientMeta } = req.body;
+  const conversationId =
+    rawConversationId || `conv_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
 
     if (!message) {
       return res.status(400).json({ error: "メッセージが必要です" });
@@ -1890,55 +1937,15 @@ app.post("/api/chat", async (req, res) => {
         { role: "system", content: SYSTEM_PROMPT },
       ];
     }
-    if (!conversationState[conversationId]) {
-      conversationState[conversationId] = {
-        questionCount: 0,
-        totalScore: 0,
-        lastOptions: [],
-        finalQuestionPending: false,
-        confidence: 0,
-        slotFilled: {},
-        lastQuestionType: null,
-        previousQuestionType: null,
-        recentQuestionTypes: [],
-        recentQuestionTexts: [],
-        recentQuestionPhrases: [],
-        usedTemplateIds: [],
-        progressTemplateUsed: false,
-        lastTemplateId: null,
-        slotAnswers: {},
-        slotNormalized: {},
-        askedSlots: {},
-        causeDetailPending: false,
-        causeDetailAsked: false,
-        causeDetailAnswered: false,
-        causeDetailText: null,
-        expectsCauseDetail: false,
-        introTemplateUsedIds: [],
-        introRoleUsage: {},
-        lastIntroPattern: null,
-        prevIntroPattern: null,
-        lastIntroRoles: [],
-        followUpState: "NONE",
-        followUpPending: false,
-        summaryShown: false,
-        location: null,
-        clinicCandidates: [],
-        clientMeta: null,
-        expectsPainScore: false,
-        lastPainScore: null,
-        lastPainWeight: null,
-        lastNormalizedAnswer: null,
-      };
-    }
+    const state = getOrInitConversationState(conversationId);
     if (location?.lat && location?.lng) {
-      conversationState[conversationId].location = {
+      state.location = {
         lat: location.lat,
         lng: location.lng,
       };
     }
     if (clientMeta) {
-      conversationState[conversationId].clientMeta = clientMeta;
+      state.clientMeta = clientMeta;
     }
 
     // ユーザー回答のスコアを集計
