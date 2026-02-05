@@ -70,6 +70,38 @@ body {
     color: #4a9b8e;
 }
 
+.location-status {
+    position: absolute;
+    top: 20px;
+    right: 110px;
+    font-size: 12px;
+    color: #6a8f88;
+    background-color: #f0f7f5;
+    border: 1px solid #d7e6e2;
+    border-radius: 12px;
+    padding: 4px 8px;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+.location-button {
+    position: absolute;
+    top: 20px;
+    right: 200px;
+    padding: 6px 10px;
+    background-color: #f0f7f5;
+    color: #4a9b8e;
+    border: 1px solid #d7e6e2;
+    border-radius: 16px;
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.location-button:hover {
+    background-color: #e6f2ef;
+}
+
 
 .clear-button {
     position: absolute;

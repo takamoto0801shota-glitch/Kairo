@@ -766,6 +766,114 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 const conversationHistory = {};
 const conversationState = {};
 
+function normalizeLocation(raw) {
+  if (!raw) return { status: "idle" };
+  if (raw.status === "requesting") return { status: "requesting" };
+  if (raw.status === "failed" && raw.reason) {
+    return { status: "failed", reason: raw.reason };
+  }
+  if (raw.status === "usable_fast" && raw.lat && raw.lng && raw.city && raw.country && raw.ts) {
+    return {
+      status: "usable_fast",
+      lat: raw.lat,
+      lng: raw.lng,
+      city: raw.city,
+      country: raw.country,
+      ts: raw.ts,
+    };
+  }
+  if (raw.status === "usable" && raw.lat && raw.lng && raw.city && raw.country) {
+    return {
+      status: "usable",
+      lat: raw.lat,
+      lng: raw.lng,
+      city: raw.city,
+      country: raw.country,
+      accuracy: raw.accuracy,
+      ts: raw.ts,
+    };
+  }
+  if (raw.status === "city_ok" && raw.lat && raw.lng && raw.city && raw.country) {
+    return {
+      status: "city_ok",
+      lat: raw.lat,
+      lng: raw.lng,
+      city: raw.city,
+      country: raw.country,
+      accuracy: raw.accuracy,
+      ts: raw.ts,
+    };
+  }
+  if (raw.lat && raw.lng) {
+    return {
+      status: "partial_geo",
+      lat: raw.lat,
+      lng: raw.lng,
+      accuracy: raw.accuracy,
+      ts: raw.ts,
+    };
+  }
+  if (raw.error) {
+    return { status: "failed", reason: raw.error };
+  }
+  return { status: "idle" };
+}
+
+function canRecommendSpecificPlace(location) {
+  return location?.status === "usable_fast" || location?.status === "usable";
+}
+
+function initConversationState(input = {}) {
+  return {
+    conversationId: input.conversationId || `conv_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+    questionCount: 0,
+    totalScore: 0,
+    lastOptions: [],
+    finalQuestionPending: false,
+    confidence: 0,
+    slotFilled: {},
+    lastQuestionType: null,
+    previousQuestionType: null,
+    recentQuestionTypes: [],
+    recentQuestionTexts: [],
+    recentQuestionPhrases: [],
+    usedTemplateIds: [],
+    progressTemplateUsed: false,
+    lastTemplateId: null,
+    slotAnswers: {},
+    slotNormalized: {},
+    askedSlots: {},
+    causeDetailPending: false,
+    causeDetailAsked: false,
+    causeDetailAnswered: false,
+    causeDetailText: null,
+    expectsCauseDetail: false,
+    introTemplateUsedIds: [],
+    introRoleUsage: {},
+    lastIntroPattern: null,
+    prevIntroPattern: null,
+    lastIntroRoles: [],
+    followUpState: "NONE",
+    followUpPending: false,
+    summaryShown: false,
+    hasSummaryBlockGenerated: false,
+    decisionType: null,
+    decisionLevel: null,
+    followUpPhase: "idle",
+    followUpStep: 0,
+    followUpDestinationName: null,
+    locationPromptShown: false,
+    location: input.location || { status: "idle" },
+    clinicCandidates: [],
+    pharmacyCandidates: [],
+    clientMeta: input.clientMeta || {},
+    expectsPainScore: false,
+    lastPainScore: null,
+    lastPainWeight: null,
+    lastNormalizedAnswer: null,
+  };
+}
+
 function buildRepairPrompt(requiredLevel) {
   return `
 あなたはKairoです。以下の会話内容を踏まえ、最後に出すべき「まとめブロック」を**必ず全ブロック**で出力してください。
@@ -788,9 +896,18 @@ function buildRepairPrompt(requiredLevel) {
   - または 📝 いまの状態を整理します（メモ） / ⚠️ Kairoが気になっているポイント / 🏥 Kairoの判断 / 💬 最後に
 - 🟡の場合は「🚨 もし次の症状が出たら」と「🌱 最後に」の間に
   💊 一般的な市販薬 のブロックを必ず追加する（順番厳守）
-- 💊ブロックは診断・病名・商品名の断定禁止
-- 「一般的には」「ことが多い」などの表現を使う
-- 市販薬はカテゴリで提示し、✅今すぐやることと内容が被らないようにする
+- 💊ブロックは診断・病名の断定禁止
+- 商品名は「例示」として2〜3件提示（断定禁止）
+- 一般名＋商品名で示す
+- 薬局名は具体名を1件提示する
+- 「一般的に」は免責目的として末尾にのみ使用する
+- ✅今すぐやることと内容が被らないようにする
+- 💊ブロックは診断・病名の断定禁止
+- 商品名は「例示」として2〜3件提示（断定禁止）
+- 一般名＋商品名で示す
+- 薬局名は具体名を1件提示する
+- 「一般的に」は免責目的として末尾にのみ使用する
+- ✅今すぐやることと内容が被らないようにする
 - 📝 いまの状態を整理します（メモ）は事実のみ・具体的に書く
   - 「ない」「不明」「特になし」だけの記述は禁止
   - 症状・経過・生活影響など具体語を含める
@@ -925,8 +1042,8 @@ function buildPostSummaryFollowUp(state, history) {
     .slice(0, 2)
     .join("、");
   const topic = facts ? `たとえば「${facts}」の伝え方` : "今の話の伝え方";
-  if (!state?.location?.lat || !state?.location?.lng) {
-    return "現在地が正確に取れなかったため、\n近くに多い一般的な医療機関を案内します。\n必要なら説明の整理も一緒にできます。やってみますか？";
+  if (state?.location?.status !== "usable") {
+    return "現在地が取得できていないため、\n国・都市レベルで具体名を案内しています。\n必要なら説明の整理も一緒にできます。やってみますか？";
   }
   return `もし、病院や薬局で${topic}に迷ったら、\nここで一緒に整理することもできます。\nやってみますか？`;
 }
@@ -942,69 +1059,36 @@ function ensureFollowUpAppended(text, state, history) {
 
 function buildOtcWarningLine(variantIndex) {
   const variants = [
-    "これは一般的な情報であり、診断や処方を行うものではありません。症状が続く場合や不安があるときは、薬剤師や医師に相談してください。",
-    "体調や状況によって適さないこともあります。参考情報としてご覧いただき、必要に応じて専門家に確認してください。",
-    "すべての人に当てはまるわけではありません。変化がない、または悪化する場合は受診を検討してください。",
-    "市販薬は症状の緩和を目的としたものです。原因の特定や治療が必要な場合は医療機関で相談してください。",
-    "これは一般的に使われる例の紹介です。服用に不安がある場合は薬剤師に直接相談するのが安心です。",
+    "これは例示であり、診断や処方ではありません。体質や症状によって合わない場合があります。",
+    "あくまで例としての提示です。体調や薬の相性によって適さない場合があります。",
+    "例として挙げていますが、症状や体質によって合わないこともあります。",
+    "参考例としての案内です。体調によって合わない場合があります。",
+    "例示の情報であり、診断や処方ではありません。体質によって合わない場合があります。",
   ];
   const idx = Math.max(0, Math.min(variants.length - 1, variantIndex || 0));
   return variants[idx];
 }
 
-function buildYellowOtcBlock(category, warningIndex = 0) {
-  const blocks = {
-    pain_fever: {
-      heading: "💊 1. 痛み・発熱",
-      examples: ["パラセタモール系", "イブプロフェン系"],
-      usage: "頭痛や発熱、だるさに使われることが多いです。",
-    },
-    throat: {
-      heading: "💊 2. 喉の違和感",
-      examples: ["のど飴・トローチ系", "うがい薬・のどスプレー系"],
-      usage: "喉の痛みや乾燥感の緩和に使われることが多いです。",
-    },
-    nose: {
-      heading: "💊 3. 鼻水・くしゃみ",
-      examples: ["抗ヒスタミン系", "点鼻薬系"],
-      usage: "鼻水・くしゃみ・鼻づまりの緩和に使われることが多いです。",
-    },
-    cough: {
-      heading: "💊 4. 咳",
-      examples: ["鎮咳薬系", "去痰薬系"],
-      usage: "咳や痰の不快感をやわらげる目的で使われることが多いです。",
-    },
-    stomach: {
-      heading: "💊 5. 胃の不快感",
-      examples: ["胃酸をおさえる系", "胃粘膜を保護する系"],
-      usage: "胃の重さやムカムカの緩和に使われることが多いです。",
-    },
-    bowel: {
-      heading: "💊 6. 下痢・便秘",
-      examples: ["整腸剤系", "下痢止め／便秘薬系"],
-      usage: "お腹の調子を整える目的で使われることが多いです。",
-    },
-    fatigue: {
-      heading: "💊 7. だるさ・脱水気味",
-      examples: ["経口補水液系", "電解質補給系"],
-      usage: "水分や塩分の補給目的で使われることが多いです。",
-    },
-    allergy: {
-      heading: "💊 8. アレルギー症状",
-      examples: ["抗ヒスタミン系", "点眼・点鼻系"],
-      usage: "目や鼻のアレルギー症状の緩和に使われることが多いです。",
-    },
-  };
-  const def = blocks[category] || blocks.pain_fever;
-  return [
-    def.heading,
-    `・${def.examples[0]}`,
-    def.examples[1] ? `・${def.examples[1]}` : null,
-    def.usage,
-    buildOtcWarningLine(warningIndex),
-  ]
-    .filter(Boolean)
-    .join("\n");
+function buildYellowOtcBlock(category, warningIndex = 0, pharmacyRec, otcExamples, locationPreface) {
+  const examples = otcExamples || [];
+  const lines = ["💊 一般的な市販薬"];
+  if (locationPreface) {
+    lines.push(locationPreface);
+  }
+  if (pharmacyRec?.name) {
+    lines.push(`薬局名：${pharmacyRec.name}`);
+  }
+  if (pharmacyRec?.reason) {
+    lines.push(`理由：${pharmacyRec.reason}`);
+  }
+  lines.push("薬名（例）：");
+  examples.slice(0, 3).forEach((item) => {
+    lines.push(`・${item.generic}（${item.brand}）：${item.use}`);
+  });
+  lines.push(buildOtcWarningLine(warningIndex));
+  lines.push("最終判断は薬剤師に相談してください。");
+  lines.push("これは一般的に現地で使われる選択肢です。");
+  return lines.filter(Boolean).join("\n");
 }
 
 async function fetchNearbyClinics(location, keyword) {
@@ -1047,13 +1131,42 @@ async function reverseGeocodeLocation(location) {
   };
 }
 
+async function reverseGeocodeWithRetry(location, retries = 2) {
+  let attempt = 0;
+  while (attempt <= retries) {
+    const geo = await reverseGeocodeLocation(location);
+    if (geo) return geo;
+    attempt += 1;
+    if (attempt <= retries) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+  return null;
+}
+
 async function resolveLocationContext(state, clientMeta) {
   if (!state) return;
-  if (state?.location?.lat && state?.location?.lng) {
-    const geo = await reverseGeocodeLocation(state.location);
+  if ((state?.location?.status === "usable" || state?.location?.status === "usable_fast" || state?.location?.status === "partial_geo" || state?.location?.status === "city_ok") && state?.location?.lat && state?.location?.lng) {
+    const geo = await reverseGeocodeWithRetry(state.location, 2);
+    if (geo?.city && geo?.country) {
+      const accuracy = state.location.accuracy;
+      const ts = state.location.ts;
+      const fresh = typeof ts === "number" ? Date.now() - ts <= 30000 : false;
+      const accurateEnough = typeof accuracy === "number" ? accuracy < 500 : true;
+      const usable = fresh && accurateEnough;
+      state.location = {
+        status: usable ? "usable" : "usable_fast",
+        lat: state.location.lat,
+        lng: state.location.lng,
+        city: geo.city,
+        country: geo.country,
+        accuracy,
+        ts,
+      };
+    }
     state.locationContext = {
       source: "gps",
-      ...geo,
+      ...(geo || {}),
     };
     return;
   }
@@ -1061,9 +1174,6 @@ async function resolveLocationContext(state, clientMeta) {
     const res = await fetch("https://ipapi.co/json/");
     if (res.ok) {
       const data = await res.json();
-      if (data?.latitude && data?.longitude) {
-        state.location = { lat: data.latitude, lng: data.longitude };
-      }
       state.locationContext = {
         source: "ip",
         country: data?.country_name || "",
@@ -1090,6 +1200,7 @@ async function resolveLocationContext(state, clientMeta) {
 }
 
 async function resolveClinicCandidates(state) {
+  if (!canRecommendSpecificPlace(state?.location)) return [];
   if (!state?.location?.lat || !state?.location?.lng) return [];
   const japanese = await fetchNearbyClinics(state.location, "Japanese clinic");
   if (japanese.length > 0) return japanese;
@@ -1099,11 +1210,231 @@ async function resolveClinicCandidates(state) {
   return hospital;
 }
 
-function ensureYellowOtcBlock(text, requiredLevel, category, warningIndex = 0) {
+async function fetchNearbyPharmacies(location) {
+  if (!process.env.GOOGLE_PLACES_API_KEY) return [];
+  if (!location?.lat || !location?.lng) return [];
+  const params = new URLSearchParams({
+    location: `${location.lat},${location.lng}`,
+    radius: "2500",
+    keyword: "pharmacy",
+    type: "pharmacy",
+    key: process.env.GOOGLE_PLACES_API_KEY,
+  });
+  const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?${params.toString()}`;
+  const res = await fetch(url);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return (data.results || []).slice(0, 3).map((item) => item.name).filter(Boolean);
+}
+
+async function resolvePharmacyCandidates(state) {
+  if (!canRecommendSpecificPlace(state?.location)) return [];
+  if (!state?.location?.lat || !state?.location?.lng) return [];
+  return fetchNearbyPharmacies(state.location);
+}
+
+const FALLBACK_PHARMACY_BY_COUNTRY = {
+  Japan: ["マツモトキヨシ 新宿東口店", "ツルハドラッグ すすきの店", "スギ薬局 名駅店"],
+  Singapore: ["Guardian Pharmacy (Raffles City)", "Watsons (ION Orchard)", "Unity Pharmacy (Bugis Junction)"],
+};
+
+const FALLBACK_HOSPITAL_BY_COUNTRY = {
+  Japan: [
+    { name: "聖路加国際病院", type: "General Hospital" },
+    { name: "日本赤十字社医療センター", type: "General Hospital" },
+  ],
+  Singapore: [
+    { name: "Raffles Hospital", type: "General Hospital" },
+    { name: "Mount Elizabeth Hospital", type: "General Hospital" },
+  ],
+};
+
+function pickFallbackByLocation(list, locationContext) {
+  if (!Array.isArray(list) || list.length === 0) return null;
+  if (!locationContext?.city) return list[0];
+  const matched = list.find((item) => String(item).includes(locationContext.city));
+  return matched || list[0];
+}
+
+function buildPharmacyRecommendation(state, locationContext, pharmacyCandidates) {
+  if (canRecommendSpecificPlace(state?.location) && pharmacyCandidates?.length) {
+    return {
+      name: pharmacyCandidates[0],
+      reason: "今いる場所からの移動負担が少ないためです。",
+      preface: "",
+    };
+  }
+  if (state?.location?.status === "city_ok" && locationContext?.city) {
+    return {
+      name: `${locationContext.city}の主要薬局チェーン`,
+      reason: "都市単位で行きやすい範囲にあるためです。",
+      preface: "",
+    };
+  }
+  if (state?.location?.status === "failed") {
+    const country = locationContext?.country || "現在地の国";
+    return {
+      name: `${country}の一般的な薬局チェーン`,
+      reason: "現在地が取得できていないため、国単位での目安です。",
+      preface: "現在地が取得できていないため、\nご案内は一般的な目安になります。",
+    };
+  }
+  const country = locationContext?.country || (locationContext?.source === "tz" ? locationContext?.country : "");
+  const fallbackList = (FALLBACK_PHARMACY_BY_COUNTRY[country] || FALLBACK_PHARMACY_BY_COUNTRY.Japan).map(
+    (entry) => entry.split(" ")[0]
+  );
+  const name = pickFallbackByLocation(fallbackList, locationContext) || fallbackList[0];
+  return {
+    name,
+    reason: "現在地が未取得のため、チェーン名レベルで案内しています。",
+    preface: "現在地が取得できていないため、\nご案内は一般的な目安になります。",
+  };
+}
+
+function shouldShowLocationPrompt(state) {
+  return false;
+}
+
+function shouldShowLocationRePrompt(state) {
+  return false;
+}
+
+function isWhereToGoQuestion(message) {
+  return /どこに行けばいい|どこに行けば良い|どこに行く|どこへ行けば|病院はどこ|薬局はどこ/.test(message || "");
+}
+
+function buildHospitalRecommendationDetail(state, locationContext, clinicCandidates) {
+  if (canRecommendSpecificPlace(state?.location) && clinicCandidates?.length) {
+    return {
+      name: clinicCandidates[0],
+      type: "Clinic",
+      reason: "今の状態を見てもらいやすい体制があるためです。",
+      preface: "",
+    };
+  }
+  if (state?.location?.status === "city_ok" && locationContext?.city) {
+    return {
+      name: `${locationContext.city}の総合病院`,
+      type: "General Hospital",
+      reason: "都市単位で案内できる範囲のためです。",
+      preface: "",
+    };
+  }
+  if (state?.location?.status === "failed") {
+    const country = locationContext?.country || "現在地の国";
+    return {
+      name: `${country}の医療機関`,
+      type: "General Hospital",
+      reason: "現在地が取得できていないため、国単位での目安です。",
+      preface: "現在地が取得できていないため、\nご案内は一般的な目安になります。",
+    };
+  }
+  const country = locationContext?.country || (locationContext?.source === "tz" ? locationContext?.country : "");
+  const fallbackList = FALLBACK_HOSPITAL_BY_COUNTRY[country] || FALLBACK_HOSPITAL_BY_COUNTRY.Japan;
+  const picked = pickFallbackByLocation(fallbackList, locationContext) || fallbackList[0];
+  const area = locationContext?.city || locationContext?.area || country || "近くのエリア";
+  return {
+    name: `${area}の総合病院`,
+    type: picked?.type || "General Hospital",
+    reason: "現在地が未取得のため、エリア名止まりで案内しています。",
+    preface: "現在地が取得できていないため、\nご案内は一般的な目安になります。",
+  };
+}
+
+function buildOtcExamples(category, country) {
+  const byCountry = {
+    Japan: {
+      pain_fever: [
+        { generic: "アセトアミノフェン", brand: "タイレノールA", use: "痛みや発熱の緩和" },
+        { generic: "イブプロフェン", brand: "イブA錠", use: "痛みや発熱の緩和" },
+      ],
+      throat: [
+        { generic: "セチルピリジニウム塩化物", brand: "パブロンのどトローチ", use: "のどの痛みや違和感" },
+        { generic: "アズレンスルホン酸ナトリウム", brand: "浅田飴AZ", use: "のどの刺激や乾燥感" },
+      ],
+      nose: [
+        { generic: "クロルフェニラミン", brand: "コンタック鼻炎Z", use: "鼻水・くしゃみの緩和" },
+        { generic: "フェキソフェナジン", brand: "アレグラFX", use: "アレルギー性鼻炎の緩和" },
+      ],
+      cough: [
+        { generic: "デキストロメトルファン", brand: "パブロンせき止め", use: "咳の緩和" },
+        { generic: "カルボシステイン", brand: "ムコダイン去痰薬", use: "痰の切れをよくする" },
+      ],
+      stomach: [
+        { generic: "ファモチジン", brand: "ガスター10", use: "胃の不快感" },
+        { generic: "スクラルファート", brand: "アルサルミン内服液", use: "胃の粘膜保護" },
+      ],
+      bowel: [
+        { generic: "ロペラミド", brand: "ストッパ下痢止めEX", use: "下痢の緩和" },
+        { generic: "ビオフェルミン", brand: "新ビオフェルミンS", use: "腸内環境の調整" },
+      ],
+      fatigue: [
+        { generic: "経口補水液", brand: "OS-1", use: "水分・電解質補給" },
+        { generic: "電解質補給", brand: "アクエリアス経口補水液", use: "脱水気味の時の補給" },
+      ],
+      allergy: [
+        { generic: "フェキソフェナジン", brand: "アレグラFX", use: "アレルギー症状の緩和" },
+        { generic: "ロラタジン", brand: "クラリチンEX", use: "くしゃみ・鼻水の緩和" },
+      ],
+    },
+    Singapore: {
+      pain_fever: [
+        { generic: "Paracetamol", brand: "Panadol", use: "pain/fever relief" },
+        { generic: "Ibuprofen", brand: "Nurofen", use: "pain/fever relief" },
+      ],
+      throat: [
+        { generic: "Benzocaine", brand: "Strepsils Plus", use: "throat pain relief" },
+        { generic: "Flurbiprofen", brand: "Strepsils Intensive", use: "throat inflammation relief" },
+      ],
+      nose: [
+        { generic: "Loratadine", brand: "Clarityn", use: "allergy-related runny nose" },
+        { generic: "Cetirizine", brand: "Zyrtec", use: "sneezing/runny nose relief" },
+      ],
+      cough: [
+        { generic: "Dextromethorphan", brand: "Robitussin DM", use: "cough suppression" },
+        { generic: "Guaifenesin", brand: "Mucinex", use: "phlegm relief" },
+      ],
+      stomach: [
+        { generic: "Famotidine", brand: "Pepcid", use: "stomach discomfort" },
+        { generic: "Antacid", brand: "Gaviscon", use: "acid reflux relief" },
+      ],
+      bowel: [
+        { generic: "Loperamide", brand: "Imodium", use: "diarrhea relief" },
+        { generic: "Probiotic", brand: "Culturelle", use: "gut balance support" },
+      ],
+      fatigue: [
+        { generic: "Oral rehydration salts", brand: "Hydralyte", use: "fluid/electrolyte replacement" },
+        { generic: "Electrolyte drink", brand: "100Plus", use: "recovery support" },
+      ],
+      allergy: [
+        { generic: "Fexofenadine", brand: "Telfast", use: "allergy symptom relief" },
+        { generic: "Loratadine", brand: "Clarityn", use: "allergy symptom relief" },
+      ],
+    },
+  };
+  const countryKey = byCountry[country] ? country : "Japan";
+  return byCountry[countryKey]?.[category] || byCountry[countryKey].pain_fever;
+}
+
+function ensureYellowOtcBlock(
+  text,
+  requiredLevel,
+  category,
+  warningIndex = 0,
+  pharmacyRec,
+  otcExamples,
+  locationPreface
+) {
   if (!text || requiredLevel !== "🟡") return text;
   if (text.includes("💊 ")) return text;
   const lines = text.split("\n");
-  const otcBlock = buildYellowOtcBlock(category, warningIndex);
+  const otcBlock = buildYellowOtcBlock(
+    category,
+    warningIndex,
+    pharmacyRec,
+    otcExamples,
+    locationPreface
+  );
   const insertAfterIndex = lines.findIndex((line) => line.includes("🚨 もし次の症状が出たら"));
   const beforeLastIndex = lines.findIndex((line) => line.includes("🌱 最後に"));
   if (insertAfterIndex >= 0 && beforeLastIndex > insertAfterIndex) {
@@ -1120,6 +1451,248 @@ function ensureYellowOtcBlock(text, requiredLevel, category, warningIndex = 0) {
 function enforceBulletSymbol(text) {
   if (!text) return text;
   return text.replace(/^[\s　]*[-•]\s+/gm, "・");
+}
+
+function sanitizeGeneralPhrases(text) {
+  if (!text) return text;
+  const allowedLine = "これは一般的に現地で使われる選択肢です。";
+  return text
+    .split("\n")
+    .map((line) => (line.includes(allowedLine) ? line : line.replace(/一般的に/g, "多くの場合")))
+    .join("\n");
+}
+
+function sanitizeSummaryQuestions(text) {
+  if (!text) return text;
+  return text.replace(/[？?]/g, "。");
+}
+
+function isAffirmative(text) {
+  return /^(はい|お願いします|お願いします|いいですね|やります|頼みます)/.test((text || "").trim());
+}
+
+function isDecline(text) {
+  return /(今はいい|大丈夫|結構です|いりません|不要|いいえ|やめて)/.test((text || "").trim());
+}
+
+function buildClosingMessage() {
+  return [
+    "わかりました。",
+    "今はそれで大丈夫だと思います。",
+    "",
+    "また不安になったり、状況が変わったら、",
+    "いつでもKairoに相談してください。",
+  ].join("\n");
+}
+
+function buildDecisionReasonBullets(state) {
+  const reasons = [];
+  const normalized = state?.slotNormalized || {};
+  if (normalized.pain_score?.riskLevel === RISK_LEVELS.HIGH) {
+    reasons.push("・痛みが強めに出ている");
+  }
+  if (normalized.worsening?.riskLevel === RISK_LEVELS.HIGH) {
+    reasons.push("・痛み方が強めの側に寄っている");
+  }
+  if (normalized.daily_impact?.riskLevel === RISK_LEVELS.HIGH) {
+    reasons.push("・日常の動きに支障が出ている");
+  }
+  if (normalized.associated_symptoms?.riskLevel === RISK_LEVELS.HIGH) {
+    reasons.push("・付随する症状が強めに出ている");
+  }
+  if (reasons.length === 0) {
+    buildFactsFromSlotAnswers(state).forEach((fact) => reasons.push(fact));
+  }
+  return reasons.slice(0, 3);
+}
+
+function buildCommunicationScript(state, destinationName, decisionType) {
+  const facts = buildFactsFromSlotAnswers(state).map((line) => line.replace(/^・/, ""));
+  const factsSentence = facts.length > 0 ? `症状は${facts.join("、")}です。` : "症状について相談したいです。";
+  const jp = [
+    `こんにちは。${destinationName}で症状の相談をしたくて来ました。`,
+    factsSentence,
+    "今の状態を見てもらいたいです。",
+  ].join("\n");
+  const en = [
+    `Hello. I'd like to consult about my symptoms at ${destinationName}.`,
+    facts.length > 0 ? `My symptoms are: ${facts.join(", ")}.` : "I want to consult about my symptoms.",
+    "I'd like you to check my current condition.",
+  ].join("\n");
+  const label = decisionType === "A_HOSPITAL" ? "病院" : "薬局";
+  return `【日本語】\n${jp}\n\n【English】\n${en}\n\n(${label}向け)`;
+}
+
+function buildImmediateActionsWithReasons(state, decisionType) {
+  if (decisionType === "A_HOSPITAL") {
+    return [
+      "・今の症状の要点をメモする：短く伝えられると受付がスムーズになります。",
+      "・無理な移動は避ける：体力を温存した方が負担が少ないです。",
+      "・水分を少しずつとる：喉や体の負担が軽くなります。",
+    ].join("\n");
+  }
+  return [
+    "・症状の要点をそのまま伝える：相談が短時間でまとまります。",
+    "・薬名は例として確認する：体質に合うか相談しやすくなります。",
+    "・今の状態を無理なく保つ：体力の消耗を抑えられます。",
+  ].join("\n");
+}
+
+function buildNextFlow(decisionType) {
+  if (decisionType === "A_HOSPITAL") {
+    return [
+      "今すぐ：病院へ連絡または受付へ行く。",
+      "今日中：症状の要点を伝えて診てもらう。",
+      "その後：指示があればその内容に沿って動く。",
+    ].join("\n");
+  }
+  return [
+    "今すぐ：薬局で症状を相談する。",
+    "今日中：提案された範囲で様子を見る。",
+    "数日以内：変化がなければ受診を検討する。",
+  ].join("\n");
+}
+
+function buildFollowUpQuestion1(destinationName) {
+  return `もしよろしければ、${destinationName}でどう伝えればいいか、一緒に考えましょうか？`;
+}
+
+function buildWatchfulActions(state) {
+  const painLevel =
+    state?.lastPainScore !== null && state?.lastPainScore !== undefined
+      ? `${state.lastPainScore} / 10`
+      : "不明";
+  const mobility = state?.slotAnswers?.daily_impact || "普通に動ける";
+  const historyText = Object.values(state?.slotAnswers || {}).join(" ");
+  const category = detectSymptomCategory(historyText);
+  const symptomLine =
+    category === "stomach"
+      ? "お腹の張りが主症状のため、消化管への刺激を避ける目的"
+      : category === "head"
+        ? "頭の重さや痛みが主症状のため、刺激を避ける目的"
+        : category === "throat"
+          ? "喉の違和感が主症状のため、刺激を避ける目的"
+          : "体の違和感が主症状のため、刺激を避ける目的";
+  return [
+    "今の情報を踏まえると、以下が現実的です。",
+    "",
+    "・無理に動かず、安静にする",
+    `　→ 痛みが「${painLevel}」で「${mobility}」なため、体への負荷を増やさない方がよい`,
+    "",
+    "・水分を少しずつとる",
+    "　→ 1回100〜150mlを目安に、1〜2時間おきに補給するため",
+    "",
+    "・食事や刺激物は控える",
+    `　→ ${symptomLine}`,
+    "",
+    "・症状の変化をメモしておく",
+    "　→ 受診時に「いつ・どう変わったか」を正確に伝えやすくなる",
+  ].join("\n");
+}
+
+function formatDestinationName(name, decisionType) {
+  if (!name) return decisionType === "A_HOSPITAL" ? "病院" : "薬局";
+  if (decisionType === "A_HOSPITAL") {
+    if (name.match(/病院|Hospital|Clinic/)) return name;
+    return `${name}病院`;
+  }
+  if (name.match(/薬局|Pharmacy/)) return name;
+  return `${name}薬局`;
+}
+
+function buildFollowUpJudgeMeta(state) {
+  const level = state?.decisionLevel || "🟢";
+  return {
+    judgement: level,
+    confidence: state?.confidence || 0,
+    ratio: 0,
+    shouldJudge: true,
+    slotsFilledCount: countFilledSlots(state?.slotFilled),
+    decisionAllowed: true,
+    questionCount: state?.questionCount || 0,
+    summaryLine: null,
+    questionType: null,
+    rawScore: state?.lastPainScore ?? null,
+    painScoreRatio: state?.lastPainWeight ?? null,
+  };
+}
+
+function handleFollowUpFlow(message, state) {
+  if (!state?.hasSummaryBlockGenerated) return null;
+  const decisionType = state?.decisionType;
+  const rawDestinationName =
+    state?.followUpDestinationName ||
+    (decisionType === "A_HOSPITAL"
+      ? state?.hospitalRecommendation?.name
+      : state?.pharmacyRecommendation?.name);
+  const destinationName = formatDestinationName(rawDestinationName, decisionType);
+
+  if (decisionType === "C_WATCHFUL_WAITING") {
+    const qWatchful = "今できることを、理由と一緒に整理しますか？";
+    if (state.followUpStep <= 1) {
+      if (isAffirmative(trimmed)) {
+        state.followUpPhase = "closed";
+        return { message: `${buildWatchfulActions(state)}\n\n${buildClosingMessage()}` };
+      }
+      if (isDecline(trimmed)) {
+        state.followUpPhase = "closed";
+        return { message: buildClosingMessage() };
+      }
+      return { message: qWatchful };
+    }
+    state.followUpPhase = "closed";
+    return { message: buildClosingMessage() };
+  }
+
+  const q1 = buildFollowUpQuestion1(destinationName);
+  const q2 = "今できることを、理由と一緒に整理しますか？";
+  const q3 = "今後の目安も含めて整理しますか？";
+  const trimmed = (message || "").trim();
+
+  if (state.followUpPhase === "closed") {
+    return { message: buildClosingMessage() };
+  }
+
+  if (state.followUpStep <= 1) {
+    if (isAffirmative(trimmed)) {
+      state.followUpStep = 2;
+      const script = buildCommunicationScript(state, destinationName, decisionType);
+      return { message: `${script}\n\n${q2}` };
+    }
+    if (isDecline(trimmed)) {
+      state.followUpPhase = "closed";
+      return { message: buildClosingMessage() };
+    }
+    return { message: q1 };
+  }
+
+  if (state.followUpStep === 2) {
+    if (isAffirmative(trimmed)) {
+      state.followUpStep = 3;
+      const actions = buildImmediateActionsWithReasons(state, decisionType);
+      return { message: `${actions}\n\n${q3}` };
+    }
+    if (isDecline(trimmed)) {
+      state.followUpPhase = "closed";
+      return { message: buildClosingMessage() };
+    }
+    return { message: q2 };
+  }
+
+  if (state.followUpStep === 3) {
+    if (isAffirmative(trimmed)) {
+      state.followUpPhase = "closed";
+      const flow = buildNextFlow(decisionType);
+      return { message: `${flow}\n\n${buildClosingMessage()}` };
+    }
+    if (isDecline(trimmed)) {
+      state.followUpPhase = "closed";
+      return { message: buildClosingMessage() };
+    }
+    return { message: q3 };
+  }
+
+  return { message: buildClosingMessage() };
 }
 
 function extractOptionsFromAssistant(text) {
@@ -1617,6 +2190,7 @@ function buildLocalSummaryFallback(level, history, state) {
     .filter((msg) => msg.role === "user")
     .map((msg) => msg.content)
     .join("\n");
+  const locationContext = state?.locationContext || {};
   const category = detectSymptomCategory(historyText);
   const factsFromSlots = buildFactsFromSlotAnswers(state);
   const facts = factsFromSlots.length
@@ -1639,29 +2213,35 @@ function buildLocalSummaryFallback(level, history, state) {
     other: "今の話を聞く限りだと、「体がだるくてつらい感じ」に近そうですね。",
   };
 
-  const otcByCategory = {
-    stomach: "一般的には、お腹の不調には整腸剤や胃腸薬が使われることが多いです。",
-    head: "一般的には、頭の痛みには解熱鎮痛薬が使われることが多いです。",
-    throat: "一般的には、のどの痛みにはトローチやのど飴、のど用スプレーが使われることが多いです。",
-    other: "一般的には、痛みやだるさには解熱鎮痛薬が使われることが多いです。",
-  };
-
   const baseBlocks = [
     `${level} まず安心してください\n今の情報を見る限り、緊急性は高くなさそうです。`,
     `🤝 今の状態について\n${buildStateFactsBullets(state).join("\n")}\n\n${buildStateAboutLine(state)}\n${buildStateDecisionLine(state)}`,
-    `✅ 今すぐやること（これだけでOK）\n今日は次の3つだけ意識してみてください。\n・少しずつ水分をとってみてください。一般的に、体が乾くと刺激を感じやすいとされています。\n・横になれるなら体を休めてみてください。力を抜くと楽になることがあります。\n・刺激になる飲食や冷えを避けてみてください。負担を減らすと落ち着くことがあります。`,
+    `✅ 今すぐやること（これだけでOK）\n今日は次の3つだけ意識してみてください。\n・少しずつ水分をとってみてください。体が乾くと刺激を感じやすいとされています。\n・横になれるなら体を休めてみてください。力を抜くと楽になることがあります。\n・刺激になる飲食や冷えを避けてみてください。負担を減らすと落ち着くことがあります。`,
     `⏳ 今後の見通し\n多くの場合、時間の経過で少しずつ落ち着いてくることがあります。`,
     `🚨 もし次の症状が出たら\n強い痛みが続く／水分がとれない／ぐったりする場合は受診を検討してください。`,
   ];
-
-  const otcBlock = `💊 一般的な市販薬\n${otcByCategory[category]}\nこれは診断ではありませんが、薬局で相談する際の参考になります。`;
+  const pharmacyRec =
+    state?.pharmacyRecommendation ||
+    buildPharmacyRecommendation(state, locationContext, state?.pharmacyCandidates || []);
+  const otcExamples = state?.otcExamples || buildOtcExamples(category, locationContext.country);
+  const otcBlock = buildYellowOtcBlock(
+    category,
+    0,
+    pharmacyRec,
+    otcExamples,
+    pharmacyRec?.preface
+  );
   const closing = `🌱 最後に\nまた不安になったら、いつでもここで聞いてください。`;
 
   if (level === "🟡") {
     return sanitizeSummaryBullets([...baseBlocks, otcBlock, closing].join("\n"), state);
   }
   if (level === "🔴") {
-    const clinicName = (state?.clinicCandidates || [])[0];
+    const hospitalRec = buildHospitalRecommendationDetail(
+      state,
+      locationContext,
+      state?.clinicCandidates || []
+    );
     const specialtyMap = {
       tooth: "歯医者",
       ear: "耳鼻科",
@@ -1675,14 +2255,22 @@ function buildLocalSummaryFallback(level, history, state) {
     else if (historyText.match(/腹|お腹|胃|下痢|便秘/)) specialtyKey = "stomach";
     else if (historyText.match(/頭痛|頭が痛|頭が重/)) specialtyKey = "head";
     const specialty = specialtyMap[specialtyKey];
+    const hospitalLines = [
+      hospitalRec?.preface,
+      `受診先：${hospitalRec?.name}`,
+      `タイプ：${hospitalRec?.type}`,
+      `理由：${hospitalRec?.reason}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
     return sanitizeSummaryBullets([
       "📝 いまの状態を整理します（メモ）",
       facts.join("\n") || "・現在の症状について相談されています",
       "⚠️ Kairoが気になっているポイント",
       "急に悪化している可能性があり、様子見と言い切れない点があります。",
       "🏥 Kairoの判断",
-      clinicName
-        ? `今の状態なら、まずは${specialty}で確認するのが安心です。${clinicName}が行きやすそうです。`
+      hospitalLines
+        ? `今の状態なら、まずは${specialty}で確認するのが安心です。\n${hospitalLines}`
         : `今の情報を見る限り、${specialty}で相談する判断が安心です。`,
       "💬 最後に",
       "不安な状況だと思います。迷ったときは受診する判断は慎重で正しいです。",
@@ -1871,45 +2459,7 @@ app.get("/", (req, res) => {
 
 function getOrInitConversationState(conversationId) {
   if (!conversationState[conversationId]) {
-    conversationState[conversationId] = {
-      questionCount: 0,
-      totalScore: 0,
-      lastOptions: [],
-      finalQuestionPending: false,
-      confidence: 0,
-      slotFilled: {},
-      lastQuestionType: null,
-      previousQuestionType: null,
-      recentQuestionTypes: [],
-      recentQuestionTexts: [],
-      recentQuestionPhrases: [],
-      usedTemplateIds: [],
-      progressTemplateUsed: false,
-      lastTemplateId: null,
-      slotAnswers: {},
-      slotNormalized: {},
-      askedSlots: {},
-      causeDetailPending: false,
-      causeDetailAsked: false,
-      causeDetailAnswered: false,
-      causeDetailText: null,
-      expectsCauseDetail: false,
-      introTemplateUsedIds: [],
-      introRoleUsage: {},
-      lastIntroPattern: null,
-      prevIntroPattern: null,
-      lastIntroRoles: [],
-      followUpState: "NONE",
-      followUpPending: false,
-      summaryShown: false,
-      location: null,
-      clinicCandidates: [],
-      clientMeta: null,
-      expectsPainScore: false,
-      lastPainScore: null,
-      lastPainWeight: null,
-      lastNormalizedAnswer: null,
-    };
+    conversationState[conversationId] = initConversationState({ conversationId });
   }
   return conversationState[conversationId];
 }
@@ -1920,6 +2470,9 @@ app.post("/api/chat", async (req, res) => {
   const { message, conversationId: rawConversationId, location, clientMeta } = req.body;
   const conversationId =
     rawConversationId || `conv_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+  let followUpQuestion = null;
+  let followUpMessage = null;
+  let locationRePromptBeforeSummary = null;
 
     if (!message) {
       return res.status(400).json({ error: "メッセージが必要です" });
@@ -1938,14 +2491,49 @@ app.post("/api/chat", async (req, res) => {
       ];
     }
     const state = getOrInitConversationState(conversationId);
-    if (location?.lat && location?.lng) {
-      state.location = {
-        lat: location.lat,
-        lng: location.lng,
-      };
+    if (!state.location) {
+      state.location = { status: "idle" };
+    }
+    console.log("[DEBUG] request init", {
+      conversationId,
+      locationState: state.location?.status,
+      hasConversationState: !!conversationState[conversationId],
+    });
+    if (location) {
+      state.location = normalizeLocation(location);
     }
     if (clientMeta) {
       state.clientMeta = clientMeta;
+      if (clientMeta.locationPromptShown === true) {
+        state.locationPromptShown = true;
+      }
+    }
+
+    const locationPromptMessage = null;
+    const locationRePromptMessage = null;
+
+    const followUpResult = handleFollowUpFlow(message, state);
+    if (followUpResult) {
+      conversationHistory[conversationId].push({
+        role: "user",
+        content: message,
+      });
+      conversationHistory[conversationId].push({
+        role: "assistant",
+        content: followUpResult.message,
+      });
+      const judgeMeta = buildFollowUpJudgeMeta(state);
+      return res.json({
+        message: followUpResult.message,
+        response: followUpResult.message,
+        judgeMeta,
+        questionPayload: null,
+        normalizedAnswer: state.lastNormalizedAnswer || null,
+        locationPromptMessage,
+        locationRePromptMessage,
+        locationState: state.location,
+        conversationId,
+      });
     }
 
     // ユーザー回答のスコアを集計
@@ -2173,15 +2761,10 @@ app.post("/api/chat", async (req, res) => {
       !(conversationState[conversationId].causeDetailPending && !conversationState[conversationId].causeDetailAnswered);
     const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled);
     const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n合計スコア: ${conversationState[conversationId].totalScore}\n最大スコア: ${conversationState[conversationId].questionCount * 2}\n緊急度比率: ${ratio.toFixed(2)}\n判定: ${level}\n判断スロット埋まり数: ${slotsFilledCount}/6\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が7以上、または判断スロットが6つ埋まった時点で必ず判定・まとめへ移行する。\n※スコアや計算はユーザーに表示しないこと。最終判断は必ずこの判定に従うこと。`;
-    const followUpPrompt =
-      conversationState[conversationId].followUpState === "FOLLOW_UP_STATE"
-        ? "あなたはKairoです。まとめ後の並走フェーズです。ユーザーの質問には必ず具体的に答えてください。新しい症状の追加質問は禁止。判断を覆す質問は禁止。"
-        : null;
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini", // Cost-effective model
       messages: [
         ...conversationHistory[conversationId],
-        ...(followUpPrompt ? [{ role: "system", content: followUpPrompt }] : []),
         { role: "system", content: scoreContext },
       ],
       temperature: 0.7,
@@ -2215,20 +2798,43 @@ app.post("/api/chat", async (req, res) => {
         conversationState[conversationId],
         conversationState[conversationId].clientMeta
       );
+      const locationContext = conversationState[conversationId].locationContext || {};
       if (level === "🔴" && conversationState[conversationId].location) {
         conversationState[conversationId].clinicCandidates = await resolveClinicCandidates(
           conversationState[conversationId]
         );
       }
+      conversationState[conversationId].pharmacyCandidates = await resolvePharmacyCandidates(
+        conversationState[conversationId]
+      );
+      const pharmacyRec = buildPharmacyRecommendation(
+        conversationState[conversationId],
+        locationContext,
+        conversationState[conversationId].pharmacyCandidates
+      );
+      conversationState[conversationId].pharmacyRecommendation = pharmacyRec;
+      const otcExamples = buildOtcExamples(otcCategory, locationContext.country);
+      conversationState[conversationId].otcExamples = otcExamples;
+      const hospitalRec = buildHospitalRecommendationDetail(
+        conversationState[conversationId],
+        locationContext,
+        conversationState[conversationId].clinicCandidates
+      );
+      conversationState[conversationId].hospitalRecommendation = hospitalRec;
       const clinicList = (conversationState[conversationId].clinicCandidates || [])
         .map((name) => `・${name}`)
         .join("\n");
       const clinicHint = clinicList
         ? `\n以下の候補から具体名を1つ選んで提示してください。\n${clinicList}\n`
         : "\n具体名がない場合は、近いGP/クリニックの具体名を提示してください。\n";
+      const pharmacyHint = pharmacyRec?.name
+        ? `\n薬局名は「${pharmacyRec.name}」を優先してください。\n薬名は例示で2〜3件、一般名＋商品名で示し、末尾に「最終判断は薬剤師に相談してください。これは一般的に現地で使われる選択肢です。」を入れてください。\n`
+        : "\n薬局名は国・都市レベルで具体名を1件提示し、薬名は例示で2〜3件、一般名＋商品名で示してください。\n末尾に「最終判断は薬剤師に相談してください。これは一般的に現地で使われる選択肢です。」を入れてください。\n";
+      locationRePromptBeforeSummary = null;
       const summaryOnlyMessages = [
         { role: "system", content: buildRepairPrompt(level) },
         { role: "system", content: clinicHint },
+        { role: "system", content: pharmacyHint },
         ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
       ];
       const forced = await openai.chat.completions.create({
@@ -2264,13 +2870,48 @@ app.post("/api/chat", async (req, res) => {
         aiResponse = repairForLevel.choices[0].message.content;
       }
       aiResponse = normalizeSummaryLevel(aiResponse, level);
-      aiResponse = ensureYellowOtcBlock(aiResponse, level, otcCategory, otcWarningIndex);
+      aiResponse = ensureYellowOtcBlock(
+        aiResponse,
+        level,
+        otcCategory,
+        otcWarningIndex,
+        conversationState[conversationId].pharmacyRecommendation,
+        conversationState[conversationId].otcExamples,
+        conversationState[conversationId].pharmacyRecommendation?.preface
+      );
       aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
       if (level === "🟢" || level === "🟡") {
         aiResponse = normalizeStateBlockForGreenYellow(
           aiResponse,
           conversationState[conversationId]
         );
+      }
+      if (level === "🟡") {
+        const pharmacyName = conversationState[conversationId].pharmacyRecommendation?.name;
+        const otcExamples = conversationState[conversationId].otcExamples || [];
+        const hasPharmacy = pharmacyName ? aiResponse.includes(pharmacyName) : false;
+        const hasPharmacyLabel = aiResponse.includes("薬局名：");
+        const hasDrug = otcExamples.some((item) => aiResponse.includes(item.brand));
+        const hasDrugLabel = aiResponse.includes("薬名（例）") || aiResponse.includes("薬名：");
+        if (!hasPharmacy || !hasPharmacyLabel || !hasDrug || !hasDrugLabel) {
+          aiResponse = buildLocalSummaryFallback(
+            level,
+            conversationHistory[conversationId],
+            conversationState[conversationId]
+          );
+        }
+      }
+      if (level === "🔴") {
+        const hospitalName = conversationState[conversationId].hospitalRecommendation?.name;
+        const hasType = aiResponse.includes("タイプ：");
+        const hasReason = aiResponse.includes("理由：");
+        if (hospitalName && (!aiResponse.includes(hospitalName) || !hasType || !hasReason)) {
+          aiResponse = buildLocalSummaryFallback(
+            level,
+            conversationHistory[conversationId],
+            conversationState[conversationId]
+          );
+        }
       }
       if (!validateSummaryAgainstNormalized(aiResponse, conversationState[conversationId])) {
         aiResponse = buildLocalSummaryFallback(
@@ -2288,16 +2929,38 @@ app.post("/api/chat", async (req, res) => {
         );
       }
       aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
-      // まとめ後も会話を継続する（FOLLOW_UP_STATE）
-      conversationState[conversationId].followUpState = "FOLLOW_UP_STATE";
+      aiResponse = sanitizeGeneralPhrases(aiResponse);
+      aiResponse = sanitizeSummaryQuestions(aiResponse);
+      const decisionType =
+        level === "🔴"
+          ? "A_HOSPITAL"
+          : level === "🟡"
+            ? "B_PHARMACY"
+            : "C_WATCHFUL_WAITING";
       conversationState[conversationId].summaryShown = true;
-      conversationState[conversationId].followUpPending = true;
-      aiResponse = ensureFollowUpAppended(
-        aiResponse,
-        conversationState[conversationId],
-        conversationHistory[conversationId]
-      );
+      conversationState[conversationId].hasSummaryBlockGenerated = true;
+      conversationState[conversationId].decisionType = decisionType;
+      conversationState[conversationId].decisionLevel = level;
       conversationState[conversationId].finalQuestionPending = false;
+      if (decisionType === "C_WATCHFUL_WAITING") {
+        conversationState[conversationId].followUpPhase = "questioning";
+        conversationState[conversationId].followUpStep = 1;
+        followUpQuestion = "今できることを、理由と一緒に整理しますか？";
+      } else {
+        conversationState[conversationId].followUpPhase = "questioning";
+        conversationState[conversationId].followUpStep = 1;
+        const destinationName =
+          decisionType === "A_HOSPITAL"
+            ? conversationState[conversationId].hospitalRecommendation?.name
+            : conversationState[conversationId].pharmacyRecommendation?.name;
+        conversationState[conversationId].followUpDestinationName = formatDestinationName(
+          destinationName,
+          decisionType
+        );
+        followUpQuestion = buildFollowUpQuestion1(
+          conversationState[conversationId].followUpDestinationName
+        );
+      }
     }
 
     // まとめが早すぎる／助言が混ざる場合は質問に差し戻す
@@ -2490,6 +3153,18 @@ app.post("/api/chat", async (req, res) => {
       role: "assistant",
       content: aiResponse,
     });
+    if (followUpMessage) {
+      conversationHistory[conversationId].push({
+        role: "assistant",
+        content: followUpMessage,
+      });
+    }
+    if (followUpQuestion) {
+      conversationHistory[conversationId].push({
+        role: "assistant",
+        content: followUpQuestion,
+      });
+    }
 
     const judgeMeta = {
       judgement: level,
@@ -2506,11 +3181,6 @@ app.post("/api/chat", async (req, res) => {
     };
     const questionPayload = res.locals.questionPayload || null;
     const normalizedAnswer = conversationState[conversationId].lastNormalizedAnswer || null;
-    aiResponse = ensureFollowUpAppended(
-      aiResponse,
-      conversationState[conversationId],
-      conversationHistory[conversationId]
-    );
     console.log("[DEBUG] response payload", {
       response: aiResponse,
       judgeMeta,
@@ -2523,6 +3193,12 @@ app.post("/api/chat", async (req, res) => {
       judgeMeta,
       questionPayload,
       normalizedAnswer,
+      followUpQuestion,
+      followUpMessage,
+      locationPromptMessage,
+      locationRePromptMessage: locationRePromptBeforeSummary,
+      locationState: conversationState[conversationId].location,
+      conversationId,
     });
   } catch (error) {
     console.error("OpenAI API Error:", error);

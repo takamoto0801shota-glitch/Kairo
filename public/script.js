@@ -29,6 +29,13 @@ const INTRO_TEMPLATE_TEXTS = {
   FOCUS_5: "ここは整理の要なので確認します。",
 };
 
+const LOCATION_PROMPT_MESSAGE =
+  "より正確な案内のため、現在地を使用できます。\n今回は許可しなくても会話は続けられます。";
+const LOCATION_REPROMPT_MESSAGE =
+  "より近くて適切な場所をご案内するため、\n現在地の共有をもう一度お願いしてもいいですか？";
+const LOCATION_PROMPT_KEY = "kairo_location_prompt_shown";
+const LOCATION_RETRY_KEY = "kairo_location_retry_count";
+
 function renderQuestionPayload(payload) {
   if (!payload || !payload.question || !Array.isArray(payload.introTemplateIds)) {
     return payload?.question || "";
@@ -71,22 +78,102 @@ function storeLocation(location) {
   }
 }
 
+function normalizeLocation(raw) {
+  if (!raw) return { status: "idle" };
+  if (raw.status === "requesting") return { status: "requesting" };
+  if (raw.status === "failed" && raw.reason) return { status: "failed", reason: raw.reason };
+  if (raw.status === "usable_fast" && raw.lat && raw.lng && raw.city && raw.country && raw.ts) {
+    return { status: "usable_fast", lat: raw.lat, lng: raw.lng, city: raw.city, country: raw.country, ts: raw.ts };
+  }
+  if (raw.status === "usable" && raw.lat && raw.lng && raw.city && raw.country) {
+    return { status: "usable", lat: raw.lat, lng: raw.lng, city: raw.city, country: raw.country, accuracy: raw.accuracy, ts: raw.ts };
+  }
+  if (raw.status === "city_ok" && raw.lat && raw.lng && raw.city && raw.country) {
+    return { status: "city_ok", lat: raw.lat, lng: raw.lng, city: raw.city, country: raw.country, accuracy: raw.accuracy, ts: raw.ts };
+  }
+  if (raw.lat && raw.lng) {
+    return { status: "partial_geo", lat: raw.lat, lng: raw.lng, accuracy: raw.accuracy, ts: raw.ts };
+  }
+  if (raw.error) {
+    return { status: "failed", reason: raw.error };
+  }
+  return { status: "idle" };
+}
+
+function updateLocationStatusIndicator(status) {
+  const target = document.getElementById("locationStatus");
+  if (!target) return;
+  let label = "";
+  if (status === "usable" || status === "usable_fast") {
+    label = "📍 現在地取得済み";
+    target.style.display = "inline-flex";
+  } else if (status === "requesting" || status === "partial_geo" || status === "idle") {
+    label = "📍 現在地を確認しています…";
+    target.style.display = "inline-flex";
+  } else {
+    target.style.display = "none";
+  }
+  target.textContent = label;
+  const button = document.getElementById("locationButton");
+  if (button) {
+    const promptShown = sessionStorage.getItem(LOCATION_PROMPT_KEY) === "true";
+    button.style.display = status === "usable" || promptShown ? "none" : "inline-flex";
+  }
+}
+
+function getLocationPayload() {
+  return normalizeLocation(getStoredLocation());
+}
+
 function requestLocationOnAction() {
-  if (!navigator.geolocation) return;
-  if (window.location.protocol !== "https:" && window.location.hostname !== "localhost") return;
-  navigator.geolocation.getCurrentPosition(
-    (pos) => {
-      storeLocation({
-        lat: pos.coords.latitude,
-        lng: pos.coords.longitude,
-        ts: Date.now(),
-      });
-    },
-    () => {
-      // ignore (fallback handled server-side)
-    },
-    { enableHighAccuracy: false, timeout: 5000, maximumAge: 600000 }
-  );
+  try {
+    if (!navigator.geolocation) return;
+    if (window.location.protocol !== "https:" && window.location.hostname !== "localhost") return;
+    storeLocation({ status: "requesting" });
+    updateLocationStatusIndicator("requesting");
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const payload = {
+          status: "partial_geo",
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          accuracy: pos.coords.accuracy,
+          ts: Date.now(),
+        };
+        storeLocation(payload);
+        updateLocationStatusIndicator("partial_geo");
+      },
+      (err) => {
+        let reason = "error";
+        if (err?.code === 1) reason = "denied";
+        if (err?.code === 2) reason = "error";
+        if (err?.code === 3) reason = "timeout";
+        storeLocation({ status: "failed", reason, ts: Date.now() });
+        updateLocationStatusIndicator("failed");
+      },
+      { enableHighAccuracy: false, timeout: 5000, maximumAge: 600000 }
+    );
+  } catch (_) {
+    // ignore (fallback handled server-side)
+  }
+}
+
+function requestLocationWithRetry(attempt = 1) {
+  const stored = normalizeLocation(getStoredLocation());
+  if (stored.status === "failed" && stored.reason === "denied") return;
+  if (attempt > 3) return;
+  requestLocationOnAction();
+  const delay = 500 + Math.floor(Math.random() * 500);
+  setTimeout(() => {
+    const latest = normalizeLocation(getStoredLocation());
+    if (latest.status === "partial_geo" || latest.status === "usable" || latest.status === "city_ok") {
+      return;
+    }
+    if (latest.status === "failed" && latest.reason === "denied") {
+      return;
+    }
+    requestLocationWithRetry(attempt + 1);
+  }, delay);
 }
 
 // Save conversation history
@@ -136,6 +223,9 @@ function clearHistory() {
   localStorage.removeItem(HISTORY_KEY);
   localStorage.removeItem(CONVERSATION_ID_KEY);
   localStorage.removeItem(FIRST_QUESTION_KEY);
+  sessionStorage.removeItem("kairo_location");
+  sessionStorage.removeItem(LOCATION_PROMPT_KEY);
+  sessionStorage.setItem("kairo_force_location_prompt", "true");
   // Clear server-side history, then reload to reset UI without DOM再生成
   fetch(CLEAR_URL, {
     method: "POST",
@@ -666,10 +756,11 @@ async function callOpenAI(message) {
         body: JSON.stringify({
           message: message,
           conversationId: conversationId,
-          location: getStoredLocation(),
+          location: getLocationPayload(),
           clientMeta: {
             lang: navigator.language || "",
             tz: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+            locationPromptShown: sessionStorage.getItem(LOCATION_PROMPT_KEY) === "true",
           },
         }),
       });
@@ -738,6 +829,9 @@ async function handleUserInput() {
       const data = await callOpenAI(userText);
       console.log("[DEBUG] full aiResponse", data);
       const aiResponse = data;
+      if (aiResponse.conversationId) {
+        localStorage.setItem(CONVERSATION_ID_KEY, aiResponse.conversationId);
+      }
       const aiMessage = aiResponse.questionPayload
         ? renderQuestionPayload(aiResponse.questionPayload)
         : aiResponse.message;
@@ -749,7 +843,19 @@ async function handleUserInput() {
       }
 
       // Show AI response immediately
+      if (aiResponse.locationPromptMessage) {
+        addMessage(aiResponse.locationPromptMessage);
+      }
+      if (aiResponse.locationRePromptMessage) {
+        addMessage(aiResponse.locationRePromptMessage);
+      }
       addMessage(aiMessage);
+      if (aiResponse.followUpMessage) {
+        addMessage(aiResponse.followUpMessage);
+      }
+      if (aiResponse.followUpQuestion) {
+        addMessage(aiResponse.followUpQuestion);
+      }
 
       console.log("[DEBUG] judgeMeta", aiResponse.judgeMeta);
       if (aiResponse.judgeMeta && aiResponse.judgeMeta.shouldJudge === true) {
@@ -757,6 +863,11 @@ async function handleUserInput() {
         updateSummaryCard(aiResponse.judgeMeta);
       } else {
         hideSummaryCard();
+      }
+      if (aiResponse.locationState) {
+        const normalized = normalizeLocation(aiResponse.locationState);
+        storeLocation(normalized);
+        updateLocationStatusIndicator(normalized.status);
       }
       } catch (error) {
         // Remove loading message
@@ -789,12 +900,33 @@ function init() {
   // Start fresh without re-rendering history
   hideSummaryCard();
   showInitialMessage();
+  const storedLocation = normalizeLocation(getStoredLocation());
+  updateLocationStatusIndicator(storedLocation?.status || "idle");
+  const forceLocationPrompt = sessionStorage.getItem("kairo_force_location_prompt") === "true";
+  if (
+    (storedLocation?.status !== "usable" && !sessionStorage.getItem(LOCATION_PROMPT_KEY)) ||
+    forceLocationPrompt
+  ) {
+    addMessage(LOCATION_PROMPT_MESSAGE);
+    sessionStorage.setItem(LOCATION_PROMPT_KEY, "true");
+    if (forceLocationPrompt) {
+      sessionStorage.removeItem("kairo_force_location_prompt");
+    }
+  }
+  requestLocationWithRetry(1);
 
   // Send button event
   document.getElementById("sendButton").addEventListener("click", () => {
     requestLocationOnAction();
     handleUserInput();
   });
+
+  const locationButton = document.getElementById("locationButton");
+  if (locationButton) {
+    locationButton.addEventListener("click", () => {
+      requestLocationOnAction();
+    });
+  }
 
   // Enter key to send
   document.getElementById("userInput").addEventListener("keypress", (e) => {

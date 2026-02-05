@@ -87,7 +87,9 @@
 ## 8. まとめブロック（必須）
 - どんな場合でもまとめブロックは必ず出す。
 - まとめブロックの欠落は絶対に許容しない。
-- まとめブロックの後は「自動フォロー」を必ず続ける（会話終了にしない）。
+- まとめブロックは**同一セッション中に一度だけ生成**する（再生成禁止）。
+- まとめブロック内に**質問文を一切書かない**（疑問文・?・？は禁止）。
+- まとめブロックの後は**フォロー質問フェーズ**に必ず移行する（会話終了にしない）。
 - まとめ内容はテンプレ禁止。会話内容に即して毎回生成。
 
 ### 8.1 様子見/市販薬の場合（B）
@@ -110,28 +112,171 @@
 - 必須要素：痛みの程度／他の症状が少ない・ない／今は急がなくてよい判断
 - 箇条書き禁止／行動指示禁止
 
-### 8.2 まとめ後の並走フェーズ（必須）
+### 8.2 まとめ後のフォロー質問フェーズ（必須）
 - まとめブロック生成後もセッションは継続する（会話終了にしない）。
 - まとめは初回のみ表示し、2回目以降は出さない。
-- まとめ直後に必ず「自動フォロー」を1つ表示する。
-- 自動フォローは押し付けないYes/Noの質問にする。
-- まとめ後の質問は「行動支援専用」に限定する。
-  - OK：病院での伝え方サポート／英語での症状説明テンプレ／薬局での相談用一文／受診を迷う場合の再整理／様子見の注意点確認
-  - NG：新しい症状ヒアリング／確信度を上げる再質問／判断を覆す質問
-- これらのフォロー文は必ず「今までの会話・まとめ内容」を参照して作る。
-- ユーザーの質問には必ず具体的に答える（曖昧な返し禁止）。
+- まとめ直後に**フォロー質問を1つ**必ず表示する（まとめ内に質問は禁止）。
+- フォロー質問は**固定テンプレ**のみ使用する（自由生成禁止）。
+- フォローは「判断→行動」を前に進めるための支援に限定する。
+- 新しい症状ヒアリング／判断を覆す質問は禁止。
+
+#### 判断タイプ
+- 🔴 A_HOSPITAL
+- 🟡 B_PHARMACY
+- 🟢 C_WATCHFUL_WAITING
+
+#### 質問テンプレ（固定）
+1) 質問①（最優先・常に最初）
+```
+もしよろしければ、〇〇（病院/薬局）でどう伝えればいいか、一緒に考えましょうか？
+```
+出す条件：A_HOSPITAL または B_PHARMACY
+
+2) 質問②（行動サポート）
+```
+今できることを、理由と一緒に整理しますか？
+```
+出す条件：質問①に「はい」と答えた直後
+
+3) 質問③（判断フロー）
+```
+今後の目安も含めて整理しますか？
+```
+出す条件：質問②に「はい」と答えた直後
+
+#### 回答分岐
+- 「はい」以外（今はいいです／大丈夫です／拒否）は**即クロージング**へ。
+- クロージングは温かい一言＋判断の尊重＋再利用の余地を必ず含める。
+
+#### A_HOSPITAL / B_PHARMACY の出力ルール
+- 質問①で「はい」：
+  - まとめ内容を**100%引き継いで**伝え方文を生成する（新情報追加禁止）。
+  - **日本語＋英語を同時に出す**。
+  - 病院/薬局の行き先に合わせて最適化する。
+- 質問②で「はい」：
+  - 根拠つき箇条書きのみ（感情表現は禁止）。
+- 質問③で「はい」：
+  - 時系列の具体的フロー（「今すぐ」「今日中」「数日以内」など明示）。
+
+#### C_WATCHFUL_WAITING の特別ルール
+- まとめ直後に以下の質問のみ出す：
+  - 「今できることを、理由と一緒に整理しますか？」
+- 「はい」の場合は、まとめブロック由来の内容のみで行動提案を出す（新しい判断は入れない）。
+- 「いいえ／今はいい」はクロージングへ。
 
 ## 15. 位置情報と受診先の具体提示（必須）
-- Kairoは位置情報を用いて「受診先の意思決定」まで支援する。
-- 🔴は行動の具体化フェーズである。
-- 🔴時は具体的な医療機関名を提示する（抽象的な「病院へ」は禁止）。
-- 位置情報は毎回Kairo側で自動取得を試みる（全デバイス）。
-- 取得は必ずユーザーの明示的操作をトリガーにする（ページ表示直後の自動実行は禁止）。
-- HTTPS環境でのみ位置情報取得を行う（HTTPでは実行しない）。
-- reverse geocoding で国／都市／エリアを推定する。
-- 取得失敗時はIPベース推定→言語/タイムゾーン推定→一般案内にフォールバック。
-- 位置情報が取れなくても会話は止めず、判断と次の一手を必ず出す。
-- ユーザーに現在地を聞かない（入力要求は禁止）。
+- UI表示・会話生成・判断ロジックを完全に分離する。
+- 位置情報は一切信用しない前提で扱う。
+- boolean（true/false）での位置情報管理は禁止。
+- 位置情報は可能な限り 100% に近づける（成功率最大化）。
+- 位置情報が取れなくても会話は止めない。
+- ただし「現在地取得済み」表示は usable のみ。
+- ユーザーに現在地をテキスト入力で聞かない。
+- 失敗理由をユーザーの責任にしない。
+
+### 15.1 位置情報ステート設計（必須）
+```
+type LocationState =
+  | { status: "idle" } // 未取得
+  | { status: "requesting" } // 取得中
+  | { status: "partial_geo"; lat: number; lng: number; accuracy?: number; ts?: number }
+  | { status: "city_ok"; lat: number; lng: number; city: string; country: string; accuracy?: number; ts?: number }
+  | { status: "usable_fast"; lat: number; lng: number; city: string; country: string; ts: number }
+  | { status: "usable"; lat: number; lng: number; city: string; country: string; accuracy?: number; ts?: number }
+  | { status: "failed"; reason: "denied" | "timeout" | "error" };
+```
+
+### 15.2 正規化関数（必須）
+すべての生locationは必ずこの関数を通す。
+```
+function normalizeLocation(raw: any): LocationState {
+  if (!raw) return { status: "idle" };
+  if (raw.status === "requesting") return { status: "requesting" };
+  if (raw.status === "failed" && raw.reason) return { status: "failed", reason: raw.reason };
+  if (raw.status === "usable" && raw.lat && raw.lng && raw.city && raw.country) {
+    return { status: "usable", ...raw };
+  }
+  if (raw.status === "usable_fast" && raw.lat && raw.lng && raw.city && raw.country && raw.ts) {
+    return { status: "usable_fast", ...raw };
+  }
+  if (raw.status === "city_ok" && raw.lat && raw.lng && raw.city && raw.country) {
+    return { status: "city_ok", ...raw };
+  }
+  if (raw.lat && raw.lng) {
+    return { status: "partial_geo", lat: raw.lat, lng: raw.lng, accuracy: raw.accuracy, ts: raw.ts };
+  }
+  if (raw.error) {
+    return { status: "failed", reason: raw.error };
+  }
+  return { status: "idle" };
+}
+```
+
+### 15.3 conversationState 初期化（必須）
+```
+function initConversationState(input?: Partial<State>): State {
+  return {
+    conversationId: input?.conversationId ?? generateId(),
+    location: input?.location ?? { status: "idle" },
+    clientMeta: input?.clientMeta ?? {},
+  };
+}
+```
+- 未初期化代入は禁止。必ず factory 経由で生成する。
+- `state.location.xxx = ...` の直接代入は禁止（全体置換のみ）。
+
+### 15.4 usable_fast / usable の条件（厳守）
+- usable_fast（早期判定）：
+  - city が存在
+  - country が存在
+  - timestamp が存在
+- usable（厳密判定）：
+- city が存在
+- country が存在
+- accuracy < 500m OR accuracy 不明だが city が確定
+- timestamp が 30秒以内
+- reverse geocoding 成功
+※ city_ok 状態でも usable_fast に昇格してよい
+
+### 15.5 取得フロー（重要）
+- 初回ロード時に自動で取得を開始する。
+- getCurrentPosition は最大 3 回 retry
+  - timeout / POSITION_UNAVAILABLE は retry 対象
+  - PERMISSION_DENIED は retry しない
+- reverse geocoding も最大 2 回 retry
+- retry 間は 500ms〜1s の遅延
+- retry 中は UI に「📍 現在地を確認しています…」を表示
+
+### 15.6 UI表示ルール（厳守）
+- usable_fast / usable の場合のみ「📍 現在地取得済み」
+- requesting / partial_geo の場合は「📍 現在地を確認しています…」
+- failed は表示しない
+
+### 15.7 位置情報取得UI（必須）
+- 初回のみ以下の文言を必ず一度だけ表示（改変禁止）：
+```
+より正確な案内のため、現在地を使用できます。
+今回は許可しなくても会話は続けられます。
+```
+- 会話は止めない。
+- 初回のみ permission UI を出し、その後は裏で retry。
+
+### 15.8 フォールバック設計
+- locationState !== usable の場合でも会話は通常進行。
+- 案内レベルを以下で切り替える：
+  1) usable_fast / usable → 現在地ベースの具体案内
+  2) city_ok → 都市単位の案内
+  3) failed → 国単位の一般案内（「一般的に」使用可）
+
+### 15.9 判断ロジック（最重要）
+```
+function canRecommendSpecificPlace(location: LocationState) {
+  return location.status === "usable_fast" || location.status === "usable";
+}
+```
+- usable のみ → 具体名OK
+- usable_fast / usable → 具体名OK
+- それ以外 → カテゴリ・探し方のみ
 
 #### 🟡（注意レベル）の追加ブロック
 🟡の場合は、以下を必ず追加する：
@@ -139,23 +284,26 @@
 - 見出し：💊 一般的な市販薬
 - ルール：
   - 診断・病名の断定は禁止
-  - 商品名の断定は禁止
-  - 「一般的に使われる」「〜に使われることが多い」の表現を使う
-  - 市販薬はカテゴリで提示する
+  - 商品名は「例示」として2〜3件提示する（断定禁止）
+  - 具体的な薬名は「一般名＋商品名」で示す
+  - 薬局名は具体名で1件提示する
+  - 「一般的に」は免責目的として末尾にのみ使用する
   - ✅ 今すぐやること と内容が被らない
 
 #### 🟡 OTCブロックの構造（必須）
-1. カテゴリ見出し（症状別）
-2. 薬の例（箇条書き・最大2つ）
-3. 使われる場面（例示）
-4. 注意書き（必須・毎回表示）
+1. 薬局名（具体名）
+2. 理由（1行）
+3. 薬名（例示：一般名＋商品名、2〜3件）
+4. 用途（各1行）
+5. 注意書き（必須・毎回表示）
 
 #### 注意書き（必須・毎回表示）
 以下の要素を必ず含める（表現は毎回変える）：
-- これは診断や処方ではなく、一般的な情報である
+- これは例示であり、診断や処方ではない
 - 症状や体質によって合わない場合がある
-- 不安があれば薬剤師や医師に相談する
+- 最終判断は薬剤師に相談する
 - 症状が続く・悪化する場合は受診を検討する
+- 末尾にだけ「これは一般的に現地で使われる選択肢です」を添える
 
 #### 症状カテゴリ（拡張前提）
 - 痛み・発熱
