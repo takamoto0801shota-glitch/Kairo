@@ -35,6 +35,11 @@ const LOCATION_REPROMPT_MESSAGE =
   "より近くて適切な場所をご案内するため、\n現在地の共有をもう一度お願いしてもいいですか？";
 const LOCATION_PROMPT_KEY = "kairo_location_prompt_shown";
 const LOCATION_RETRY_KEY = "kairo_location_retry_count";
+const LOCATION_PENDING_KEY = "kairo_location_pending_start";
+const LOCATION_PENDING_NOTICE_KEY = "kairo_location_pending_notice";
+const LOCATION_PENDING_TIMEOUT_MS = 5000;
+const LOCATION_PENDING_NOTICE =
+  "📍 現在地を正確に取得できませんでした（市レベルで案内します）";
 
 function renderQuestionPayload(payload) {
   if (!payload || !payload.question || !Array.isArray(payload.introTemplateIds)) {
@@ -104,20 +109,24 @@ function updateLocationStatusIndicator(status) {
   const target = document.getElementById("locationStatus");
   if (!target) return;
   let label = "";
-  if (status === "usable" || status === "usable_fast") {
+  if (status === "usable" || status === "usable_fast" || status === "city_ok") {
     label = "📍 現在地取得済み";
     target.style.display = "inline-flex";
   } else if (status === "requesting" || status === "partial_geo" || status === "idle") {
     label = "📍 現在地を確認しています…";
     target.style.display = "inline-flex";
   } else {
-    target.style.display = "none";
+    label = "📍 現在地を確認できませんでした";
+    target.style.display = "inline-flex";
   }
   target.textContent = label;
   const button = document.getElementById("locationButton");
   if (button) {
     const promptShown = sessionStorage.getItem(LOCATION_PROMPT_KEY) === "true";
-    button.style.display = status === "usable" || promptShown ? "none" : "inline-flex";
+    button.style.display =
+      status === "usable" || status === "usable_fast" || status === "city_ok" || promptShown
+        ? "none"
+        : "inline-flex";
   }
 }
 
@@ -131,6 +140,7 @@ function requestLocationOnAction() {
     if (window.location.protocol !== "https:" && window.location.hostname !== "localhost") return;
     storeLocation({ status: "requesting" });
     updateLocationStatusIndicator("requesting");
+    sessionStorage.setItem(LOCATION_PENDING_KEY, String(Date.now()));
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         const payload = {
@@ -166,7 +176,12 @@ function requestLocationWithRetry(attempt = 1) {
   const delay = 500 + Math.floor(Math.random() * 500);
   setTimeout(() => {
     const latest = normalizeLocation(getStoredLocation());
-    if (latest.status === "partial_geo" || latest.status === "usable" || latest.status === "city_ok") {
+    if (
+      latest.status === "partial_geo" ||
+      latest.status === "usable" ||
+      latest.status === "usable_fast" ||
+      latest.status === "city_ok"
+    ) {
       return;
     }
     if (latest.status === "failed" && latest.reason === "denied") {
@@ -174,6 +189,29 @@ function requestLocationWithRetry(attempt = 1) {
     }
     requestLocationWithRetry(attempt + 1);
   }, delay);
+}
+
+function finalizeLocationPendingIfNeeded() {
+  const stored = normalizeLocation(getStoredLocation());
+  if (stored.status !== "requesting" && stored.status !== "partial_geo") {
+    return;
+  }
+  const startRaw = sessionStorage.getItem(LOCATION_PENDING_KEY);
+  if (!startRaw) return;
+  const start = Number(startRaw);
+  if (!Number.isFinite(start)) return;
+  if (Date.now() - start < LOCATION_PENDING_TIMEOUT_MS) return;
+  const noticeShown = sessionStorage.getItem(LOCATION_PENDING_NOTICE_KEY) === "true";
+  if (!noticeShown) {
+    addMessage(LOCATION_PENDING_NOTICE);
+    sessionStorage.setItem(LOCATION_PENDING_NOTICE_KEY, "true");
+  }
+  const nextState =
+    stored.status === "partial_geo"
+      ? { ...stored, status: "city_ok" }
+      : { status: "failed", reason: "timeout", ts: Date.now() };
+  storeLocation(nextState);
+  updateLocationStatusIndicator(nextState.status);
 }
 
 // Save conversation history
@@ -914,6 +952,7 @@ function init() {
     }
   }
   requestLocationWithRetry(1);
+  setTimeout(finalizeLocationPendingIfNeeded, LOCATION_PENDING_TIMEOUT_MS);
 
   // Send button event
   document.getElementById("sendButton").addEventListener("click", () => {

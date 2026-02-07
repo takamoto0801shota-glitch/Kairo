@@ -1149,19 +1149,14 @@ async function resolveLocationContext(state, clientMeta) {
   if ((state?.location?.status === "usable" || state?.location?.status === "usable_fast" || state?.location?.status === "partial_geo" || state?.location?.status === "city_ok") && state?.location?.lat && state?.location?.lng) {
     const geo = await reverseGeocodeWithRetry(state.location, 2);
     if (geo?.city && geo?.country) {
-      const accuracy = state.location.accuracy;
-      const ts = state.location.ts;
-      const fresh = typeof ts === "number" ? Date.now() - ts <= 30000 : false;
-      const accurateEnough = typeof accuracy === "number" ? accuracy < 500 : true;
-      const usable = fresh && accurateEnough;
       state.location = {
-        status: usable ? "usable" : "usable_fast",
+        status: "usable_fast",
         lat: state.location.lat,
         lng: state.location.lng,
         city: geo.city,
         country: geo.country,
-        accuracy,
-        ts,
+        accuracy: state.location.accuracy,
+        ts: state.location.ts,
       };
     }
     state.locationContext = {
