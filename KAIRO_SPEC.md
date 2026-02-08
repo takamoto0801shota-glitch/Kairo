@@ -98,7 +98,7 @@
 2. 🤝 今の状態について
 3. ✅ 今すぐやること（これだけでOK）
 4. ⏳ 今後の見通し
-5. 🚨 もし次の症状が出たら
+5. 🚨 もし次の症状が出たら（固定）
 6. 🌱 最後に
 
 #### 🤝 今の状態について（🟢/🟡のみ）
@@ -111,6 +111,40 @@
 - 「〜かもしれません」は最大1回まで
 - 必須要素：痛みの程度／他の症状が少ない・ない／今は急がなくてよい判断
 - 箇条書き禁止／行動指示禁止
+
+#### ⏳ 今後の見通し（必須）
+目的：
+- 一般論や経過説明はしない。
+- 「次に迷いが生まれる具体的なタイミング」を1〜2個提示し、その直後に「その時はKairoに戻ればいい」と明示する。
+
+構造（固定）：
+1. 状況の自然な流れを一言で述べる（断定しない）
+   例：
+   ・「このタイプの症状は、時間の経過で変化することがあります」
+   ・「しばらく様子を見る中で、気になりやすいタイミングがあります」
+2. 「次に迷いやすい具体的トリガー」を箇条書きで1〜2個出す
+   ※数値・時間・変化を使い、想像しやすくする
+   例：
+   ・「もし明日の朝も同じ痛みが続いていたら」
+   ・「もし痛みが7以上に強くなったら」
+   ・「もし吐き気や発熱が出てきたら」
+3. 必ず次の一文で締める（固定表現）
+   「そのタイミングで、もう一度Kairoに聞いてください。」
+
+禁止事項：
+- 「多くの場合〜」「様子を見ましょう」で終わらせない
+- ユーザーに判断を丸投げしない
+- 医療的な断定や予測はしない
+
+トーン：
+- 落ち着いている
+- 先回りして隣にいる感じ
+- 不安を増やさず、行動の逃げ道を用意する
+
+#### 🚨 もし次の症状が出たら（固定）
+- 必ず生成せず、以下の固定文のみ表示する。
+- 固定文：
+  「もし今とは違う強い症状が出てきた場合は、もう一度Kairoに聞くか、医療機関に相談してください。」
 
 ### 8.2 まとめ後のフォロー質問フェーズ（必須）
 - まとめブロック生成後もセッションは継続する（会話終了にしない）。
@@ -177,38 +211,28 @@
 ### 15.1 位置情報ステート設計（必須）
 ```
 type LocationState =
-  | { status: "idle" } // 未取得
-  | { status: "requesting" } // 取得中
-  | { status: "partial_geo"; lat: number; lng: number; accuracy?: number; ts?: number }
-  | { status: "city_ok"; lat: number; lng: number; city: string; country: string; accuracy?: number; ts?: number }
-  | { status: "usable_fast"; lat: number; lng: number; city: string; country: string; ts: number }
-  | { status: "usable"; lat: number; lng: number; city: string; country: string; accuracy?: number; ts?: number }
-  | { status: "failed"; reason: "denied" | "timeout" | "error" };
+  | { status: "usable"; lat?: number; lng?: number; city: string; country: string; confidence: "precise" | "fallback" }
+  | { status: "usable_fallback"; lat?: number; lng?: number; city: string; country: string; confidence: "fallback" };
 ```
 
 ### 15.2 正規化関数（必須）
 すべての生locationは必ずこの関数を通す。
 ```
 function normalizeLocation(raw: any): LocationState {
-  if (!raw) return { status: "idle" };
-  if (raw.status === "requesting") return { status: "requesting" };
-  if (raw.status === "failed" && raw.reason) return { status: "failed", reason: raw.reason };
-  if (raw.status === "usable" && raw.lat && raw.lng && raw.city && raw.country) {
-    return { status: "usable", ...raw };
+  if (!raw) return { status: "usable_fallback", city: "unknown", country: "JP", confidence: "fallback" };
+  if (raw.status === "usable" && raw.city && raw.country) {
+    return { status: "usable", city: raw.city, country: raw.country, confidence: raw.confidence || "precise", lat: raw.lat, lng: raw.lng };
   }
-  if (raw.status === "usable_fast" && raw.lat && raw.lng && raw.city && raw.country && raw.ts) {
-    return { status: "usable_fast", ...raw };
+  if (raw.status === "usable_fallback" && raw.city && raw.country) {
+    return { status: "usable_fallback", city: raw.city, country: raw.country, confidence: "fallback", lat: raw.lat, lng: raw.lng };
   }
-  if (raw.status === "city_ok" && raw.lat && raw.lng && raw.city && raw.country) {
-    return { status: "city_ok", ...raw };
+  if (raw.city) {
+    return { status: "usable", city: raw.city, country: raw.country || "JP", confidence: "fallback", lat: raw.lat, lng: raw.lng };
   }
-  if (raw.lat && raw.lng) {
-    return { status: "partial_geo", lat: raw.lat, lng: raw.lng, accuracy: raw.accuracy, ts: raw.ts };
+  if (raw.country) {
+    return { status: "usable", city: "unknown", country: raw.country, confidence: "fallback", lat: raw.lat, lng: raw.lng };
   }
-  if (raw.error) {
-    return { status: "failed", reason: raw.error };
-  }
-  return { status: "idle" };
+  return { status: "usable_fallback", city: "unknown", country: "JP", confidence: "fallback" };
 }
 ```
 
@@ -217,7 +241,7 @@ function normalizeLocation(raw: any): LocationState {
 function initConversationState(input?: Partial<State>): State {
   return {
     conversationId: input?.conversationId ?? generateId(),
-    location: input?.location ?? { status: "idle" },
+    location: input?.location ?? { status: "usable_fallback", city: "unknown", country: "JP", confidence: "fallback" },
     clientMeta: input?.clientMeta ?? {},
   };
 }
@@ -225,32 +249,22 @@ function initConversationState(input?: Partial<State>): State {
 - 未初期化代入は禁止。必ず factory 経由で生成する。
 - `state.location.xxx = ...` の直接代入は禁止（全体置換のみ）。
 
-### 15.4 usable_fast / usable の条件（厳守）
-- usable_fast（早期判定）：
-  - city が存在
-  - country が存在
-  - timestamp が存在
-- usable（厳密判定）：
-- city が存在
-- country が存在
-- accuracy < 500m OR accuracy 不明だが city が確定
-- timestamp が 30秒以内
-- reverse geocoding 成功
-※ city_ok 状態でも usable_fast に昇格してよい
+### 15.4 usable / usable_fallback の条件（厳守）
+- 以下のいずれかが成立した時点で usable として確定：
+  - city が取得できた
+  - country が取得できた
+  - IP / locale / timezone から地域推定ができた
+  - 上記すべて失敗時でもデフォルト地域（例：JP）を設定
+- requesting / partial / failed のまま UI に出すことは禁止
 
 ### 15.5 取得フロー（重要）
 - 初回ロード時に自動で取得を開始する。
-- getCurrentPosition は最大 3 回 retry
-  - timeout / POSITION_UNAVAILABLE は retry 対象
-  - PERMISSION_DENIED は retry しない
-- reverse geocoding も最大 2 回 retry
-- retry 間は 500ms〜1s の遅延
-- retry 中は UI に「📍 現在地を確認しています…」を表示
+- requesting / partial 状態は最大 3 秒まで。
+- 3 秒経過で必ず `usable_fallback` に確定し、推定地域をセット。
 
 ### 15.6 UI表示ルール（厳守）
-- usable_fast / usable の場合のみ「📍 現在地取得済み」
-- requesting / partial_geo の場合は「📍 現在地を確認しています…」
-- failed は表示しない
+- 「📍 現在地取得済み」以外の文言を表示しない。
+- usable / usable_fallback は UI 上同一扱い。
 
 ### 15.7 位置情報取得UI（必須）
 - 初回のみ以下の文言を必ず一度だけ表示（改変禁止）：
@@ -262,21 +276,18 @@ function initConversationState(input?: Partial<State>): State {
 - 初回のみ permission UI を出し、その後は裏で retry。
 
 ### 15.8 フォールバック設計
-- locationState !== usable の場合でも会話は通常進行。
-- 案内レベルを以下で切り替える：
-  1) usable_fast / usable → 現在地ベースの具体案内
-  2) city_ok → 都市単位の案内
-  3) failed → 国単位の一般案内（「一般的に」使用可）
+- 位置取得の成否をユーザーに説明しない。
+- どの状態でも会話は通常進行。
+- 案内文は以下に統一：
+  - 「現在地周辺で一般的に使われる選択肢をご案内します。」
 
 ### 15.9 判断ロジック（最重要）
 ```
 function canRecommendSpecificPlace(location: LocationState) {
-  return location.status === "usable_fast" || location.status === "usable";
+  return location.status === "usable" || location.status === "usable_fallback";
 }
 ```
-- usable のみ → 具体名OK
-- usable_fast / usable → 具体名OK
-- それ以外 → カテゴリ・探し方のみ
+- usable / usable_fallback → 具体名OK
 
 #### 🟡（注意レベル）の追加ブロック
 🟡の場合は、以下を必ず追加する：

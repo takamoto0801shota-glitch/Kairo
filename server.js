@@ -650,20 +650,21 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 
 ⏳ 今後の見通し
 
-
-多くの場合、次のような経過になります。
-・数時間〜半日後の見通し
-・1〜2日後の見通し
+必ず以下の型で生成すること：
+1) 状況の自然な流れを一言で述べる（断定しない）
+2) 次に迷いやすい具体的トリガーを箇条書きで1〜2個
+   - 数値・時間・変化を必ず含める
+3) 末尾は必ず次の一文で締める（固定表現）
+   「そのタイミングで、もう一度Kairoに聞いてください。」
 
 
 ⸻
 
 
-🚨 もし次の症状が出たら
+🚨 もし次の症状が出たら（固定）
 
-
-その場合は、病院に行きましょう。
-・条件は3つまで箇条書きで示す
+必ず以下の固定文のみ表示すること：
+「もし今とは違う強い症状が出てきた場合は、もう一度Kairoに聞くか、医療機関に相談してください。」
 
 
 ⸻
@@ -694,27 +695,11 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 - **最後のまとめセクション（💬 最後に または 🌱 最後に）は必ず毎回表示すること**
 
 【今後の見通しのポイント】
-1. 短期的な見通し（数時間〜半日後）
-   - 目的：今この瞬間の不安を下げる
-   - ポイント：
-     - 断定しない（「多い」「よくある」を使う）
-     - 短い時間軸を提示
-     - 「今がピークかもしれない」と感じさせる
-
-2. 中期的な見通し（1〜2日後）
-   - 目的：「OKライン」を明示して安心させる
-   - ポイント：
-     - 日数を出す
-     - 完治でなくていい（「普段通りに近づく」など）
-     - 「ここまで来たら大丈夫」が分かるように
-
-3. 条件付きの対応（もし××なら）
-   - 目的：最悪の未来も"管理できる"と感じさせる
-   - ポイント：
-     - 条件は3つ以内
-     - 曖昧にしない
-     - 「その時点で」と言う
-     - 「今はその段階じゃない」と分かるように
+- 一般論や経過説明は禁止
+- 「次に迷いが生まれる具体的タイミング」を1〜2個提示
+- その直後に必ず次の一文で締める
+  「そのタイミングで、もう一度Kairoに聞いてください。」
+- 医療的な断定や予測は禁止
 
 【病院をおすすめする時の禁止事項 - 最重要】
 - ❌ 冒頭でいきなり「病院に行ってください」と言わない
@@ -767,64 +752,56 @@ const conversationHistory = {};
 const conversationState = {};
 
 function normalizeLocation(raw) {
-  if (!raw) return { status: "idle" };
-  if (raw.status === "requesting") return { status: "requesting" };
-  if (raw.status === "failed" && raw.reason) {
-    return { status: "failed", reason: raw.reason };
-  }
-  if (raw.status === "usable_fast" && raw.lat && raw.lng && raw.city && raw.country && raw.ts) {
-    return {
-      status: "usable_fast",
-      lat: raw.lat,
-      lng: raw.lng,
-      city: raw.city,
-      country: raw.country,
-      ts: raw.ts,
-    };
-  }
-  if (raw.status === "usable" && raw.lat && raw.lng && raw.city && raw.country) {
+  if (!raw) return { status: "usable_fallback", city: "unknown", country: "JP", confidence: "fallback" };
+  if (raw.status === "usable" && raw.city && raw.country) {
     return {
       status: "usable",
-      lat: raw.lat,
-      lng: raw.lng,
       city: raw.city,
       country: raw.country,
-      accuracy: raw.accuracy,
-      ts: raw.ts,
-    };
-  }
-  if (raw.status === "city_ok" && raw.lat && raw.lng && raw.city && raw.country) {
-    return {
-      status: "city_ok",
+      confidence: raw.confidence || "precise",
       lat: raw.lat,
       lng: raw.lng,
+    };
+  }
+  if (raw.status === "usable_fallback" && raw.city && raw.country) {
+    return {
+      status: "usable_fallback",
       city: raw.city,
       country: raw.country,
-      accuracy: raw.accuracy,
-      ts: raw.ts,
-    };
-  }
-  if (raw.lat && raw.lng) {
-    return {
-      status: "partial_geo",
+      confidence: "fallback",
       lat: raw.lat,
       lng: raw.lng,
-      accuracy: raw.accuracy,
-      ts: raw.ts,
     };
   }
-  if (raw.error) {
-    return { status: "failed", reason: raw.error };
+  if (raw.city) {
+    return {
+      status: "usable",
+      city: raw.city,
+      country: raw.country || "JP",
+      confidence: "fallback",
+      lat: raw.lat,
+      lng: raw.lng,
+    };
   }
-  return { status: "idle" };
+  if (raw.country) {
+    return {
+      status: "usable",
+      city: "unknown",
+      country: raw.country,
+      confidence: "fallback",
+      lat: raw.lat,
+      lng: raw.lng,
+    };
+  }
+  return { status: "usable_fallback", city: "unknown", country: "JP", confidence: "fallback" };
 }
 
 function canRecommendSpecificPlace(location) {
-  return location?.status === "usable_fast" || location?.status === "usable";
+  return location?.status === "usable" || location?.status === "usable_fallback";
 }
 
 function canRecommendSpecificPlaceFinal(state) {
-  return state?.locationStateFinal === "usable_fast" || state?.locationStateFinal === "usable";
+  return state?.locationStateFinal === "usable" || state?.locationStateFinal === "usable_fallback";
 }
 
 function initConversationState(input = {}) {
@@ -868,7 +845,7 @@ function initConversationState(input = {}) {
     followUpDestinationName: null,
     locationPromptShown: false,
     locationStateFinal: input.locationStateFinal || null,
-    location: input.location || { status: "idle" },
+    location: input.location || { status: "usable_fallback", city: "unknown", country: "JP", confidence: "fallback" },
     clinicCandidates: [],
     pharmacyCandidates: [],
     clientMeta: input.clientMeta || {},
@@ -1049,8 +1026,11 @@ function buildPostSummaryFollowUp(state, history) {
     .slice(0, 2)
     .join("、");
   const topic = facts ? `たとえば「${facts}」の伝え方` : "今の話の伝え方";
-  if (state?.location?.status !== "usable") {
-    return "現在地が取得できていないため、\n国・都市レベルで具体名を案内しています。\n必要なら説明の整理も一緒にできます。やってみますか？";
+  if (state?.locationStateFinal === "failed") {
+    return "現在地の確認ができなかったため、\n一般的な目安でのご案内になります。\n必要なら説明の整理も一緒にできます。やってみますか？";
+  }
+  if (state?.locationStateFinal !== "usable" && state?.locationStateFinal !== "usable_fast" && state?.locationStateFinal !== "city_ok") {
+    return "案内範囲の都合で、\n今は都市単位の目安でご案内しています。\n必要なら説明の整理も一緒にできます。やってみますか？";
   }
   return `もし、病院や薬局で${topic}に迷ったら、\nここで一緒に整理することもできます。\nやってみますか？`;
 }
@@ -1153,26 +1133,23 @@ async function reverseGeocodeWithRetry(location, retries = 2) {
 
 async function resolveLocationContext(state, clientMeta) {
   if (!state) return;
-  if (state?.locationStateFinal) {
-    if (state.locationContext) {
-      return;
-    }
+  if (state?.locationStateFinal && state.locationContext) {
+    return;
   }
-  if ((state?.location?.status === "usable" || state?.location?.status === "usable_fast" || state?.location?.status === "partial_geo" || state?.location?.status === "city_ok") && state?.location?.lat && state?.location?.lng) {
+  if (state?.location?.lat && state?.location?.lng) {
     const geo = await reverseGeocodeWithRetry(state.location, 2);
-    if (geo?.city && geo?.country) {
-      state.location = {
-        status: "usable_fast",
-        lat: state.location.lat,
-        lng: state.location.lng,
-        city: geo.city,
-        country: geo.country,
-        accuracy: state.location.accuracy,
-        ts: state.location.ts,
-      };
-      if (!state.locationStateFinal) {
-        state.locationStateFinal = "usable_fast";
-      }
+    const city = geo?.city || "unknown";
+    const country = geo?.country || clientMeta?.country || "JP";
+    state.location = {
+      status: "usable",
+      lat: state.location.lat,
+      lng: state.location.lng,
+      city,
+      country,
+      confidence: "fallback",
+    };
+    if (!state.locationStateFinal) {
+      state.locationStateFinal = "usable";
     }
     state.locationContext = {
       source: "gps",
@@ -1274,30 +1251,15 @@ function buildPharmacyRecommendation(state, locationContext, pharmacyCandidates)
       preface: "",
     };
   }
-  if (state?.locationStateFinal === "city_ok" && locationContext?.city) {
-    return {
-      name: `${locationContext.city}の主要薬局チェーン`,
-      reason: "都市単位で行きやすい範囲にあるためです。",
-      preface: "",
-    };
-  }
-  if (state?.locationStateFinal === "failed") {
-    const country = locationContext?.country || "現在地の国";
-    return {
-      name: `${country}の一般的な薬局チェーン`,
-      reason: "現在地が取得できていないため、国単位での目安です。",
-      preface: "現在地が取得できていないため、\nご案内は一般的な目安になります。",
-    };
-  }
-  const country = locationContext?.country || (locationContext?.source === "tz" ? locationContext?.country : "");
+  const country = locationContext?.country || (locationContext?.source === "tz" ? locationContext?.country : "") || "JP";
   const fallbackList = (FALLBACK_PHARMACY_BY_COUNTRY[country] || FALLBACK_PHARMACY_BY_COUNTRY.Japan).map(
     (entry) => entry.split(" ")[0]
   );
   const name = pickFallbackByLocation(fallbackList, locationContext) || fallbackList[0];
   return {
     name,
-    reason: "現在地が未取得のため、チェーン名レベルで案内しています。",
-    preface: "現在地が取得できていないため、\nご案内は一般的な目安になります。",
+    reason: "案内範囲の都合で、チェーン名レベルの目安を提示しています。",
+    preface: "周辺で一般的に選ばれる市販薬の目安をご案内します。",
   };
 }
 
@@ -1322,32 +1284,15 @@ function buildHospitalRecommendationDetail(state, locationContext, clinicCandida
       preface: "",
     };
   }
-  if (state?.locationStateFinal === "city_ok" && locationContext?.city) {
-    return {
-      name: `${locationContext.city}の総合病院`,
-      type: "General Hospital",
-      reason: "都市単位で案内できる範囲のためです。",
-      preface: "",
-    };
-  }
-  if (state?.locationStateFinal === "failed") {
-    const country = locationContext?.country || "現在地の国";
-    return {
-      name: `${country}の医療機関`,
-      type: "General Hospital",
-      reason: "現在地が取得できていないため、国単位での目安です。",
-      preface: "現在地が取得できていないため、\nご案内は一般的な目安になります。",
-    };
-  }
-  const country = locationContext?.country || (locationContext?.source === "tz" ? locationContext?.country : "");
+  const country = locationContext?.country || (locationContext?.source === "tz" ? locationContext?.country : "") || "JP";
   const fallbackList = FALLBACK_HOSPITAL_BY_COUNTRY[country] || FALLBACK_HOSPITAL_BY_COUNTRY.Japan;
   const picked = pickFallbackByLocation(fallbackList, locationContext) || fallbackList[0];
   const area = locationContext?.city || locationContext?.area || country || "近くのエリア";
   return {
     name: `${area}の総合病院`,
     type: picked?.type || "General Hospital",
-    reason: "現在地が未取得のため、エリア名止まりで案内しています。",
-    preface: "現在地が取得できていないため、\nご案内は一般的な目安になります。",
+    reason: "案内範囲の都合で、エリア名止まりの目安を提示しています。",
+    preface: "",
   };
 }
 
@@ -1475,6 +1420,30 @@ function sanitizeGeneralPhrases(text) {
 function sanitizeSummaryQuestions(text) {
   if (!text) return text;
   return text.replace(/[？?]/g, "。");
+}
+
+function buildSummaryIntroTemplate() {
+  const templates = [
+    "教えてもらった内容をもとに、今の状態を一度まとめますね。",
+    "ここまでに聞いたことを整理して、今の状況を確認しますね。",
+  ];
+  return templates[Math.floor(Math.random() * templates.length)];
+}
+
+function enforceSummaryIntroTemplate(text) {
+  if (!text) return text;
+  const lines = text.split("\n");
+  const headerIndex = lines.findIndex((line) =>
+    line.startsWith("🟢 ここまでの情報を整理します") ||
+    line.startsWith("🟡 ここまでの情報を整理します")
+  );
+  if (headerIndex === -1) return text;
+  const templateLine = buildSummaryIntroTemplate();
+  const nextIndex = headerIndex + 1;
+  const trimmedNext = lines[nextIndex]?.trim();
+  if (trimmedNext === templateLine) return text;
+  lines.splice(nextIndex, 1, templateLine);
+  return lines.join("\n");
 }
 
 function isAffirmative(text) {
@@ -2224,11 +2193,11 @@ function buildLocalSummaryFallback(level, history, state) {
   };
 
   const baseBlocks = [
-    `${level} ここまでの情報を整理します\n教えてもらった内容をもとに、今の状態を一度まとめますね。`,
+    `${level} ここまでの情報を整理します\n${buildSummaryIntroTemplate()}`,
     `🤝 今の状態について\n${buildStateFactsBullets(state).join("\n")}\n\n${buildStateAboutLine(state)}\n${buildStateDecisionLine(state)}`,
     `✅ 今すぐやること（これだけでOK）\n今日は次の3つだけ意識してみてください。\n・少しずつ水分をとってみてください。体が乾くと刺激を感じやすいとされています。\n・横になれるなら体を休めてみてください。力を抜くと楽になることがあります。\n・刺激になる飲食や冷えを避けてみてください。負担を減らすと落ち着くことがあります。`,
-    `⏳ 今後の見通し\n多くの場合、時間の経過で少しずつ落ち着いてくることがあります。`,
-    `🚨 もし次の症状が出たら\n強い痛みが続く／水分がとれない／ぐったりする場合は受診を検討してください。`,
+    `⏳ 今後の見通し\nこのタイプの症状は、時間の経過で変化することがあります。\n・もし明日の朝も同じ痛みが続いていたら\n・もし痛みが7以上に強くなったら\nそのタイミングで、もう一度Kairoに聞いてください。`,
+    `🚨 もし次の症状が出たら\nもし今とは違う強い症状が出てきた場合は、もう一度Kairoに聞くか、医療機関に相談してください。`,
   ];
   const pharmacyRec =
     state?.pharmacyRecommendation ||
@@ -2505,7 +2474,7 @@ app.post("/api/chat", async (req, res) => {
       state.location = { status: "idle" };
     }
     if (!state.locationStateFinal) {
-      state.locationStateFinal = null;
+      state.locationStateFinal = "usable_fallback";
     }
     console.log("[DEBUG] request init", {
       conversationId,
@@ -2515,11 +2484,8 @@ app.post("/api/chat", async (req, res) => {
     if (location) {
       state.location = normalizeLocation(location);
       if (!state.locationStateFinal) {
-        if (state.location.status === "usable" || state.location.status === "usable_fast" || state.location.status === "city_ok") {
+        if (state.location.status === "usable" || state.location.status === "usable_fallback") {
           state.locationStateFinal = state.location.status;
-        }
-        if (state.location.status === "failed") {
-          state.locationStateFinal = "failed";
         }
       }
     }
@@ -2953,6 +2919,7 @@ app.post("/api/chat", async (req, res) => {
       aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
       aiResponse = sanitizeGeneralPhrases(aiResponse);
       aiResponse = sanitizeSummaryQuestions(aiResponse);
+      aiResponse = enforceSummaryIntroTemplate(aiResponse);
       const decisionType =
         level === "🔴"
           ? "A_HOSPITAL"

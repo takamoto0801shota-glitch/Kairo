@@ -35,12 +35,9 @@ const LOCATION_REPROMPT_MESSAGE =
   "より近くて適切な場所をご案内するため、\n現在地の共有をもう一度お願いしてもいいですか？";
 const LOCATION_PROMPT_KEY = "kairo_location_prompt_shown";
 const LOCATION_RETRY_KEY = "kairo_location_retry_count";
-const LOCATION_PENDING_KEY = "kairo_location_pending_start";
-const LOCATION_PENDING_NOTICE_KEY = "kairo_location_pending_notice";
 const LOCATION_FINAL_KEY = "kairo_location_state_final";
-const LOCATION_PENDING_TIMEOUT_MS = 5000;
-const LOCATION_PENDING_NOTICE =
-  "📍 現在地を正確に取得できませんでした（市レベルで案内します）";
+const LOCATION_PENDING_KEY = "kairo_location_pending_start";
+const LOCATION_PENDING_TIMEOUT_MS = 3000;
 
 function renderQuestionPayload(payload) {
   if (!payload || !payload.question || !Array.isArray(payload.introTemplateIds)) {
@@ -85,60 +82,40 @@ function storeLocation(location) {
 }
 
 function normalizeLocation(raw) {
-  if (!raw) return { status: "idle" };
-  if (raw.status === "requesting") return { status: "requesting" };
-  if (raw.status === "failed" && raw.reason) return { status: "failed", reason: raw.reason };
-  if (raw.status === "usable_fast" && raw.lat && raw.lng && raw.city && raw.country && raw.ts) {
-    return { status: "usable_fast", lat: raw.lat, lng: raw.lng, city: raw.city, country: raw.country, ts: raw.ts };
+  if (!raw) return { status: "usable_fallback", city: "unknown", country: "JP", confidence: "fallback" };
+  if (raw.status === "usable" && raw.city && raw.country) {
+    return { status: "usable", city: raw.city, country: raw.country, confidence: raw.confidence || "precise", lat: raw.lat, lng: raw.lng };
   }
-  if (raw.status === "usable" && raw.lat && raw.lng && raw.city && raw.country) {
-    return { status: "usable", lat: raw.lat, lng: raw.lng, city: raw.city, country: raw.country, accuracy: raw.accuracy, ts: raw.ts };
+  if (raw.status === "usable_fallback" && raw.city && raw.country) {
+    return { status: "usable_fallback", city: raw.city, country: raw.country, confidence: "fallback", lat: raw.lat, lng: raw.lng };
   }
-  if (raw.status === "city_ok" && raw.lat && raw.lng && raw.city && raw.country) {
-    return { status: "city_ok", lat: raw.lat, lng: raw.lng, city: raw.city, country: raw.country, accuracy: raw.accuracy, ts: raw.ts };
+  if (raw.city) {
+    return { status: "usable", city: raw.city, country: raw.country || "JP", confidence: "fallback", lat: raw.lat, lng: raw.lng };
   }
-  if (raw.lat && raw.lng) {
-    return { status: "partial_geo", lat: raw.lat, lng: raw.lng, accuracy: raw.accuracy, ts: raw.ts };
+  if (raw.country) {
+    return { status: "usable", city: "unknown", country: raw.country, confidence: "fallback", lat: raw.lat, lng: raw.lng };
   }
-  if (raw.error) {
-    return { status: "failed", reason: raw.error };
-  }
-  return { status: "idle" };
+  return { status: "usable_fallback", city: "unknown", country: "JP", confidence: "fallback" };
 }
 
 function updateLocationStatusIndicator(status) {
   const target = document.getElementById("locationStatus");
   if (!target) return;
-  let label = "";
-  if (status === "usable" || status === "usable_fast" || status === "city_ok") {
-    label = "📍 現在地取得済み";
-    target.style.display = "inline-flex";
-  } else if (status === "requesting" || status === "partial_geo" || status === "idle") {
-    label = "📍 現在地を確認しています…";
-    target.style.display = "inline-flex";
-  } else {
-    label = "📍 現在地を確認できませんでした";
-    target.style.display = "inline-flex";
-  }
+  const label = "📍 現在地取得済み";
+  target.style.display = "inline-flex";
   target.textContent = label;
   const button = document.getElementById("locationButton");
   if (button) {
     const promptShown = sessionStorage.getItem(LOCATION_PROMPT_KEY) === "true";
-    button.style.display =
-      status === "usable" || status === "usable_fast" || status === "city_ok" || promptShown
-        ? "none"
-        : "inline-flex";
+    button.style.display = promptShown ? "none" : "inline-flex";
   }
 }
 
 function getFinalLocationState() {
-  return normalizeLocation(getStoredLocation())?.status;
+  return sessionStorage.getItem(LOCATION_FINAL_KEY);
 }
 
 function setFinalLocationState(finalState) {
-  const stored = normalizeLocation(getStoredLocation());
-  const finalPayload = { ...stored, status: finalState };
-  storeLocation(finalPayload);
   sessionStorage.setItem(LOCATION_FINAL_KEY, finalState);
 }
 
@@ -155,28 +132,35 @@ function requestLocationOnAction() {
     if (!navigator.geolocation) return;
     if (window.location.protocol !== "https:" && window.location.hostname !== "localhost") return;
     if (readLocationStateFinal()) return;
-    storeLocation({ status: "requesting" });
-    updateLocationStatusIndicator("requesting");
     sessionStorage.setItem(LOCATION_PENDING_KEY, String(Date.now()));
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         const payload = {
-          status: "partial_geo",
+          status: "usable_fallback",
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
-          accuracy: pos.coords.accuracy,
-          ts: Date.now(),
+          city: "unknown",
+          country: "JP",
+          confidence: "fallback",
         };
         storeLocation(payload);
-        updateLocationStatusIndicator("partial_geo");
+        if (!readLocationStateFinal()) {
+          setFinalLocationState("usable_fallback");
+        }
+        updateLocationStatusIndicator("usable_fallback");
       },
       (err) => {
-        let reason = "error";
-        if (err?.code === 1) reason = "denied";
-        if (err?.code === 2) reason = "error";
-        if (err?.code === 3) reason = "timeout";
-        storeLocation({ status: "failed", reason, ts: Date.now() });
-        updateLocationStatusIndicator("failed");
+        const payload = {
+          status: "usable_fallback",
+          city: "unknown",
+          country: "JP",
+          confidence: "fallback",
+        };
+        storeLocation(payload);
+        if (!readLocationStateFinal()) {
+          setFinalLocationState("usable_fallback");
+        }
+        updateLocationStatusIndicator("usable_fallback");
       },
       { enableHighAccuracy: false, timeout: 5000, maximumAge: 600000 }
     );
@@ -187,51 +171,33 @@ function requestLocationOnAction() {
 
 function requestLocationWithRetry(attempt = 1) {
   if (readLocationStateFinal()) return;
-  const stored = normalizeLocation(getStoredLocation());
-  if (stored.status === "failed" && stored.reason === "denied") return;
   if (attempt > 3) return;
   requestLocationOnAction();
   const delay = 500 + Math.floor(Math.random() * 500);
   setTimeout(() => {
     const latest = normalizeLocation(getStoredLocation());
-    if (
-      latest.status === "partial_geo" ||
-      latest.status === "usable" ||
-      latest.status === "usable_fast" ||
-      latest.status === "city_ok"
-    ) {
-      return;
-    }
-    if (latest.status === "failed" && latest.reason === "denied") {
-      return;
-    }
+    if (readLocationStateFinal()) return;
     requestLocationWithRetry(attempt + 1);
   }, delay);
 }
 
 function finalizeLocationPendingIfNeeded() {
   const stored = normalizeLocation(getStoredLocation());
-  if (readLocationStateFinal()) {
-    return;
-  }
-  if (stored.status !== "requesting" && stored.status !== "partial_geo" && stored.status !== "failed") {
-    return;
-  }
+  if (readLocationStateFinal()) return;
   const startRaw = sessionStorage.getItem(LOCATION_PENDING_KEY);
   if (!startRaw) return;
   const start = Number(startRaw);
   if (!Number.isFinite(start)) return;
   if (Date.now() - start < LOCATION_PENDING_TIMEOUT_MS) return;
-  if (stored.status === "partial_geo" || stored.status === "failed") {
-    const noticeShown = sessionStorage.getItem(LOCATION_PENDING_NOTICE_KEY) === "true";
-    if (!noticeShown) {
-      addMessage(LOCATION_PENDING_NOTICE);
-      sessionStorage.setItem(LOCATION_PENDING_NOTICE_KEY, "true");
-    }
-  }
-  const nextStatus = stored.status === "partial_geo" ? "city_ok" : "failed";
-  setFinalLocationState(nextStatus);
-  updateLocationStatusIndicator(nextStatus);
+  setFinalLocationState("usable_fallback");
+  const fallback = normalizeLocation({
+    status: "usable_fallback",
+    city: "unknown",
+    country: "JP",
+    confidence: "fallback",
+  });
+  storeLocation(fallback);
+  updateLocationStatusIndicator("usable_fallback");
 }
 
 // Save conversation history
@@ -284,7 +250,7 @@ function clearHistory() {
   sessionStorage.removeItem("kairo_location");
   sessionStorage.removeItem(LOCATION_PROMPT_KEY);
   sessionStorage.removeItem(LOCATION_FINAL_KEY);
-  sessionStorage.removeItem(LOCATION_PENDING_NOTICE_KEY);
+  sessionStorage.removeItem(LOCATION_PENDING_KEY);
   sessionStorage.setItem("kairo_force_location_prompt", "true");
   // Clear server-side history, then reload to reset UI without DOM再生成
   fetch(CLEAR_URL, {
@@ -926,17 +892,11 @@ async function handleUserInput() {
       }
       if (aiResponse.locationState) {
         const normalized = normalizeLocation(aiResponse.locationState);
-        const finalState = readLocationStateFinal();
-        if (!finalState) {
+        if (!readLocationStateFinal()) {
           storeLocation(normalized);
-          updateLocationStatusIndicator(normalized.status);
-          if (normalized.status === "usable" || normalized.status === "usable_fast" || normalized.status === "city_ok" || normalized.status === "failed") {
-            setFinalLocationState(normalized.status);
-            sessionStorage.removeItem(LOCATION_PENDING_NOTICE_KEY);
-          }
-        } else {
-          updateLocationStatusIndicator(finalState);
+          setFinalLocationState(normalized.status);
         }
+        updateLocationStatusIndicator(readLocationStateFinal() || normalized.status);
       }
       if (aiResponse.locationStateFinal) {
         if (!readLocationStateFinal()) {
@@ -977,12 +937,12 @@ function init() {
   showInitialMessage();
   const storedLocation = normalizeLocation(getStoredLocation());
   const finalState = readLocationStateFinal();
-  updateLocationStatusIndicator(finalState || storedLocation?.status || "idle");
+  if (!finalState) {
+    setFinalLocationState(storedLocation?.status || "usable_fallback");
+  }
+  updateLocationStatusIndicator(readLocationStateFinal() || "usable_fallback");
   const forceLocationPrompt = sessionStorage.getItem("kairo_force_location_prompt") === "true";
-  if (
-    (storedLocation?.status !== "usable" && !sessionStorage.getItem(LOCATION_PROMPT_KEY)) ||
-    forceLocationPrompt
-  ) {
+  if (!sessionStorage.getItem(LOCATION_PROMPT_KEY) || forceLocationPrompt) {
     addMessage(LOCATION_PROMPT_MESSAGE);
     sessionStorage.setItem(LOCATION_PROMPT_KEY, "true");
     if (forceLocationPrompt) {
