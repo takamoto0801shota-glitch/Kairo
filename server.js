@@ -849,6 +849,7 @@ function initConversationState(input = {}) {
     clinicCandidates: [],
     pharmacyCandidates: [],
     clientMeta: input.clientMeta || {},
+    summaryText: null,
     expectsPainScore: false,
     lastPainScore: null,
     lastPainWeight: null,
@@ -901,6 +902,8 @@ function buildRepairPrompt(requiredLevel) {
 - 🤝 今の状態については一般論の説明を禁止し、感覚の翻訳にする
   - 「今のあなたの状態なら、こう考えて大丈夫です」
   - 「だから今日はこれでいいですよ」
+- ⏳ 今後の見通しは「自然な流れの一言 → 具体トリガー1〜2個 → 固定締め文」で構成
+- 🚨 もし次の症状が出たらは固定文のみ
 
 🤝 今の状態について（順番厳守）：
 1) ユーザーのつらさ・不安への一文の寄り添い
@@ -1422,6 +1425,67 @@ function sanitizeSummaryQuestions(text) {
   return text.replace(/[？?]/g, "。");
 }
 
+function buildOutlookTriggers(state) {
+  const triggers = [];
+  const painScore = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
+  if (painScore !== null) {
+    const threshold = Math.min(10, Math.max(7, painScore + 2));
+    triggers.push(`もし痛みが${threshold}以上に強くなったら`);
+  } else {
+    triggers.push("もし痛みが今より強くなってきたら");
+  }
+  triggers.push("もし明日の朝も同じ痛みが続いていたら");
+  return triggers.slice(0, 2);
+}
+
+function buildOutlookBlock(state) {
+  const openers = [
+    "このタイプの症状は、時間の経過で変化することがあります。",
+    "しばらく様子を見る中で、気になりやすいタイミングがあります。",
+  ];
+  const opener = openers[Math.floor(Math.random() * openers.length)];
+  const triggers = buildOutlookTriggers(state);
+  return [
+    "⏳ 今後の見通し",
+    opener,
+    ...triggers.map((item) => `・${item}`),
+    "そのタイミングで、もう一度Kairoに聞いてください。",
+  ].join("\n");
+}
+
+function buildFixedWarningBlock() {
+  return [
+    "🚨 もし次の症状が出たら",
+    "もし今とは違う強い症状が出てきた場合は、もう一度Kairoに聞くか、医療機関に相談してください。",
+  ].join("\n");
+}
+
+function replaceSummaryBlock(text, header, block) {
+  if (!text) return text;
+  const lines = text.split("\n");
+  const startIndex = lines.findIndex((line) => line.startsWith(header));
+  if (startIndex === -1) return text;
+  const nextIndex = lines.findIndex((line, idx) => {
+    if (idx <= startIndex) return false;
+    return /^(🟢|🟡|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬)\s/.test(line);
+  });
+  const endIndex = nextIndex === -1 ? lines.length : nextIndex;
+  const updated = [
+    ...lines.slice(0, startIndex),
+    ...block.split("\n"),
+    ...lines.slice(endIndex),
+  ];
+  return updated.join("\n");
+}
+
+function ensureOutlookBlock(text, state) {
+  return replaceSummaryBlock(text, "⏳ 今後の見通し", buildOutlookBlock(state));
+}
+
+function ensureFixedWarningBlock(text) {
+  return replaceSummaryBlock(text, "🚨 もし次の症状が出たら", buildFixedWarningBlock());
+}
+
 function buildSummaryIntroTemplate() {
   const templates = [
     "教えてもらった内容をもとに、今の状態を一度まとめますね。",
@@ -1485,8 +1549,32 @@ function buildDecisionReasonBullets(state) {
   return reasons.slice(0, 3);
 }
 
+function extractSummaryFacts(summaryText) {
+  if (!summaryText) return [];
+  const lines = summaryText.split("\n");
+  const facts = [];
+  let inStateBlock = false;
+  for (const line of lines) {
+    if (line.startsWith("🤝 今の状態について") || line.startsWith("📝 いまの状態を整理します")) {
+      inStateBlock = true;
+      continue;
+    }
+    if (inStateBlock && /^(🟢|🟡|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬)\s/.test(line)) {
+      break;
+    }
+    if (inStateBlock && line.startsWith("・")) {
+      facts.push(line.replace(/^・\s*/, ""));
+    }
+  }
+  if (facts.length > 0) return facts.slice(0, 3);
+  return lines
+    .filter((line) => line.startsWith("・"))
+    .map((line) => line.replace(/^・\s*/, ""))
+    .slice(0, 3);
+}
+
 function buildCommunicationScript(state, destinationName, decisionType) {
-  const facts = buildFactsFromSlotAnswers(state).map((line) => line.replace(/^・/, ""));
+  const facts = extractSummaryFacts(state?.summaryText);
   const factsSentence = facts.length > 0 ? `症状は${facts.join("、")}です。` : "症状について相談したいです。";
   const jp = [
     `こんにちは。${destinationName}で症状の相談をしたくて来ました。`,
@@ -2874,6 +2962,9 @@ app.post("/api/chat", async (req, res) => {
           conversationState[conversationId]
         );
       }
+      aiResponse = ensureOutlookBlock(aiResponse, conversationState[conversationId]);
+      aiResponse = ensureFixedWarningBlock(aiResponse);
+      conversationState[conversationId].summaryText = aiResponse;
       if (level === "🟡") {
         const pharmacyName = conversationState[conversationId].pharmacyRecommendation?.name;
         const otcExamples = conversationState[conversationId].otcExamples || [];
