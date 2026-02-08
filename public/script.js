@@ -193,7 +193,7 @@ function requestLocationWithRetry(attempt = 1) {
 
 function finalizeLocationPendingIfNeeded() {
   const stored = normalizeLocation(getStoredLocation());
-  if (stored.status !== "requesting" && stored.status !== "partial_geo") {
+  if (stored.status !== "requesting" && stored.status !== "partial_geo" && stored.status !== "failed") {
     return;
   }
   const startRaw = sessionStorage.getItem(LOCATION_PENDING_KEY);
@@ -201,10 +201,12 @@ function finalizeLocationPendingIfNeeded() {
   const start = Number(startRaw);
   if (!Number.isFinite(start)) return;
   if (Date.now() - start < LOCATION_PENDING_TIMEOUT_MS) return;
-  const noticeShown = sessionStorage.getItem(LOCATION_PENDING_NOTICE_KEY) === "true";
-  if (!noticeShown) {
-    addMessage(LOCATION_PENDING_NOTICE);
-    sessionStorage.setItem(LOCATION_PENDING_NOTICE_KEY, "true");
+  if (stored.status === "partial_geo" || stored.status === "failed") {
+    const noticeShown = sessionStorage.getItem(LOCATION_PENDING_NOTICE_KEY) === "true";
+    if (!noticeShown) {
+      addMessage(LOCATION_PENDING_NOTICE);
+      sessionStorage.setItem(LOCATION_PENDING_NOTICE_KEY, "true");
+    }
   }
   const nextState =
     stored.status === "partial_geo"
@@ -906,6 +908,9 @@ async function handleUserInput() {
         const normalized = normalizeLocation(aiResponse.locationState);
         storeLocation(normalized);
         updateLocationStatusIndicator(normalized.status);
+        if (normalized.status === "usable" || normalized.status === "usable_fast" || normalized.status === "city_ok") {
+          sessionStorage.removeItem(LOCATION_PENDING_NOTICE_KEY);
+        }
       }
       } catch (error) {
         // Remove loading message
@@ -914,8 +919,8 @@ async function handleUserInput() {
           loadingMsg.remove();
         }
 
-        // Show error message with more details
-        let errorMessage = "すみません。うまくつながらなかったようです。\n少し時間をおいて、もう一度試してみてください。";
+        // Show fallback message and keep conversation moving
+        const errorMessage = "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね";
         
         // より詳細なエラー情報をコンソールに出力
         console.error("API呼び出しエラー:", error);
@@ -923,7 +928,7 @@ async function handleUserInput() {
           console.error("エラーメッセージ:", error.message);
         }
         
-        // Show error message
+        // Show fallback message (no retry prompt)
         addMessage(errorMessage);
       } finally {
     // Re-enable input
