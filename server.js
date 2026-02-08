@@ -589,11 +589,11 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 （B）様子見/市販薬の場合の形式：
 以下の構造で提示すること（区切り線の前後には必ず改行を入れる）：
 
-🟢 まず安心してください
+🟢 ここまでの情報を整理します
 
-
-[現時点での見立てを1-2行で]
-（例：今の話を聞く限り、命に関わるような緊急性は高くなさそうです。）
+[整理する宣言のみ（判断・安心・結論は出さない）]
+（例：教えてもらった内容をもとに、今の状態を一度まとめますね。）
+（例：ここまでに聞いたことを整理して、今の状況を確認しますね。）
 
 
 ⸻
@@ -823,6 +823,10 @@ function canRecommendSpecificPlace(location) {
   return location?.status === "usable_fast" || location?.status === "usable";
 }
 
+function canRecommendSpecificPlaceFinal(state) {
+  return state?.locationStateFinal === "usable_fast" || state?.locationStateFinal === "usable";
+}
+
 function initConversationState(input = {}) {
   return {
     conversationId: input.conversationId || `conv_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
@@ -863,6 +867,7 @@ function initConversationState(input = {}) {
     followUpStep: 0,
     followUpDestinationName: null,
     locationPromptShown: false,
+    locationStateFinal: input.locationStateFinal || null,
     location: input.location || { status: "idle" },
     clinicCandidates: [],
     pharmacyCandidates: [],
@@ -892,7 +897,7 @@ function buildRepairPrompt(requiredLevel) {
 - 選択肢や箇条書きの記号は必ず「・」を使う
 - ❗どのブロックも欠けてはいけない（1ブロックのみの出力は禁止）
 - ❗見出しは必ず以下を全て含める（順番厳守）：
-  - 🟢 まず安心してください / 🤝 今の状態について / ✅ 今すぐやること（これだけでOK） / ⏳ 今後の見通し / 🚨 もし次の症状が出たら / 🌱 最後に
+  - 🟢 ここまでの情報を整理します / 🤝 今の状態について / ✅ 今すぐやること（これだけでOK） / ⏳ 今後の見通し / 🚨 もし次の症状が出たら / 🌱 最後に
   - または 📝 いまの状態を整理します（メモ） / ⚠️ Kairoが気になっているポイント / 🏥 Kairoの判断 / 💬 最後に
 - 🟡の場合は「🚨 もし次の症状が出たら」と「🌱 最後に」の間に
   💊 一般的な市販薬 のブロックを必ず追加する（順番厳守）
@@ -961,7 +966,7 @@ function isHospitalFlow(text) {
 
 function hasAnySummaryBlocks(text) {
   return (
-    text.includes("🟢 まず安心してください") ||
+    text.includes("🟢 ここまでの情報を整理します") ||
     text.includes("🤝 今の状態について") ||
     text.includes("✅ 今すぐやること") ||
     text.includes("⏳ 今後の見通し") ||
@@ -977,8 +982,8 @@ function hasAnySummaryBlocks(text) {
 
 function hasAllSummaryBlocks(text) {
   const hospitalHeaders = ["📝 いまの状態を整理します", "⚠️ Kairoが気になっているポイント", "🏥 Kairoの判断", "💬 最後に"];
-  const normalHeaders = ["🟢 まず安心してください", "🤝 今の状態について", "✅ 今すぐやること", "⏳ 今後の見通し", "🚨 もし次の症状が出たら", "🌱 最後に"];
-  const yellowHeaders = ["🟡 まず安心してください", "🤝 今の状態について", "✅ 今すぐやること", "⏳ 今後の見通し", "🚨 もし次の症状が出たら", "💊 一般的な市販薬", "🌱 最後に"];
+  const normalHeaders = ["🟢 ここまでの情報を整理します", "🤝 今の状態について", "✅ 今すぐやること", "⏳ 今後の見通し", "🚨 もし次の症状が出たら", "🌱 最後に"];
+  const yellowHeaders = ["🟡 ここまでの情報を整理します", "🤝 今の状態について", "✅ 今すぐやること", "⏳ 今後の見通し", "🚨 もし次の症状が出たら", "💊 一般的な市販薬", "🌱 最後に"];
   const required = isHospitalFlow(text)
     ? hospitalHeaders
     : text.includes("🟡")
@@ -1008,8 +1013,10 @@ function normalizeSummaryLevel(text, requiredLevel) {
   if (!text || !requiredLevel) return text;
   const headingLevel = requiredLevel === "🟡" ? "🟢" : requiredLevel;
   let updated = text
-    .replace("🟢 まず安心してください", `${headingLevel} まず安心してください`)
-    .replace("🟡 まず安心してください", `${headingLevel} まず安心してください`);
+    .replace("🟢 まず安心してください", `${headingLevel} ここまでの情報を整理します`)
+    .replace("🟡 まず安心してください", `${headingLevel} ここまでの情報を整理します`)
+    .replace("🟢 ここまでの情報を整理します", `${headingLevel} ここまでの情報を整理します`)
+    .replace("🟡 ここまでの情報を整理します", `${headingLevel} ここまでの情報を整理します`);
 
   if ((requiredLevel === "🟢" || requiredLevel === "🔴") && updated.includes("💊 一般的な市販薬")) {
     const lines = updated.split("\n");
@@ -1029,11 +1036,11 @@ function normalizeSummaryLevel(text, requiredLevel) {
 function ensureGreenHeaderForYellow(text, requiredLevel) {
   if (!text) return text;
   if (requiredLevel !== "🟡") return text;
-  if (text.includes("🟢 まず安心してください")) return text;
-  if (text.includes("🟡 まず安心してください")) {
-    return text.replace("🟡 まず安心してください", "🟢 まず安心してください");
+  if (text.includes("🟢 ここまでの情報を整理します")) return text;
+  if (text.includes("🟡 ここまでの情報を整理します")) {
+    return text.replace("🟡 ここまでの情報を整理します", "🟢 ここまでの情報を整理します");
   }
-  return `🟢 まず安心してください\n${text}`;
+  return `🟢 ここまでの情報を整理します\n${text}`;
 }
 
 function buildPostSummaryFollowUp(state, history) {
@@ -1146,6 +1153,11 @@ async function reverseGeocodeWithRetry(location, retries = 2) {
 
 async function resolveLocationContext(state, clientMeta) {
   if (!state) return;
+  if (state?.locationStateFinal) {
+    if (state.locationContext) {
+      return;
+    }
+  }
   if ((state?.location?.status === "usable" || state?.location?.status === "usable_fast" || state?.location?.status === "partial_geo" || state?.location?.status === "city_ok") && state?.location?.lat && state?.location?.lng) {
     const geo = await reverseGeocodeWithRetry(state.location, 2);
     if (geo?.city && geo?.country) {
@@ -1158,6 +1170,9 @@ async function resolveLocationContext(state, clientMeta) {
         accuracy: state.location.accuracy,
         ts: state.location.ts,
       };
+      if (!state.locationStateFinal) {
+        state.locationStateFinal = "usable_fast";
+      }
     }
     state.locationContext = {
       source: "gps",
@@ -1195,7 +1210,7 @@ async function resolveLocationContext(state, clientMeta) {
 }
 
 async function resolveClinicCandidates(state) {
-  if (!canRecommendSpecificPlace(state?.location)) return [];
+  if (!canRecommendSpecificPlaceFinal(state)) return [];
   if (!state?.location?.lat || !state?.location?.lng) return [];
   const japanese = await fetchNearbyClinics(state.location, "Japanese clinic");
   if (japanese.length > 0) return japanese;
@@ -1223,7 +1238,7 @@ async function fetchNearbyPharmacies(location) {
 }
 
 async function resolvePharmacyCandidates(state) {
-  if (!canRecommendSpecificPlace(state?.location)) return [];
+  if (!canRecommendSpecificPlaceFinal(state)) return [];
   if (!state?.location?.lat || !state?.location?.lng) return [];
   return fetchNearbyPharmacies(state.location);
 }
@@ -1252,21 +1267,21 @@ function pickFallbackByLocation(list, locationContext) {
 }
 
 function buildPharmacyRecommendation(state, locationContext, pharmacyCandidates) {
-  if (canRecommendSpecificPlace(state?.location) && pharmacyCandidates?.length) {
+  if (canRecommendSpecificPlaceFinal(state) && pharmacyCandidates?.length) {
     return {
       name: pharmacyCandidates[0],
       reason: "今いる場所からの移動負担が少ないためです。",
       preface: "",
     };
   }
-  if (state?.location?.status === "city_ok" && locationContext?.city) {
+  if (state?.locationStateFinal === "city_ok" && locationContext?.city) {
     return {
       name: `${locationContext.city}の主要薬局チェーン`,
       reason: "都市単位で行きやすい範囲にあるためです。",
       preface: "",
     };
   }
-  if (state?.location?.status === "failed") {
+  if (state?.locationStateFinal === "failed") {
     const country = locationContext?.country || "現在地の国";
     return {
       name: `${country}の一般的な薬局チェーン`,
@@ -1299,7 +1314,7 @@ function isWhereToGoQuestion(message) {
 }
 
 function buildHospitalRecommendationDetail(state, locationContext, clinicCandidates) {
-  if (canRecommendSpecificPlace(state?.location) && clinicCandidates?.length) {
+  if (canRecommendSpecificPlaceFinal(state) && clinicCandidates?.length) {
     return {
       name: clinicCandidates[0],
       type: "Clinic",
@@ -1307,7 +1322,7 @@ function buildHospitalRecommendationDetail(state, locationContext, clinicCandida
       preface: "",
     };
   }
-  if (state?.location?.status === "city_ok" && locationContext?.city) {
+  if (state?.locationStateFinal === "city_ok" && locationContext?.city) {
     return {
       name: `${locationContext.city}の総合病院`,
       type: "General Hospital",
@@ -1315,7 +1330,7 @@ function buildHospitalRecommendationDetail(state, locationContext, clinicCandida
       preface: "",
     };
   }
-  if (state?.location?.status === "failed") {
+  if (state?.locationStateFinal === "failed") {
     const country = locationContext?.country || "現在地の国";
     return {
       name: `${country}の医療機関`,
@@ -2209,7 +2224,7 @@ function buildLocalSummaryFallback(level, history, state) {
   };
 
   const baseBlocks = [
-    `${level} まず安心してください\n今の情報を見る限り、緊急性は高くなさそうです。`,
+    `${level} ここまでの情報を整理します\n教えてもらった内容をもとに、今の状態を一度まとめますね。`,
     `🤝 今の状態について\n${buildStateFactsBullets(state).join("\n")}\n\n${buildStateAboutLine(state)}\n${buildStateDecisionLine(state)}`,
     `✅ 今すぐやること（これだけでOK）\n今日は次の3つだけ意識してみてください。\n・少しずつ水分をとってみてください。体が乾くと刺激を感じやすいとされています。\n・横になれるなら体を休めてみてください。力を抜くと楽になることがあります。\n・刺激になる飲食や冷えを避けてみてください。負担を減らすと落ち着くことがあります。`,
     `⏳ 今後の見通し\n多くの場合、時間の経過で少しずつ落ち着いてくることがあります。`,
@@ -2489,6 +2504,9 @@ app.post("/api/chat", async (req, res) => {
     if (!state.location) {
       state.location = { status: "idle" };
     }
+    if (!state.locationStateFinal) {
+      state.locationStateFinal = null;
+    }
     console.log("[DEBUG] request init", {
       conversationId,
       locationState: state.location?.status,
@@ -2496,6 +2514,14 @@ app.post("/api/chat", async (req, res) => {
     });
     if (location) {
       state.location = normalizeLocation(location);
+      if (!state.locationStateFinal) {
+        if (state.location.status === "usable" || state.location.status === "usable_fast" || state.location.status === "city_ok") {
+          state.locationStateFinal = state.location.status;
+        }
+        if (state.location.status === "failed") {
+          state.locationStateFinal = "failed";
+        }
+      }
     }
     if (clientMeta) {
       state.clientMeta = clientMeta;
@@ -2527,6 +2553,7 @@ app.post("/api/chat", async (req, res) => {
         locationPromptMessage,
         locationRePromptMessage,
         locationState: state.location,
+        locationStateFinal: state.locationStateFinal,
         conversationId,
       });
     }
@@ -3193,6 +3220,7 @@ app.post("/api/chat", async (req, res) => {
       locationPromptMessage,
       locationRePromptMessage: locationRePromptBeforeSummary,
       locationState: conversationState[conversationId].location,
+      locationStateFinal: conversationState[conversationId].locationStateFinal,
       conversationId,
     });
   } catch (error) {

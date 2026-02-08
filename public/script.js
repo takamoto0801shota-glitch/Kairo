@@ -37,6 +37,7 @@ const LOCATION_PROMPT_KEY = "kairo_location_prompt_shown";
 const LOCATION_RETRY_KEY = "kairo_location_retry_count";
 const LOCATION_PENDING_KEY = "kairo_location_pending_start";
 const LOCATION_PENDING_NOTICE_KEY = "kairo_location_pending_notice";
+const LOCATION_FINAL_KEY = "kairo_location_state_final";
 const LOCATION_PENDING_TIMEOUT_MS = 5000;
 const LOCATION_PENDING_NOTICE =
   "📍 現在地を正確に取得できませんでした（市レベルで案内します）";
@@ -130,6 +131,21 @@ function updateLocationStatusIndicator(status) {
   }
 }
 
+function getFinalLocationState() {
+  return normalizeLocation(getStoredLocation())?.status;
+}
+
+function setFinalLocationState(finalState) {
+  const stored = normalizeLocation(getStoredLocation());
+  const finalPayload = { ...stored, status: finalState };
+  storeLocation(finalPayload);
+  sessionStorage.setItem(LOCATION_FINAL_KEY, finalState);
+}
+
+function readLocationStateFinal() {
+  return sessionStorage.getItem(LOCATION_FINAL_KEY);
+}
+
 function getLocationPayload() {
   return normalizeLocation(getStoredLocation());
 }
@@ -138,6 +154,7 @@ function requestLocationOnAction() {
   try {
     if (!navigator.geolocation) return;
     if (window.location.protocol !== "https:" && window.location.hostname !== "localhost") return;
+    if (readLocationStateFinal()) return;
     storeLocation({ status: "requesting" });
     updateLocationStatusIndicator("requesting");
     sessionStorage.setItem(LOCATION_PENDING_KEY, String(Date.now()));
@@ -169,6 +186,7 @@ function requestLocationOnAction() {
 }
 
 function requestLocationWithRetry(attempt = 1) {
+  if (readLocationStateFinal()) return;
   const stored = normalizeLocation(getStoredLocation());
   if (stored.status === "failed" && stored.reason === "denied") return;
   if (attempt > 3) return;
@@ -193,6 +211,9 @@ function requestLocationWithRetry(attempt = 1) {
 
 function finalizeLocationPendingIfNeeded() {
   const stored = normalizeLocation(getStoredLocation());
+  if (readLocationStateFinal()) {
+    return;
+  }
   if (stored.status !== "requesting" && stored.status !== "partial_geo" && stored.status !== "failed") {
     return;
   }
@@ -208,12 +229,9 @@ function finalizeLocationPendingIfNeeded() {
       sessionStorage.setItem(LOCATION_PENDING_NOTICE_KEY, "true");
     }
   }
-  const nextState =
-    stored.status === "partial_geo"
-      ? { ...stored, status: "city_ok" }
-      : { status: "failed", reason: "timeout", ts: Date.now() };
-  storeLocation(nextState);
-  updateLocationStatusIndicator(nextState.status);
+  const nextStatus = stored.status === "partial_geo" ? "city_ok" : "failed";
+  setFinalLocationState(nextStatus);
+  updateLocationStatusIndicator(nextStatus);
 }
 
 // Save conversation history
@@ -265,6 +283,8 @@ function clearHistory() {
   localStorage.removeItem(FIRST_QUESTION_KEY);
   sessionStorage.removeItem("kairo_location");
   sessionStorage.removeItem(LOCATION_PROMPT_KEY);
+  sessionStorage.removeItem(LOCATION_FINAL_KEY);
+  sessionStorage.removeItem(LOCATION_PENDING_NOTICE_KEY);
   sessionStorage.setItem("kairo_force_location_prompt", "true");
   // Clear server-side history, then reload to reset UI without DOM再生成
   fetch(CLEAR_URL, {
@@ -286,7 +306,7 @@ function parseAIMessage(text) {
   // 見出しアイコンのパターン（様子見/市販薬の場合 + 病院をおすすめする場合）
   const headerPatterns = [
     // 様子見/市販薬の場合
-    { icon: '🟢', name: 'まず安心してください' },
+    { icon: '🟢', name: 'ここまでの情報を整理します' },
     { icon: '🤝', name: '今の状態について' },
     { icon: '✅', name: '今すぐやること' },
     { icon: '⏳', name: '今後の見通し' },
@@ -378,7 +398,7 @@ function parseAIMessage(text) {
 function isDecisionCompleted(text) {
   // 判断を示すブロックが含まれているかチェック
   const decisionIndicators = [
-    '🟢 まず安心してください',
+    '🟢 ここまでの情報を整理します',
     '🤝 今の状態について',
     '✅ 今すぐやること',
     '⏳ 今後の見通し',
@@ -426,7 +446,7 @@ function getUrgencyLevel(text) {
   
   // 様子見/市販薬の場合
   if (
-    text.includes('🟢 まず安心してください') ||
+    text.includes('🟢 ここまでの情報を整理します') ||
     text.includes('様子見') ||
     text.includes('市販薬') ||
     text.includes('緊急性は高くなさそう') ||
@@ -449,7 +469,7 @@ function createSummaryBlock(text) {
   const urgencyLevel = getUrgencyLevel(text);
   
   let headerIcon = '🟢';
-  let headerText = 'まず安心してください';
+  let headerText = 'ここまでの情報を整理します';
   let summaryContent = '';
   const actionSuffix = '\n👉 これ以上、何かする必要はありません。';
   
@@ -472,7 +492,7 @@ function createSummaryBlock(text) {
     }
   } else if (urgencyLevel === 'medium') {
     headerIcon = '🟡';
-    headerText = 'まず安心してください';
+    headerText = 'ここまでの情報を整理します';
     
     // 🟡は🟢と同じ構成
     const stateMatch = text.match(/🤝[^⸻]*?今の状態について[^⸻]*?\*\*([^*]+)\*\*/s);
@@ -488,7 +508,7 @@ function createSummaryBlock(text) {
     }
   } else {
     headerIcon = '🟢';
-    headerText = 'まず安心してください';
+    headerText = 'ここまでの情報を整理します';
     
     // 判断を抽出（🤝 セクションから）
     const stateMatch = text.match(/🤝[^⸻]*?今の状態について[^⸻]*?\*\*([^*]+)\*\*/s);
@@ -694,7 +714,7 @@ function addSummaryBlock(messageDiv, fullText) {
   const hasSummaryInText =
     fullText.includes('🌱 最後に') ||
     fullText.includes('💬 最後に') ||
-    fullText.includes('🟢 まず安心してください') ||
+    fullText.includes('🟢 ここまでの情報を整理します') ||
     fullText.includes('🤝 今の状態について') ||
     fullText.includes('✅ 今すぐやること') ||
     fullText.includes('⏳ 今後の見通し') ||
@@ -906,11 +926,23 @@ async function handleUserInput() {
       }
       if (aiResponse.locationState) {
         const normalized = normalizeLocation(aiResponse.locationState);
-        storeLocation(normalized);
-        updateLocationStatusIndicator(normalized.status);
-        if (normalized.status === "usable" || normalized.status === "usable_fast" || normalized.status === "city_ok") {
-          sessionStorage.removeItem(LOCATION_PENDING_NOTICE_KEY);
+        const finalState = readLocationStateFinal();
+        if (!finalState) {
+          storeLocation(normalized);
+          updateLocationStatusIndicator(normalized.status);
+          if (normalized.status === "usable" || normalized.status === "usable_fast" || normalized.status === "city_ok" || normalized.status === "failed") {
+            setFinalLocationState(normalized.status);
+            sessionStorage.removeItem(LOCATION_PENDING_NOTICE_KEY);
+          }
+        } else {
+          updateLocationStatusIndicator(finalState);
         }
+      }
+      if (aiResponse.locationStateFinal) {
+        if (!readLocationStateFinal()) {
+          setFinalLocationState(aiResponse.locationStateFinal);
+        }
+        updateLocationStatusIndicator(readLocationStateFinal());
       }
       } catch (error) {
         // Remove loading message
@@ -944,7 +976,8 @@ function init() {
   hideSummaryCard();
   showInitialMessage();
   const storedLocation = normalizeLocation(getStoredLocation());
-  updateLocationStatusIndicator(storedLocation?.status || "idle");
+  const finalState = readLocationStateFinal();
+  updateLocationStatusIndicator(finalState || storedLocation?.status || "idle");
   const forceLocationPrompt = sessionStorage.getItem("kairo_force_location_prompt") === "true";
   if (
     (storedLocation?.status !== "usable" && !sessionStorage.getItem(LOCATION_PROMPT_KEY)) ||
