@@ -37,7 +37,8 @@ const LOCATION_PROMPT_KEY = "kairo_location_prompt_shown";
 const LOCATION_RETRY_KEY = "kairo_location_retry_count";
 const LOCATION_FINAL_KEY = "kairo_location_state_final";
 const LOCATION_PENDING_KEY = "kairo_location_pending_start";
-const LOCATION_PENDING_TIMEOUT_MS = 3000;
+const LOCATION_FAILED_NOTICE_KEY = "kairo_location_failed_notice";
+const LOCATION_PENDING_TIMEOUT_MS = 5000;
 
 function renderQuestionPayload(payload) {
   if (!payload || !payload.question || !Array.isArray(payload.introTemplateIds)) {
@@ -82,33 +83,39 @@ function storeLocation(location) {
 }
 
 function normalizeLocation(raw) {
-  if (!raw) return { status: "usable_fallback", city: "unknown", country: "JP", confidence: "fallback" };
-  if (raw.status === "usable" && raw.city && raw.country) {
-    return { status: "usable", city: raw.city, country: raw.country, confidence: raw.confidence || "precise", lat: raw.lat, lng: raw.lng };
+  if (!raw) return { status: "requesting" };
+  if (raw.status === "failed" || raw.error) {
+    return { status: "failed", reason: raw.reason || raw.error || "error" };
   }
-  if (raw.status === "usable_fallback" && raw.city && raw.country) {
-    return { status: "usable_fallback", city: raw.city, country: raw.country, confidence: "fallback", lat: raw.lat, lng: raw.lng };
+  if ((raw.status === "usable" || raw.status === "requesting" || raw.lat || raw.lng) && raw.lat && raw.lng) {
+    return { status: "usable", lat: raw.lat, lng: raw.lng, accuracy: raw.accuracy, ts: raw.ts };
   }
-  if (raw.city) {
-    return { status: "usable", city: raw.city, country: raw.country || "JP", confidence: "fallback", lat: raw.lat, lng: raw.lng };
-  }
-  if (raw.country) {
-    return { status: "usable", city: "unknown", country: raw.country, confidence: "fallback", lat: raw.lat, lng: raw.lng };
-  }
-  return { status: "usable_fallback", city: "unknown", country: "JP", confidence: "fallback" };
+  if (raw.status === "requesting") return { status: "requesting" };
+  return { status: "failed", reason: "error" };
 }
 
 function updateLocationStatusIndicator(status) {
   const target = document.getElementById("locationStatus");
   if (!target) return;
-  const label = "📍 現在地取得済み";
-  target.style.display = "inline-flex";
-  target.textContent = label;
+  if (status === "usable") {
+    target.style.display = "inline-flex";
+    target.textContent = "📍現在地を取得済み";
+  } else {
+    target.style.display = "none";
+    target.textContent = "";
+  }
   const button = document.getElementById("locationButton");
   if (button) {
     const promptShown = sessionStorage.getItem(LOCATION_PROMPT_KEY) === "true";
     button.style.display = promptShown ? "none" : "inline-flex";
   }
+}
+
+function showLocationFailedNoticeOnce() {
+  const shown = sessionStorage.getItem(LOCATION_FAILED_NOTICE_KEY) === "true";
+  if (shown) return;
+  addMessage("📍 現在地を確認できませんでした（一般的な案内になります）");
+  sessionStorage.setItem(LOCATION_FAILED_NOTICE_KEY, "true");
 }
 
 function getFinalLocationState() {
@@ -133,34 +140,33 @@ function requestLocationOnAction() {
     if (window.location.protocol !== "https:" && window.location.hostname !== "localhost") return;
     if (readLocationStateFinal()) return;
     sessionStorage.setItem(LOCATION_PENDING_KEY, String(Date.now()));
+    storeLocation({ status: "requesting" });
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         const payload = {
-          status: "usable_fallback",
+          status: "usable",
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
-          city: "unknown",
-          country: "JP",
-          confidence: "fallback",
+          accuracy: pos.coords.accuracy,
+          ts: Date.now(),
         };
         storeLocation(payload);
         if (!readLocationStateFinal()) {
-          setFinalLocationState("usable_fallback");
+          setFinalLocationState("usable");
         }
-        updateLocationStatusIndicator("usable_fallback");
+        updateLocationStatusIndicator("usable");
       },
       (err) => {
         const payload = {
-          status: "usable_fallback",
-          city: "unknown",
-          country: "JP",
-          confidence: "fallback",
+          status: "failed",
+          reason: err?.code === 1 ? "denied" : err?.code === 3 ? "timeout" : "error",
         };
         storeLocation(payload);
         if (!readLocationStateFinal()) {
-          setFinalLocationState("usable_fallback");
+          setFinalLocationState("failed");
         }
-        updateLocationStatusIndicator("usable_fallback");
+        updateLocationStatusIndicator("failed");
+        showLocationFailedNoticeOnce();
       },
       { enableHighAccuracy: false, timeout: 5000, maximumAge: 600000 }
     );
@@ -189,15 +195,15 @@ function finalizeLocationPendingIfNeeded() {
   const start = Number(startRaw);
   if (!Number.isFinite(start)) return;
   if (Date.now() - start < LOCATION_PENDING_TIMEOUT_MS) return;
-  setFinalLocationState("usable_fallback");
-  const fallback = normalizeLocation({
-    status: "usable_fallback",
-    city: "unknown",
-    country: "JP",
-    confidence: "fallback",
-  });
-  storeLocation(fallback);
-  updateLocationStatusIndicator("usable_fallback");
+  if (stored.status === "usable") {
+    setFinalLocationState("usable");
+    updateLocationStatusIndicator("usable");
+    return;
+  }
+  setFinalLocationState("failed");
+  storeLocation({ status: "failed", reason: "timeout" });
+  updateLocationStatusIndicator("failed");
+  showLocationFailedNoticeOnce();
 }
 
 // Save conversation history
@@ -251,6 +257,7 @@ function clearHistory() {
   sessionStorage.removeItem(LOCATION_PROMPT_KEY);
   sessionStorage.removeItem(LOCATION_FINAL_KEY);
   sessionStorage.removeItem(LOCATION_PENDING_KEY);
+  sessionStorage.removeItem(LOCATION_FAILED_NOTICE_KEY);
   sessionStorage.setItem("kairo_force_location_prompt", "true");
   // Clear server-side history, then reload to reset UI without DOM再生成
   fetch(CLEAR_URL, {
@@ -894,15 +901,23 @@ async function handleUserInput() {
         const normalized = normalizeLocation(aiResponse.locationState);
         if (!readLocationStateFinal()) {
           storeLocation(normalized);
-          setFinalLocationState(normalized.status);
+          if (normalized.status === "usable" || normalized.status === "failed") {
+            setFinalLocationState(normalized.status);
+          }
         }
         updateLocationStatusIndicator(readLocationStateFinal() || normalized.status);
+        if ((readLocationStateFinal() || normalized.status) === "failed") {
+          showLocationFailedNoticeOnce();
+        }
       }
       if (aiResponse.locationStateFinal) {
         if (!readLocationStateFinal()) {
           setFinalLocationState(aiResponse.locationStateFinal);
         }
         updateLocationStatusIndicator(readLocationStateFinal());
+        if (readLocationStateFinal() === "failed") {
+          showLocationFailedNoticeOnce();
+        }
       }
       } catch (error) {
         // Remove loading message
@@ -937,10 +952,13 @@ function init() {
   showInitialMessage();
   const storedLocation = normalizeLocation(getStoredLocation());
   const finalState = readLocationStateFinal();
-  if (!finalState) {
-    setFinalLocationState(storedLocation?.status || "usable_fallback");
+  if (!finalState && (storedLocation?.status === "usable" || storedLocation?.status === "failed")) {
+    setFinalLocationState(storedLocation.status);
   }
-  updateLocationStatusIndicator(readLocationStateFinal() || "usable_fallback");
+  updateLocationStatusIndicator(readLocationStateFinal() || storedLocation?.status);
+  if (readLocationStateFinal() === "failed" || storedLocation?.status === "failed") {
+    showLocationFailedNoticeOnce();
+  }
   const forceLocationPrompt = sessionStorage.getItem("kairo_force_location_prompt") === "true";
   if (!sessionStorage.getItem(LOCATION_PROMPT_KEY) || forceLocationPrompt) {
     addMessage(LOCATION_PROMPT_MESSAGE);

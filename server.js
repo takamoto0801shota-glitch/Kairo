@@ -752,56 +752,33 @@ const conversationHistory = {};
 const conversationState = {};
 
 function normalizeLocation(raw) {
-  if (!raw) return { status: "usable_fallback", city: "unknown", country: "JP", confidence: "fallback" };
-  if (raw.status === "usable" && raw.city && raw.country) {
+  if (!raw) return { status: "requesting" };
+  if (raw.status === "failed" || raw.error) {
+    return { status: "failed", reason: raw.reason || raw.error || "error" };
+  }
+  if ((raw.status === "usable" || raw.status === "requesting" || raw.lat || raw.lng) && raw.lat && raw.lng) {
     return {
       status: "usable",
+      lat: raw.lat,
+      lng: raw.lng,
+      accuracy: raw.accuracy,
+      ts: raw.ts,
       city: raw.city,
       country: raw.country,
-      confidence: raw.confidence || "precise",
-      lat: raw.lat,
-      lng: raw.lng,
     };
   }
-  if (raw.status === "usable_fallback" && raw.city && raw.country) {
-    return {
-      status: "usable_fallback",
-      city: raw.city,
-      country: raw.country,
-      confidence: "fallback",
-      lat: raw.lat,
-      lng: raw.lng,
-    };
+  if (raw.status === "requesting") {
+    return { status: "requesting" };
   }
-  if (raw.city) {
-    return {
-      status: "usable",
-      city: raw.city,
-      country: raw.country || "JP",
-      confidence: "fallback",
-      lat: raw.lat,
-      lng: raw.lng,
-    };
-  }
-  if (raw.country) {
-    return {
-      status: "usable",
-      city: "unknown",
-      country: raw.country,
-      confidence: "fallback",
-      lat: raw.lat,
-      lng: raw.lng,
-    };
-  }
-  return { status: "usable_fallback", city: "unknown", country: "JP", confidence: "fallback" };
+  return { status: "failed", reason: "error" };
 }
 
 function canRecommendSpecificPlace(location) {
-  return location?.status === "usable" || location?.status === "usable_fallback";
+  return location?.status === "usable";
 }
 
 function canRecommendSpecificPlaceFinal(state) {
-  return state?.locationStateFinal === "usable" || state?.locationStateFinal === "usable_fallback";
+  return state?.locationStateFinal === "usable";
 }
 
 function initConversationState(input = {}) {
@@ -845,8 +822,9 @@ function initConversationState(input = {}) {
     followUpDestinationName: null,
     locationPromptShown: false,
     locationStateFinal: input.locationStateFinal || null,
-    location: input.location || { status: "usable_fallback", city: "unknown", country: "JP", confidence: "fallback" },
+    location: input.location || { status: "requesting" },
     clinicCandidates: [],
+    hospitalCandidates: [],
     pharmacyCandidates: [],
     clientMeta: input.clientMeta || {},
     summaryText: null,
@@ -899,6 +877,8 @@ function buildRepairPrompt(requiredLevel) {
 - 判断や安心コメントには、直前までの情報のうち少なくとも1つを根拠として明示的に反映する
 - 🔴の場合、🏥 Kairoの判断で受診先のカテゴリを具体的に示す
   - 例：歯の痛み→歯医者／耳の痛み→耳鼻科／腹痛・頭痛→病院
+- 🏥 Kairoの判断は「近くで行きやすい場所を案内します」を入れ、候補は最大3件・1件目はおすすめ、地図リンクを付ける
+- 💊ブロックも候補は最大3件・1件目はおすすめ、地図リンクを付ける
 - 🤝 今の状態については一般論の説明を禁止し、感覚の翻訳にする
   - 「今のあなたの状態なら、こう考えて大丈夫です」
   - 「だから今日はこれでいいですよ」
@@ -1029,12 +1009,6 @@ function buildPostSummaryFollowUp(state, history) {
     .slice(0, 2)
     .join("、");
   const topic = facts ? `たとえば「${facts}」の伝え方` : "今の話の伝え方";
-  if (state?.locationStateFinal === "failed") {
-    return "現在地の確認ができなかったため、\n一般的な目安でのご案内になります。\n必要なら説明の整理も一緒にできます。やってみますか？";
-  }
-  if (state?.locationStateFinal !== "usable" && state?.locationStateFinal !== "usable_fast" && state?.locationStateFinal !== "city_ok") {
-    return "案内範囲の都合で、\n今は都市単位の目安でご案内しています。\n必要なら説明の整理も一緒にできます。やってみますか？";
-  }
   return `もし、病院や薬局で${topic}に迷ったら、\nここで一緒に整理することもできます。\nやってみますか？`;
 }
 
@@ -1061,41 +1035,149 @@ function buildOtcWarningLine(variantIndex) {
 
 function buildYellowOtcBlock(category, warningIndex = 0, pharmacyRec, otcExamples, locationPreface) {
   const examples = otcExamples || [];
-  const lines = ["💊 一般的な市販薬"];
-  if (locationPreface) {
-    lines.push(locationPreface);
+  const lines = [
+    "💊 一般的な市販薬",
+    "今の症状と強さであれば、",
+    "まずは薬局で市販薬を使って様子を見る判断で問題ない状態です。",
+    "",
+    "無理に病院へ行く必要はなさそうです。",
+    "",
+    "⸻",
+    "",
+    "⭐ おすすめの薬局",
+  ];
+  const top = pharmacyRec?.candidates?.[0] || (pharmacyRec?.name ? { name: pharmacyRec.name, mapsUrl: pharmacyRec.mapsUrl } : null);
+  if (top?.name) {
+    lines.push(top.name);
+    lines.push("・見つけやすく、行きやすい");
+    lines.push("・薬の種類が多く、症状を伝えて相談しやすい");
+    if (top.mapsUrl) {
+      lines.push("");
+      lines.push(`📍 地図：${top.mapsUrl}`);
+    }
   }
-  if (pharmacyRec?.name) {
-    lines.push(`薬局名：${pharmacyRec.name}`);
-  }
-  if (pharmacyRec?.reason) {
-    lines.push(`理由：${pharmacyRec.reason}`);
-  }
-  lines.push("薬名（例）：");
-  examples.slice(0, 3).forEach((item) => {
-    lines.push(`・${item.generic}（${item.brand}）：${item.use}`);
+  lines.push("");
+  lines.push("⸻");
+  lines.push("");
+  lines.push("薬はこの2つからでOK");
+  const picked = examples.slice(0, 2);
+  picked.forEach((item, index) => {
+    const num = index === 0 ? "①" : "②";
+    lines.push("");
+    lines.push(`${num} ${item.generic}（${item.brand}）`);
+    lines.push(`👉 ${item.use}`);
+    if (index === 0) {
+      lines.push("・まず最初に選びやすい薬");
+      lines.push("・胃への負担が比較的少ない");
+    } else {
+      lines.push("・「張る感じ」「キリキリする感じ」に使われることが多い");
+      lines.push("・腸の動きが原因の痛みに向いている");
+    }
   });
-  lines.push(buildOtcWarningLine(warningIndex));
-  lines.push("最終判断は薬剤師に相談してください。");
-  lines.push("これは一般的に現地で使われる選択肢です。");
+  lines.push("");
+  lines.push("※ どちらか1つで大丈夫です。");
+  lines.push("※ 迷ったら、このまま症状を薬剤師に伝えてください。");
+  lines.push("");
+  lines.push("⸻");
+  lines.push("");
+  lines.push("※これは診断ではありません。");
+  lines.push("※体質や持病によって合わない場合があります。");
+  lines.push("※不安が強くなったり、症状が変わったら次の判断を一緒に考えましょう。");
   return lines.filter(Boolean).join("\n");
 }
 
-async function fetchNearbyClinics(location, keyword) {
+function distanceMeters(lat1, lng1, lat2, lng2) {
+  const toRad = (value) => (value * Math.PI) / 180;
+  const r = 6371000;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(r * c);
+}
+
+function buildMapsUrl(place, origin) {
+  if (!place?.name) return "";
+  const params = new URLSearchParams({
+    api: "1",
+    query: place.name,
+  });
+  if (origin?.lat && origin?.lng) {
+    params.set("location", `${origin.lat},${origin.lng}`);
+    params.set("radius", "1000");
+  }
+  if (place.placeId) {
+    params.set("query_place_id", place.placeId);
+  }
+  return `https://www.google.com/maps/search/?${params.toString()}`;
+}
+
+function normalizePlaces(results, origin) {
+  return (results || [])
+    .map((item) => {
+      const name = item?.name;
+      if (!name) return null;
+      const loc = item?.geometry?.location;
+      const lat = typeof loc?.lat === "function" ? loc.lat() : loc?.lat;
+      const lng = typeof loc?.lng === "function" ? loc.lng() : loc?.lng;
+      const distanceM =
+        origin?.lat !== undefined && origin?.lng !== undefined && lat !== undefined && lng !== undefined
+          ? distanceMeters(origin.lat, origin.lng, lat, lng)
+          : null;
+      const placeId = item?.place_id || "";
+      const rating = typeof item?.rating === "number" ? item.rating : null;
+      const base = { name, placeId, distanceM, lat, lng, rating };
+      return { ...base, mapsUrl: buildMapsUrl(base, origin) };
+    })
+    .filter(Boolean);
+}
+
+function mergePlaces(...lists) {
+  const seen = new Set();
+  const merged = [];
+  lists.flat().forEach((place) => {
+    const key = place.placeId || place.name;
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    merged.push(place);
+  });
+  return merged;
+}
+
+async function fetchNearbyPlaces(location, { keyword, type, radius = 1000, rankByDistance = false }) {
   if (!process.env.GOOGLE_PLACES_API_KEY) return [];
   if (!location?.lat || !location?.lng) return [];
   const params = new URLSearchParams({
     location: `${location.lat},${location.lng}`,
-    radius: "3500",
-    keyword,
-    type: "doctor",
     key: process.env.GOOGLE_PLACES_API_KEY,
   });
+  if (rankByDistance) {
+    params.set("rankby", "distance");
+  } else {
+    params.set("radius", String(radius));
+  }
+  if (keyword) params.set("keyword", keyword);
+  if (type) params.set("type", type);
   const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?${params.toString()}`;
   const res = await fetch(url);
   if (!res.ok) return [];
   const data = await res.json();
-  return (data.results || []).slice(0, 3).map((item) => item.name).filter(Boolean);
+  return normalizePlaces(data.results || [], location);
+}
+
+function sortPlacesByRatingThenDistance(list) {
+  return (list || []).sort((a, b) => {
+    const aHasRating = a?.rating !== null && a?.rating !== undefined;
+    const bHasRating = b?.rating !== null && b?.rating !== undefined;
+    if (aHasRating && bHasRating && a.rating !== b.rating) {
+      return b.rating - a.rating;
+    }
+    if (aHasRating && !bHasRating) return -1;
+    if (!aHasRating && bHasRating) return 1;
+    return (a?.distanceM ?? 0) - (b?.distanceM ?? 0);
+  });
 }
 
 async function reverseGeocodeLocation(location) {
@@ -1192,35 +1274,74 @@ async function resolveLocationContext(state, clientMeta) {
 async function resolveClinicCandidates(state) {
   if (!canRecommendSpecificPlaceFinal(state)) return [];
   if (!state?.location?.lat || !state?.location?.lng) return [];
-  const japanese = await fetchNearbyClinics(state.location, "Japanese clinic");
-  if (japanese.length > 0) return japanese;
-  const gp = await fetchNearbyClinics(state.location, "clinic");
-  if (gp.length > 0) return gp;
-  const hospital = await fetchNearbyClinics(state.location, "hospital");
-  return hospital;
+  const keywords = ["clinic", "general practitioner", "medical clinic"];
+  const results = [];
+  for (const keyword of keywords) {
+    const places = await fetchNearbyPlaces(state.location, {
+      keyword,
+      type: "doctor",
+      rankByDistance: true,
+    });
+    results.push(...places);
+  }
+  if (results.length === 0) {
+    const fallback = await fetchNearbyPlaces(state.location, {
+      type: "doctor",
+      rankByDistance: true,
+    });
+    results.push(...fallback);
+  }
+  const merged = sortPlacesByRatingThenDistance(mergePlaces(results)).slice(0, 2);
+  if (merged.length > 0) return merged;
+  const country = state?.locationContext?.country || "Japan";
+  const fallbackNames = FALLBACK_GP_BY_COUNTRY[country] || FALLBACK_GP_BY_COUNTRY.Japan;
+  return buildFallbackPlaces(fallbackNames, state?.location);
 }
 
-async function fetchNearbyPharmacies(location) {
-  if (!process.env.GOOGLE_PLACES_API_KEY) return [];
-  if (!location?.lat || !location?.lng) return [];
-  const params = new URLSearchParams({
-    location: `${location.lat},${location.lng}`,
-    radius: "2500",
-    keyword: "pharmacy",
-    type: "pharmacy",
-    key: process.env.GOOGLE_PLACES_API_KEY,
-  });
-  const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?${params.toString()}`;
-  const res = await fetch(url);
-  if (!res.ok) return [];
-  const data = await res.json();
-  return (data.results || []).slice(0, 3).map((item) => item.name).filter(Boolean);
+async function resolveHospitalCandidates(state) {
+  if (!canRecommendSpecificPlaceFinal(state)) return [];
+  if (!state?.location?.lat || !state?.location?.lng) return [];
+  const keywords = ["hospital", "medical centre"];
+  const results = [];
+  for (const keyword of keywords) {
+    const places = await fetchNearbyPlaces(state.location, {
+      keyword,
+      type: "hospital",
+      rankByDistance: true,
+    });
+    results.push(...places);
+  }
+  if (results.length === 0) {
+    const fallback = await fetchNearbyPlaces(state.location, {
+      type: "hospital",
+      rankByDistance: true,
+    });
+    results.push(...fallback);
+  }
+  return sortPlacesByRatingThenDistance(mergePlaces(results)).slice(0, 2);
 }
 
 async function resolvePharmacyCandidates(state) {
   if (!canRecommendSpecificPlaceFinal(state)) return [];
   if (!state?.location?.lat || !state?.location?.lng) return [];
-  return fetchNearbyPharmacies(state.location);
+  const keywords = ["pharmacy", "Watsons", "Guardian"];
+  const results = [];
+  for (const keyword of keywords) {
+    const places = await fetchNearbyPlaces(state.location, {
+      keyword,
+      type: "pharmacy",
+      rankByDistance: true,
+    });
+    results.push(...places);
+  }
+  if (results.length === 0) {
+    const fallback = await fetchNearbyPlaces(state.location, {
+      type: "pharmacy",
+      rankByDistance: true,
+    });
+    results.push(...fallback);
+  }
+  return sortPlacesByRatingThenDistance(mergePlaces(results)).slice(0, 2);
 }
 
 const FALLBACK_PHARMACY_BY_COUNTRY = {
@@ -1239,6 +1360,11 @@ const FALLBACK_HOSPITAL_BY_COUNTRY = {
   ],
 };
 
+const FALLBACK_GP_BY_COUNTRY = {
+  Japan: ["近くの内科クリニック", "近くのクリニック"],
+  Singapore: ["Raffles Medical", "Fullerton Health", "Healthway Medical"],
+};
+
 function pickFallbackByLocation(list, locationContext) {
   if (!Array.isArray(list) || list.length === 0) return null;
   if (!locationContext?.city) return list[0];
@@ -1246,23 +1372,37 @@ function pickFallbackByLocation(list, locationContext) {
   return matched || list[0];
 }
 
+function buildFallbackPlaces(names, location) {
+  return (names || [])
+    .map((name) => ({
+      name,
+      placeId: "",
+      distanceM: null,
+      mapsUrl: buildMapsUrl({ name }, location),
+    }))
+    .slice(0, 3);
+}
+
 function buildPharmacyRecommendation(state, locationContext, pharmacyCandidates) {
-  if (canRecommendSpecificPlaceFinal(state) && pharmacyCandidates?.length) {
+  const candidates = pharmacyCandidates || [];
+  if (canRecommendSpecificPlaceFinal(state) && candidates.length) {
     return {
-      name: pharmacyCandidates[0],
-      reason: "今いる場所からの移動負担が少ないためです。",
-      preface: "",
+      name: candidates[0].name,
+      mapsUrl: candidates[0].mapsUrl,
+      candidates,
+      reason: "近くで行きやすい場所を案内します。",
+      preface: "近くで行きやすい場所を案内します。",
     };
   }
-  const country = locationContext?.country || (locationContext?.source === "tz" ? locationContext?.country : "") || "JP";
-  const fallbackList = (FALLBACK_PHARMACY_BY_COUNTRY[country] || FALLBACK_PHARMACY_BY_COUNTRY.Japan).map(
-    (entry) => entry.split(" ")[0]
-  );
-  const name = pickFallbackByLocation(fallbackList, locationContext) || fallbackList[0];
+  const fallbackList = FALLBACK_PHARMACY_BY_COUNTRY.Japan.map((entry) => entry.split(" ")[0]);
+  const fallbackCandidates = buildFallbackPlaces(fallbackList, state?.location);
+  const name = fallbackCandidates[0]?.name || "近くの薬局";
   return {
     name,
-    reason: "案内範囲の都合で、チェーン名レベルの目安を提示しています。",
-    preface: "周辺で一般的に選ばれる市販薬の目安をご案内します。",
+    mapsUrl: fallbackCandidates[0]?.mapsUrl || "",
+    candidates: fallbackCandidates,
+    reason: "近くで行きやすい場所を案内します。",
+    preface: "近くで行きやすい場所を案内します。",
   };
 }
 
@@ -1278,24 +1418,28 @@ function isWhereToGoQuestion(message) {
   return /どこに行けばいい|どこに行けば良い|どこに行く|どこへ行けば|病院はどこ|薬局はどこ/.test(message || "");
 }
 
-function buildHospitalRecommendationDetail(state, locationContext, clinicCandidates) {
-  if (canRecommendSpecificPlaceFinal(state) && clinicCandidates?.length) {
+function buildHospitalRecommendationDetail(state, locationContext, clinicCandidates, hospitalCandidates) {
+  const useHospital = hospitalCandidates?.length > 0;
+  const candidates = (useHospital ? hospitalCandidates : clinicCandidates) || [];
+  if (canRecommendSpecificPlaceFinal(state) && candidates.length) {
     return {
-      name: clinicCandidates[0],
-      type: "Clinic",
-      reason: "今の状態を見てもらいやすい体制があるためです。",
-      preface: "",
+      name: candidates[0].name,
+      mapsUrl: candidates[0].mapsUrl,
+      candidates,
+      type: useHospital ? "Hospital" : "Clinic",
+      reason: "近くで行きやすい場所を案内します。",
+      preface: "近くで行きやすい場所を案内します。",
     };
   }
-  const country = locationContext?.country || (locationContext?.source === "tz" ? locationContext?.country : "") || "JP";
-  const fallbackList = FALLBACK_HOSPITAL_BY_COUNTRY[country] || FALLBACK_HOSPITAL_BY_COUNTRY.Japan;
-  const picked = pickFallbackByLocation(fallbackList, locationContext) || fallbackList[0];
-  const area = locationContext?.city || locationContext?.area || country || "近くのエリア";
+  const fallbackList = (FALLBACK_HOSPITAL_BY_COUNTRY.Japan || []).map((item) => item.name);
+  const fallbackCandidates = buildFallbackPlaces(fallbackList, state?.location);
   return {
-    name: `${area}の総合病院`,
-    type: picked?.type || "General Hospital",
-    reason: "案内範囲の都合で、エリア名止まりの目安を提示しています。",
-    preface: "",
+    name: fallbackCandidates[0]?.name || "近くの医療機関",
+    mapsUrl: fallbackCandidates[0]?.mapsUrl || "",
+    candidates: fallbackCandidates,
+    type: "General Hospital",
+    reason: "近くで行きやすい場所を案内します。",
+    preface: "近くで行きやすい場所を案内します。",
   };
 }
 
@@ -1384,8 +1528,6 @@ function ensureYellowOtcBlock(
   locationPreface
 ) {
   if (!text || requiredLevel !== "🟡") return text;
-  if (text.includes("💊 ")) return text;
-  const lines = text.split("\n");
   const otcBlock = buildYellowOtcBlock(
     category,
     warningIndex,
@@ -1393,6 +1535,9 @@ function ensureYellowOtcBlock(
     otcExamples,
     locationPreface
   );
+  const replaced = replaceSummaryBlock(text, "💊 一般的な市販薬", otcBlock);
+  if (replaced !== text) return replaced;
+  const lines = text.split("\n");
   const insertAfterIndex = lines.findIndex((line) => line.includes("🚨 もし次の症状が出たら"));
   const beforeLastIndex = lines.findIndex((line) => line.includes("🌱 最後に"));
   if (insertAfterIndex >= 0 && beforeLastIndex > insertAfterIndex) {
@@ -1458,6 +1603,79 @@ function buildFixedWarningBlock() {
     "🚨 もし次の症状が出たら",
     "もし今とは違う強い症状が出てきた場合は、もう一度Kairoに聞くか、医療機関に相談してください。",
   ].join("\n");
+}
+
+function buildPlaceLines(candidates) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return [];
+  const lines = [];
+  const top = candidates[0];
+  if (top?.name) {
+    const line = top?.mapsUrl ? `${top.name}（地図：${top.mapsUrl}）` : top.name;
+    lines.push(`おすすめ：${line}`);
+  }
+  const alt = candidates[1];
+  if (alt?.name) {
+    lines.push(`代替：${alt.name}`);
+  }
+  return lines;
+}
+
+function detectSpecialtyFromHistory(historyText) {
+  if (historyText.match(/歯|歯ぐき|虫歯/)) return "歯医者";
+  if (historyText.match(/耳|耳鳴り|耳が痛/)) return "耳鼻科";
+  if (historyText.match(/腹|お腹|胃|下痢|便秘/)) return "病院";
+  if (historyText.match(/頭痛|頭が痛|頭が重/)) return "病院";
+  return "病院";
+}
+
+function buildHospitalBlock(state, historyText, hospitalRec) {
+  const specialty = detectSpecialtyFromHistory(historyText || "");
+  const candidates = hospitalRec?.candidates || [];
+  const lines = [
+    "🏥 Kairoの判断",
+    "今の症状の出方を整理すると、",
+    `薬で様子を見るより、一度${specialty}で確認した方が安心できる状態です。`,
+    "",
+    "「危険」という判断ではありませんが、",
+    "ここで一度プロに見てもらう選択が、いちばん迷いが残りません。",
+    "",
+    "⸻",
+    "",
+    "⭐ おすすめのGP（近くて行きやすい）",
+  ].filter(Boolean);
+  const top = candidates[0];
+  if (top?.name) {
+    lines.push(top.name);
+    lines.push("・予約なしでも行きやすい");
+    lines.push("・英語が苦手でも対応に慣れている");
+    lines.push("・必要があれば検査や紹介につなげやすい");
+    if (top.mapsUrl) {
+      lines.push("");
+      lines.push(`📍 地図：${top.mapsUrl}`);
+    }
+  }
+  lines.push("");
+  lines.push("⸻");
+  lines.push("");
+  lines.push("行く前に知っておくと安心なこと");
+  lines.push("・今の症状は、軽い処置や確認だけで終わるケースも多いです");
+  lines.push("・その場で「薬だけ出して終わる」「様子見でOKと言われる」こともあります");
+  lines.push("・必要なら検査を提案されるため、次の一歩がはっきりします");
+  return lines.join("\n");
+}
+
+function ensureHospitalBlock(text, state, historyText) {
+  if (!text) return text;
+  const locationContext = state?.locationContext || {};
+  const hospitalRec =
+    state?.hospitalRecommendation ||
+    buildHospitalRecommendationDetail(
+      state,
+      locationContext,
+      state?.clinicCandidates || [],
+      state?.hospitalCandidates || []
+    );
+  return replaceSummaryBlock(text, "🏥 Kairoの判断", buildHospitalBlock(state, historyText, hospitalRec));
 }
 
 function replaceSummaryBlock(text, header, block) {
@@ -2307,38 +2525,17 @@ function buildLocalSummaryFallback(level, history, state) {
     const hospitalRec = buildHospitalRecommendationDetail(
       state,
       locationContext,
-      state?.clinicCandidates || []
+      state?.clinicCandidates || [],
+      state?.hospitalCandidates || []
     );
-    const specialtyMap = {
-      tooth: "歯医者",
-      ear: "耳鼻科",
-      stomach: "病院",
-      head: "病院",
-      other: "病院",
-    };
-    let specialtyKey = "other";
-    if (historyText.match(/歯|歯ぐき|虫歯/)) specialtyKey = "tooth";
-    else if (historyText.match(/耳|耳鳴り|耳が痛/)) specialtyKey = "ear";
-    else if (historyText.match(/腹|お腹|胃|下痢|便秘/)) specialtyKey = "stomach";
-    else if (historyText.match(/頭痛|頭が痛|頭が重/)) specialtyKey = "head";
-    const specialty = specialtyMap[specialtyKey];
-    const hospitalLines = [
-      hospitalRec?.preface,
-      `受診先：${hospitalRec?.name}`,
-      `タイプ：${hospitalRec?.type}`,
-      `理由：${hospitalRec?.reason}`,
-    ]
-      .filter(Boolean)
-      .join("\n");
+    const hospitalBlock = buildHospitalBlock(state, historyText, hospitalRec);
     return sanitizeSummaryBullets([
       "📝 いまの状態を整理します（メモ）",
       facts.join("\n") || "・現在の症状について相談されています",
       "⚠️ Kairoが気になっているポイント",
       "急に悪化している可能性があり、様子見と言い切れない点があります。",
       "🏥 Kairoの判断",
-      hospitalLines
-        ? `今の状態なら、まずは${specialty}で確認するのが安心です。\n${hospitalLines}`
-        : `今の情報を見る限り、${specialty}で相談する判断が安心です。`,
+      hospitalBlock.replace(/^🏥 Kairoの判断\n/, ""),
       "💬 最後に",
       "不安な状況だと思います。迷ったときは受診する判断は慎重で正しいです。",
     ].join("\n"), state);
@@ -2559,10 +2756,7 @@ app.post("/api/chat", async (req, res) => {
     }
     const state = getOrInitConversationState(conversationId);
     if (!state.location) {
-      state.location = { status: "idle" };
-    }
-    if (!state.locationStateFinal) {
-      state.locationStateFinal = "usable_fallback";
+      state.location = { status: "requesting" };
     }
     console.log("[DEBUG] request init", {
       conversationId,
@@ -2572,7 +2766,7 @@ app.post("/api/chat", async (req, res) => {
     if (location) {
       state.location = normalizeLocation(location);
       if (!state.locationStateFinal) {
-        if (state.location.status === "usable" || state.location.status === "usable_fallback") {
+        if (state.location.status === "usable" || state.location.status === "failed") {
           state.locationStateFinal = state.location.status;
         }
       }
@@ -2879,6 +3073,9 @@ app.post("/api/chat", async (req, res) => {
         conversationState[conversationId].clinicCandidates = await resolveClinicCandidates(
           conversationState[conversationId]
         );
+        conversationState[conversationId].hospitalCandidates = await resolveHospitalCandidates(
+          conversationState[conversationId]
+        );
       }
       conversationState[conversationId].pharmacyCandidates = await resolvePharmacyCandidates(
         conversationState[conversationId]
@@ -2894,11 +3091,16 @@ app.post("/api/chat", async (req, res) => {
       const hospitalRec = buildHospitalRecommendationDetail(
         conversationState[conversationId],
         locationContext,
-        conversationState[conversationId].clinicCandidates
+        conversationState[conversationId].clinicCandidates,
+        conversationState[conversationId].hospitalCandidates
       );
       conversationState[conversationId].hospitalRecommendation = hospitalRec;
-      const clinicList = (conversationState[conversationId].clinicCandidates || [])
-        .map((name) => `・${name}`)
+      const hospitalListSource =
+        (conversationState[conversationId].hospitalCandidates || []).length > 0
+          ? conversationState[conversationId].hospitalCandidates
+          : conversationState[conversationId].clinicCandidates || [];
+      const clinicList = hospitalListSource
+        .map((item) => `・${item.name}`)
         .join("\n");
       const clinicHint = clinicList
         ? `\n以下の候補から具体名を1つ選んで提示してください。\n${clinicList}\n`
@@ -2964,6 +3166,13 @@ app.post("/api/chat", async (req, res) => {
       }
       aiResponse = ensureOutlookBlock(aiResponse, conversationState[conversationId]);
       aiResponse = ensureFixedWarningBlock(aiResponse);
+      if (level === "🔴") {
+        aiResponse = ensureHospitalBlock(
+          aiResponse,
+          conversationState[conversationId],
+          historyTextForOtc
+        );
+      }
       conversationState[conversationId].summaryText = aiResponse;
       if (level === "🟡") {
         const pharmacyName = conversationState[conversationId].pharmacyRecommendation?.name;

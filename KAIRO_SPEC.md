@@ -206,35 +206,31 @@
 - boolean（true/false）での位置情報管理は禁止。
 - 位置情報は可能な限り 100% に近づける（成功率最大化）。
 - 位置情報が取れなくても会話は止めない。
-- ただし「現在地取得済み」表示は usable のみ。
+- ただし「📍 現在地を取得しました」表示は usable のみ。
 - ユーザーに現在地をテキスト入力で聞かない。
 - 失敗理由をユーザーの責任にしない。
 
 ### 15.1 位置情報ステート設計（必須）
 ```
 type LocationState =
-  | { status: "usable"; lat?: number; lng?: number; city: string; country: string; confidence: "precise" | "fallback" }
-  | { status: "usable_fallback"; lat?: number; lng?: number; city: string; country: string; confidence: "fallback" };
+  | { status: "requesting" }
+  | { status: "usable"; lat: number; lng: number; accuracy?: number; ts?: number }
+  | { status: "failed"; reason?: "denied" | "timeout" | "error" };
 ```
 
 ### 15.2 正規化関数（必須）
 すべての生locationは必ずこの関数を通す。
 ```
 function normalizeLocation(raw: any): LocationState {
-  if (!raw) return { status: "usable_fallback", city: "unknown", country: "JP", confidence: "fallback" };
-  if (raw.status === "usable" && raw.city && raw.country) {
-    return { status: "usable", city: raw.city, country: raw.country, confidence: raw.confidence || "precise", lat: raw.lat, lng: raw.lng };
+  if (!raw) return { status: "requesting" };
+  if (raw.status === "failed" || raw.error) {
+    return { status: "failed", reason: raw.reason || raw.error || "error" };
   }
-  if (raw.status === "usable_fallback" && raw.city && raw.country) {
-    return { status: "usable_fallback", city: raw.city, country: raw.country, confidence: "fallback", lat: raw.lat, lng: raw.lng };
+  if ((raw.status === "usable" || raw.status === "requesting" || raw.lat || raw.lng) && raw.lat && raw.lng) {
+    return { status: "usable", lat: raw.lat, lng: raw.lng, accuracy: raw.accuracy, ts: raw.ts };
   }
-  if (raw.city) {
-    return { status: "usable", city: raw.city, country: raw.country || "JP", confidence: "fallback", lat: raw.lat, lng: raw.lng };
-  }
-  if (raw.country) {
-    return { status: "usable", city: "unknown", country: raw.country, confidence: "fallback", lat: raw.lat, lng: raw.lng };
-  }
-  return { status: "usable_fallback", city: "unknown", country: "JP", confidence: "fallback" };
+  if (raw.status === "requesting") return { status: "requesting" };
+  return { status: "failed", reason: "error" };
 }
 ```
 
@@ -243,7 +239,7 @@ function normalizeLocation(raw: any): LocationState {
 function initConversationState(input?: Partial<State>): State {
   return {
     conversationId: input?.conversationId ?? generateId(),
-    location: input?.location ?? { status: "usable_fallback", city: "unknown", country: "JP", confidence: "fallback" },
+    location: input?.location ?? { status: "requesting" },
     clientMeta: input?.clientMeta ?? {},
   };
 }
@@ -251,22 +247,23 @@ function initConversationState(input?: Partial<State>): State {
 - 未初期化代入は禁止。必ず factory 経由で生成する。
 - `state.location.xxx = ...` の直接代入は禁止（全体置換のみ）。
 
-### 15.4 usable / usable_fallback の条件（厳守）
-- 以下のいずれかが成立した時点で usable として確定：
-  - city が取得できた
-  - country が取得できた
-  - IP / locale / timezone から地域推定ができた
-  - 上記すべて失敗時でもデフォルト地域（例：JP）を設定
-- requesting / partial / failed のまま UI に出すことは禁止
+### 15.4 usable の条件（厳守）
+- lat と lng が取得できた時点で usable に確定する。
+- city / reverse geocode / timestamp は一切条件に含めない。
 
 ### 15.5 取得フロー（重要）
 - 初回ロード時に自動で取得を開始する。
-- requesting / partial 状態は最大 3 秒まで。
-- 3 秒経過で必ず `usable_fallback` に確定し、推定地域をセット。
+- requesting 状態は最大 5 秒まで。
+- 5 秒経過で必ず state を確定させる：
+  - lat/lng がある → usable
+  - ない → failed
 
 ### 15.6 UI表示ルール（厳守）
-- 「📍 現在地取得済み」以外の文言を表示しない。
-- usable / usable_fallback は UI 上同一扱い。
+- usable の場合：
+  - 「📍 現在地を取得しました」を表示する。
+- failed の場合：
+  - 「📍 現在地を確認できませんでした（一般的な案内になります）」を一度だけ表示する。
+- requesting は UI に中間状態を出さない。
 
 ### 15.7 位置情報取得UI（必須）
 - 初回のみ以下の文言を必ず一度だけ表示（改変禁止）：
@@ -278,18 +275,44 @@ function initConversationState(input?: Partial<State>): State {
 - 初回のみ permission UI を出し、その後は裏で retry。
 
 ### 15.8 フォールバック設計
-- 位置取得の成否をユーザーに説明しない。
 - どの状態でも会話は通常進行。
-- 案内文は以下に統一：
-  - 「現在地周辺で一般的に使われる選択肢をご案内します。」
+- failed でも会話は止めない。
 
 ### 15.9 判断ロジック（最重要）
 ```
 function canRecommendSpecificPlace(location: LocationState) {
-  return location.status === "usable" || location.status === "usable_fallback";
+  return location.status === "usable";
 }
 ```
-- usable / usable_fallback → 具体名OK
+- usable → 具体名OK
+
+### 15.10 医療施設案内（city 非依存・強制案内）
+- 施設案内の判断基準は lat / lng のみ。
+- usable（lat/lng あり）なら必ず案内する。
+- city / country / locality は判断ロジックに使わない（表示のみ）。
+- 検索範囲は半径 500m〜1km。
+- 対象カテゴリ：
+  - GP：clinic / general practitioner / medical clinic
+  - 病院：hospital / medical centre
+  - 薬局（SG）：pharmacy / Watsons / Guardian
+- 表示方法：
+  - 「近くで行きやすい場所を案内します」を必ず入れる
+  - 候補は最大3件、距離が近い順、1件目は「おすすめ」
+  - Google Maps をワンタップで開けるリンクを必ず付ける（lat/lng + query）
+- city 未取得を理由に案内中止しない
+- 「現在地が取得できていないため〜」等の文言は禁止
+
+### 15.10 施設案内の検索ルール（必須）
+- 施設案内の判断基準は lat / lng のみ。
+- city / country / locality は判断に使用しない（表示用途のみ）。
+- 検索半径は 500m〜1km。
+- カテゴリ指定：
+  - GP：clinic / general practitioner / medical clinic
+  - 薬局（シンガポール）：pharmacy / Watsons / Guardian
+  - 病院：hospital / medical centre
+- 候補は最大3件、距離が近い順。
+- 1件目は「おすすめ」と明示する。
+- Google Maps のリンクを必ず付ける（ワンタップで開ける）。
 
 #### 🟡（注意レベル）の追加ブロック
 🟡の場合は、以下を必ず追加する：
@@ -300,15 +323,19 @@ function canRecommendSpecificPlace(location: LocationState) {
   - 商品名は「例示」として2〜3件提示する（断定禁止）
   - 具体的な薬名は「一般名＋商品名」で示す
   - 薬局名は具体名で1件提示する
+  - 「近くで行きやすい場所を案内します」は使わない
+  - 候補は最大2件（おすすめ1件＋代替1件）
+  - Google Maps のリンクはおすすめ1件にのみ付ける
   - 「一般的に」は免責目的として末尾にのみ使用する
   - ✅ 今すぐやること と内容が被らない
 
 #### 🟡 OTCブロックの構造（必須）
-1. 薬局名（具体名）
-2. 理由（1行）
-3. 薬名（例示：一般名＋商品名、2〜3件）
-4. 用途（各1行）
-5. 注意書き（必須・毎回表示）
+1. 今は薬局でよい理由（1文）
+2. おすすめ薬局（1件・太字、地図リンク付き）
+3. 代替薬局（あれば1件、リンクなし）
+4. なぜここか（箇条書き2〜3個）
+5. 薬名（例示：一般名＋商品名、最大2件）
+6. 注意書き（必須・毎回表示）
 
 #### 注意書き（必須・毎回表示）
 以下の要素を必ず含める（表現は毎回変える）：
@@ -334,6 +361,14 @@ function canRecommendSpecificPlace(location: LocationState) {
 2. ⚠️ Kairoが気になっているポイント
 3. 🏥 Kairoの判断
 4. 💬 最後に
+
+#### 🏥 Kairoの判断（施設案内・必須）
+- 判断は1文で言い切る（なぜ今はGPなのか）。
+- おすすめは1件のみ（太字）。
+- なぜここか（不安向け理由を箇条書き2〜3個）。
+- 代替は1件まで。
+- Google Maps のリンクはおすすめ1件にのみ付ける。
+- city が取れないことを理由に案内を中止しない。
 
 ## 9. 「🤝 今の状態について」の出力順
 順番を厳守：
