@@ -2080,6 +2080,42 @@ function normalizePainScoreInput(input) {
   return Math.min(parsed, 10);
 }
 
+function updatePainScoreState(state, rawScore, weight, rawAnswer) {
+  if (!state) return;
+  if (rawScore === null || rawScore === undefined) {
+    return;
+  }
+  state.lastPainScore = rawScore;
+  state.lastPainWeight = weight ?? state.lastPainWeight ?? 1.5;
+  if (!state.slotFilled.pain_score) {
+    state.slotFilled.pain_score = true;
+  }
+  const normalized =
+    state.slotNormalized.pain_score ||
+    buildNormalizedAnswer("pain_score", rawAnswer ?? String(rawScore), 0, rawScore) || {
+      slotId: "pain_score",
+      rawAnswer: rawAnswer ?? String(rawScore),
+      riskLevel: RISK_LEVELS.MEDIUM,
+    };
+  state.slotNormalized.pain_score = normalized;
+  state.lastNormalizedAnswer = normalized;
+}
+
+function ensurePainScoreFallback(state) {
+  if (!state) return;
+  if (Number.isFinite(state.lastPainScore)) return;
+  updatePainScoreState(state, 5, 1.5, "5");
+}
+
+function finalizeRiskLevel(state) {
+  if (!state) return "🟡";
+  if (state.decisionLevel) return state.decisionLevel;
+  ensurePainScoreFallback(state);
+  const level = computeUrgencyLevel(state.questionCount, state.totalScore).level;
+  state.decisionLevel = level;
+  return level;
+}
+
 function buildNormalizedAnswer(slotId, rawAnswer, selectedIndex, rawScore) {
   if (!slotId) return null;
   if (slotId === "pain_score") {
@@ -2722,10 +2758,6 @@ function computeUrgencyLevel(questionCount, totalScore) {
 
 function judgeDecision(state) {
   console.log("[DEBUG] judge function entered");
-  const { ratio, level } = computeUrgencyLevel(
-    state.questionCount,
-    state.totalScore
-  );
   const confidence = state.confidence;
   const slotsFilledCount = countFilledSlots(state.slotFilled);
   const askedSlotsCount = countAskedSlots(state.askedSlots);
@@ -2746,7 +2778,7 @@ function judgeDecision(state) {
     getMissingSlots(state.slotFilled).join(",")
   );
 
-  return { ratio, level, confidence, shouldJudge, slotsFilledCount };
+  return { ratio: 0, level: "🟡", confidence, shouldJudge, slotsFilledCount };
 }
 
 function shouldAvoidSummary(text, shouldJudge) {
@@ -2878,23 +2910,24 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].questionCount += 1;
       conversationState[conversationId].totalScore += weight;
       conversationState[conversationId].expectsPainScore = false;
-      conversationState[conversationId].lastPainScore = rawScore;
-      conversationState[conversationId].lastPainWeight = weight;
+      updatePainScoreState(
+        conversationState[conversationId],
+        rawScore,
+        weight,
+        rawScore !== null ? String(rawScore) : ""
+      );
 
       const type = conversationState[conversationId].lastQuestionType;
       if (type && SLOT_KEYS.includes(type)) {
         if (!conversationState[conversationId].slotFilled[type]) {
           conversationState[conversationId].slotFilled[type] = true;
         }
-        let normalized = buildNormalizedAnswer(
+        const normalized = buildNormalizedAnswer(
           type,
           rawScore !== null ? String(rawScore) : "",
           0,
           rawScore
-        );
-        if (!normalized) {
-          normalized = { slotId: type, rawAnswer: rawScore !== null ? String(rawScore) : "", riskLevel: RISK_LEVELS.MEDIUM };
-        }
+        ) || { slotId: type, rawAnswer: rawScore !== null ? String(rawScore) : "", riskLevel: RISK_LEVELS.MEDIUM };
         conversationState[conversationId].slotNormalized[type] = normalized;
         conversationState[conversationId].lastNormalizedAnswer = normalized;
         conversationState[conversationId].confidence = computeConfidenceFromSlots(
@@ -3087,7 +3120,7 @@ app.post("/api/chat", async (req, res) => {
       decisionAllowed &&
       !(conversationState[conversationId].causeDetailPending && !conversationState[conversationId].causeDetailAnswered);
     const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled);
-    const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n合計スコア: ${conversationState[conversationId].totalScore}\n最大スコア: ${conversationState[conversationId].questionCount * 2}\n緊急度比率: ${ratio.toFixed(2)}\n判定: ${level}\n判断スロット埋まり数: ${slotsFilledCount}/6\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が7以上、または判断スロットが6つ埋まった時点で必ず判定・まとめへ移行する。\n※スコアや計算はユーザーに表示しないこと。最終判断は必ずこの判定に従うこと。`;
+    const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n合計スコア: ${conversationState[conversationId].totalScore}\n最大スコア: ${conversationState[conversationId].questionCount * 2}\n判断スロット埋まり数: ${slotsFilledCount}/6\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が7以上、または判断スロットが6つ埋まった時点で必ず判定・まとめへ移行する。\n※スコアや計算はユーザーに表示しないこと。最終判断はまとめ直前の1回のみ実行すること。`;
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini", // Cost-effective model
       messages: [
@@ -3102,10 +3135,7 @@ app.post("/api/chat", async (req, res) => {
 
     // 判定確定トリガー発動時は、まとめを強制生成（初回のみ）
     if (shouldJudgeNow && !conversationState[conversationId].summaryShown) {
-      const { level } = computeUrgencyLevel(
-        conversationState[conversationId].questionCount,
-        conversationState[conversationId].totalScore
-      );
+      const level = finalizeRiskLevel(conversationState[conversationId]);
       const historyTextForOtc = conversationHistory[conversationId]
         .filter((msg) => msg.role === "user")
         .map((msg) => msg.content)
