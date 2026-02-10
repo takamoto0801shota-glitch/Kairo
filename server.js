@@ -752,40 +752,15 @@ const conversationHistory = {};
 const conversationState = {};
 
 function normalizeLocation(raw) {
-  if (!raw) return { status: "requesting" };
-  if (raw.status === "failed" || raw.error) {
-    return { status: "failed", reason: raw.reason || raw.error || "error" };
-  }
-  if ((raw.status === "usable" || raw.status === "requesting" || raw.lat || raw.lng) && raw.lat && raw.lng) {
+  if (!raw) return null;
+  if (raw.lat != null && raw.lng != null) {
     return {
-      status: "usable",
       lat: raw.lat,
       lng: raw.lng,
-      accuracy: raw.accuracy,
       ts: raw.ts,
-      city: raw.city,
-      country: raw.country,
-      permission: raw.permission,
-      sessionId: raw.sessionId,
     };
   }
-  if (raw.status === "requesting") {
-    return { status: "requesting" };
-  }
-  return { status: "failed", reason: "error" };
-}
-
-function isLocationUsable(location, clientMeta) {
-  const fresh =
-    clientMeta?.locationLastSuccessTs &&
-    Date.now() - clientMeta.locationLastSuccessTs <= 10000;
-  const sameSession =
-    location?.sessionId && clientMeta?.locationSessionId
-      ? location.sessionId === clientMeta.locationSessionId
-      : true;
-  const noErrorAfterSuccess =
-    (clientMeta?.locationLastSuccessTs || 0) > (clientMeta?.locationLastErrorTs || 0);
-  return location?.lat != null && location?.lng != null && fresh && sameSession && noErrorAfterSuccess;
+  return null;
 }
 
 function canRecommendSpecificPlace(location) {
@@ -793,7 +768,7 @@ function canRecommendSpecificPlace(location) {
 }
 
 function canRecommendSpecificPlaceFinal(state) {
-  return state?.locationUsable === true;
+  return state?.locationSnapshot?.lat != null && state?.locationSnapshot?.lng != null;
 }
 
 function initConversationState(input = {}) {
@@ -837,12 +812,12 @@ function initConversationState(input = {}) {
     followUpDestinationName: null,
     locationPromptShown: false,
     locationStateFinal: input.locationStateFinal || null,
-    location: input.location || { status: "requesting" },
+    location: input.location || null,
     clinicCandidates: [],
     hospitalCandidates: [],
     pharmacyCandidates: [],
     clientMeta: input.clientMeta || {},
-    locationUsable: false,
+    locationSnapshot: null,
     summaryText: null,
     expectsPainScore: false,
     lastPainScore: null,
@@ -1234,24 +1209,20 @@ async function reverseGeocodeWithRetry(location, retries = 2) {
 
 async function resolveLocationContext(state, clientMeta) {
   if (!state) return;
-  if (state?.locationStateFinal && state.locationContext) {
+  if (state?.locationSnapshot && state.locationContext) {
     return;
   }
-  if (state?.locationUsable && state?.location?.lat && state?.location?.lng) {
+  if (state?.locationSnapshot?.lat && state?.locationSnapshot?.lng) {
     const geo = await reverseGeocodeWithRetry(state.location, 2);
     const city = geo?.city || "unknown";
     const country = geo?.country || clientMeta?.country || "JP";
     state.location = {
-      status: "usable",
-      lat: state.location.lat,
-      lng: state.location.lng,
+      lat: state.locationSnapshot.lat,
+      lng: state.locationSnapshot.lng,
       city,
       country,
       confidence: "fallback",
     };
-    if (!state.locationStateFinal) {
-      state.locationStateFinal = "usable";
-    }
     state.locationContext = {
       source: "gps",
       ...(geo || {}),
@@ -1289,11 +1260,11 @@ async function resolveLocationContext(state, clientMeta) {
 
 async function resolveClinicCandidates(state) {
   if (!canRecommendSpecificPlaceFinal(state)) return [];
-  if (!state?.location?.lat || !state?.location?.lng) return [];
+  if (!state?.locationSnapshot?.lat || !state?.locationSnapshot?.lng) return [];
   const keywords = ["clinic", "general practitioner", "medical clinic"];
   const results = [];
   for (const keyword of keywords) {
-    const places = await fetchNearbyPlaces(state.location, {
+    const places = await fetchNearbyPlaces(state.locationSnapshot, {
       keyword,
       type: "doctor",
       rankByDistance: true,
@@ -1301,7 +1272,7 @@ async function resolveClinicCandidates(state) {
     results.push(...places);
   }
   if (results.length === 0) {
-    const fallback = await fetchNearbyPlaces(state.location, {
+    const fallback = await fetchNearbyPlaces(state.locationSnapshot, {
       type: "doctor",
       rankByDistance: true,
     });
@@ -1316,11 +1287,11 @@ async function resolveClinicCandidates(state) {
 
 async function resolveHospitalCandidates(state) {
   if (!canRecommendSpecificPlaceFinal(state)) return [];
-  if (!state?.location?.lat || !state?.location?.lng) return [];
+  if (!state?.locationSnapshot?.lat || !state?.locationSnapshot?.lng) return [];
   const keywords = ["hospital", "medical centre"];
   const results = [];
   for (const keyword of keywords) {
-    const places = await fetchNearbyPlaces(state.location, {
+    const places = await fetchNearbyPlaces(state.locationSnapshot, {
       keyword,
       type: "hospital",
       rankByDistance: true,
@@ -1328,7 +1299,7 @@ async function resolveHospitalCandidates(state) {
     results.push(...places);
   }
   if (results.length === 0) {
-    const fallback = await fetchNearbyPlaces(state.location, {
+    const fallback = await fetchNearbyPlaces(state.locationSnapshot, {
       type: "hospital",
       rankByDistance: true,
     });
@@ -1339,11 +1310,11 @@ async function resolveHospitalCandidates(state) {
 
 async function resolvePharmacyCandidates(state) {
   if (!canRecommendSpecificPlaceFinal(state)) return [];
-  if (!state?.location?.lat || !state?.location?.lng) return [];
+  if (!state?.locationSnapshot?.lat || !state?.locationSnapshot?.lng) return [];
   const keywords = ["pharmacy", "Watsons", "Guardian"];
   const results = [];
   for (const keyword of keywords) {
-    const places = await fetchNearbyPlaces(state.location, {
+    const places = await fetchNearbyPlaces(state.locationSnapshot, {
       keyword,
       type: "pharmacy",
       rankByDistance: true,
@@ -1351,7 +1322,7 @@ async function resolvePharmacyCandidates(state) {
     results.push(...places);
   }
   if (results.length === 0) {
-    const fallback = await fetchNearbyPlaces(state.location, {
+    const fallback = await fetchNearbyPlaces(state.locationSnapshot, {
       type: "pharmacy",
       rankByDistance: true,
     });
@@ -1411,7 +1382,7 @@ function buildPharmacyRecommendation(state, locationContext, pharmacyCandidates)
     };
   }
   const fallbackList = FALLBACK_PHARMACY_BY_COUNTRY.Japan.map((entry) => entry.split(" ")[0]);
-  const fallbackCandidates = buildFallbackPlaces(fallbackList, state?.location);
+  const fallbackCandidates = buildFallbackPlaces(fallbackList, state?.locationSnapshot);
   const name = fallbackCandidates[0]?.name || "近くの薬局";
   return {
     name,
@@ -1448,7 +1419,7 @@ function buildHospitalRecommendationDetail(state, locationContext, clinicCandida
     };
   }
   const fallbackList = (FALLBACK_HOSPITAL_BY_COUNTRY.Japan || []).map((item) => item.name);
-  const fallbackCandidates = buildFallbackPlaces(fallbackList, state?.location);
+  const fallbackCandidates = buildFallbackPlaces(fallbackList, state?.locationSnapshot);
   return {
     name: fallbackCandidates[0]?.name || "近くの医療機関",
     mapsUrl: fallbackCandidates[0]?.mapsUrl || "",
@@ -2827,26 +2798,28 @@ app.post("/api/chat", async (req, res) => {
       ];
     }
     const state = getOrInitConversationState(conversationId);
-    if (!state.location) {
-      state.location = { status: "requesting" };
-    }
     console.log("[DEBUG] request init", {
       conversationId,
-      locationState: state.location?.status,
       hasConversationState: !!conversationState[conversationId],
+      hasLocationSnapshot: !!state.locationSnapshot,
     });
     if (location) {
-      state.location = normalizeLocation(location);
+      const normalized = normalizeLocation(location);
+      if (normalized && !state.locationSnapshot) {
+        state.locationSnapshot = normalized;
+      }
     }
     if (clientMeta) {
       state.clientMeta = clientMeta;
       if (clientMeta.locationPromptShown === true) {
         state.locationPromptShown = true;
       }
-    }
-    state.locationUsable = isLocationUsable(state.location, state.clientMeta || {});
-    if (state.locationUsable) {
-      state.locationStateFinal = "usable";
+      if (clientMeta.locationSnapshot && !state.locationSnapshot) {
+        const normalized = normalizeLocation(clientMeta.locationSnapshot);
+        if (normalized) {
+          state.locationSnapshot = normalized;
+        }
+      }
     }
 
     const locationPromptMessage = null;
@@ -2871,8 +2844,7 @@ app.post("/api/chat", async (req, res) => {
         normalizedAnswer: state.lastNormalizedAnswer || null,
         locationPromptMessage,
         locationRePromptMessage,
-        locationState: state.location,
-        locationStateFinal: state.locationStateFinal,
+        locationSnapshot: state.locationSnapshot,
         conversationId,
       });
     }
@@ -3560,8 +3532,7 @@ app.post("/api/chat", async (req, res) => {
       followUpMessage,
       locationPromptMessage,
       locationRePromptMessage: locationRePromptBeforeSummary,
-      locationState: conversationState[conversationId].location,
-      locationStateFinal: conversationState[conversationId].locationStateFinal,
+      locationSnapshot: conversationState[conversationId].locationSnapshot,
       conversationId,
     });
   } catch (error) {

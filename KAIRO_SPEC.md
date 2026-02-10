@@ -202,35 +202,31 @@
 
 ## 15. 位置情報と受診先の具体提示（必須）
 - UI表示・会話生成・判断ロジックを完全に分離する。
-- 位置情報は一切信用しない前提で扱う。
-- boolean（true/false）での位置情報管理は禁止。
-- 位置情報は可能な限り 100% に近づける（成功率最大化）。
+- 位置情報は「LocationSnapshot」として一度だけ確定保存する。
+- Snapshot はセッション終了まで上書き・初期化・破棄しない。
 - 位置情報が取れなくても会話は止めない。
-- ただし「📍 現在地を取得しました」表示は usable のみ。
+- 「📍現在地取得済み」は lat/lng のみで判定する。
 - ユーザーに現在地をテキスト入力で聞かない。
 - 失敗理由をユーザーの責任にしない。
 
-### 15.1 位置情報ステート設計（必須）
+### 15.1 LocationSnapshot（必須）
 ```
-type LocationState =
-  | { status: "requesting" }
-  | { status: "usable"; lat: number; lng: number; accuracy?: number; ts?: number }
-  | { status: "failed"; reason?: "denied" | "timeout" | "error" };
+type LocationSnapshot = {
+  lat: number;
+  lng: number;
+  ts?: number;
+};
 ```
 
 ### 15.2 正規化関数（必須）
 すべての生locationは必ずこの関数を通す。
 ```
-function normalizeLocation(raw: any): LocationState {
-  if (!raw) return { status: "requesting" };
-  if (raw.status === "failed" || raw.error) {
-    return { status: "failed", reason: raw.reason || raw.error || "error" };
+function normalizeLocation(raw: any): LocationSnapshot | null {
+  if (!raw) return null;
+  if (raw.lat != null && raw.lng != null) {
+    return { lat: raw.lat, lng: raw.lng, ts: raw.ts };
   }
-  if ((raw.status === "usable" || raw.status === "requesting" || raw.lat || raw.lng) && raw.lat && raw.lng) {
-    return { status: "usable", lat: raw.lat, lng: raw.lng, accuracy: raw.accuracy, ts: raw.ts };
-  }
-  if (raw.status === "requesting") return { status: "requesting" };
-  return { status: "failed", reason: "error" };
+  return null;
 }
 ```
 
@@ -239,7 +235,7 @@ function normalizeLocation(raw: any): LocationState {
 function initConversationState(input?: Partial<State>): State {
   return {
     conversationId: input?.conversationId ?? generateId(),
-    location: input?.location ?? { status: "requesting" },
+    locationSnapshot: input?.locationSnapshot ?? null,
     clientMeta: input?.clientMeta ?? {},
   };
 }
@@ -247,23 +243,20 @@ function initConversationState(input?: Partial<State>): State {
 - 未初期化代入は禁止。必ず factory 経由で生成する。
 - `state.location.xxx = ...` の直接代入は禁止（全体置換のみ）。
 
-### 15.4 usable の条件（厳守）
-- lat と lng が取得できた時点で usable に確定する。
+### 15.4 Snapshot の確定条件（厳守）
+- lat と lng が取得できた時点で snapshot を確定する。
 - city / reverse geocode / timestamp は一切条件に含めない。
 
 ### 15.5 取得フロー（重要）
 - 初回ロード時に自動で取得を開始する。
-- requesting 状態は最大 5 秒まで。
-- 5 秒経過で必ず state を確定させる：
-  - lat/lng がある → usable
-  - ない → failed
+- lat/lng が取得できた時点で snapshot を確定する。
+- snapshot が無い限りは「未取得」扱いを維持する。
 
 ### 15.6 UI表示ルール（厳守）
-- usable の場合：
-  - 「📍 現在地を取得しました」を表示する。
-- failed の場合：
-  - 「📍 現在地を確認できませんでした（一般的な案内になります）」を一度だけ表示する。
-- requesting は UI に中間状態を出さない。
+- lat/lng がある場合：
+  - 「📍現在地取得済み」を表示する。
+- lat/lng がない場合：
+  - 「📍現在地を取得できていません」を表示する。
 
 ### 15.7 位置情報取得UI（必須）
 - 初回のみ以下の文言を必ず一度だけ表示（改変禁止）：
@@ -276,19 +269,19 @@ function initConversationState(input?: Partial<State>): State {
 
 ### 15.8 フォールバック設計
 - どの状態でも会話は通常進行。
-- failed でも会話は止めない。
+- snapshot がない場合のみ案内を停止する。
 
 ### 15.9 判断ロジック（最重要）
 ```
-function canRecommendSpecificPlace(location: LocationState) {
-  return location.status === "usable";
+function canRecommendSpecificPlace(snapshot: LocationSnapshot | null) {
+  return snapshot?.lat != null && snapshot?.lng != null;
 }
 ```
-- usable → 具体名OK
+- snapshot がある場合のみ → 具体名OK
 
 ### 15.10 医療施設案内（city 非依存・強制案内）
 - 施設案内の判断基準は lat / lng のみ。
-- usable（lat/lng あり）なら必ず案内する。
+- snapshot（lat/lng あり）なら必ず案内する。
 - city / country / locality は判断ロジックに使わない（表示のみ）。
 - 検索範囲は半径 500m〜1km。
 - 対象カテゴリ：

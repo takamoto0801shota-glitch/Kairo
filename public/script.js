@@ -35,13 +35,7 @@ const LOCATION_REPROMPT_MESSAGE =
   "より近くて適切な場所をご案内するため、\n現在地の共有をもう一度お願いしてもいいですか？";
 const LOCATION_PROMPT_KEY = "kairo_location_prompt_shown";
 const LOCATION_RETRY_KEY = "kairo_location_retry_count";
-const LOCATION_FINAL_KEY = "kairo_location_state_final";
-const LOCATION_PENDING_KEY = "kairo_location_pending_start";
-const LOCATION_SESSION_KEY = "kairo_location_session_id";
-const LOCATION_PENDING_TIMEOUT_MS = 5000;
-const LOCATION_USABLE_MAX_AGE_MS = 10000;
-const LOCATION_LAST_SUCCESS_KEY = "kairo_location_last_success_ts";
-const LOCATION_LAST_ERROR_KEY = "kairo_location_last_error_ts";
+const LOCATION_SNAPSHOT_KEY = "kairo_location_snapshot";
 
 function renderQuestionPayload(payload) {
   if (!payload || !payload.question || !Array.isArray(payload.introTemplateIds)) {
@@ -86,22 +80,11 @@ function storeLocation(location) {
 }
 
 function normalizeLocation(raw) {
-  if (!raw) return { status: "requesting" };
-  if (raw.status === "failed" || raw.error) {
-    return { status: "failed", reason: raw.reason || raw.error || "error" };
+  if (!raw) return null;
+  if (raw.lat != null && raw.lng != null) {
+    return { lat: raw.lat, lng: raw.lng, ts: raw.ts };
   }
-  if ((raw.status === "usable" || raw.status === "requesting" || raw.lat || raw.lng) && raw.lat && raw.lng) {
-    return {
-      status: "usable",
-      lat: raw.lat,
-      lng: raw.lng,
-      accuracy: raw.accuracy,
-      ts: raw.ts,
-      sessionId: raw.sessionId,
-    };
-  }
-  if (raw.status === "requesting") return { status: "requesting" };
-  return { status: "failed", reason: "error" };
+  return null;
 }
 
 function updateLocationStatusIndicator(status) {
@@ -112,7 +95,7 @@ function updateLocationStatusIndicator(status) {
     target.textContent = "📍現在地を取得済み";
   } else {
     target.style.display = "inline-flex";
-    target.textContent = "📍現在地を確認できていません";
+    target.textContent = "📍現在地を取得できていません";
   }
   const button = document.getElementById("locationButton");
   if (button) {
@@ -121,76 +104,46 @@ function updateLocationStatusIndicator(status) {
   }
 }
 
-function getLocationSessionId() {
-  let id = sessionStorage.getItem(LOCATION_SESSION_KEY);
-  if (!id) {
-    id = `loc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    sessionStorage.setItem(LOCATION_SESSION_KEY, id);
+function getLocationSnapshot() {
+  try {
+    const raw = sessionStorage.getItem(LOCATION_SNAPSHOT_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (_) {
+    return null;
   }
-  return id;
 }
 
-function isLocationUsable(location) {
-  const loc = normalizeLocation(location);
-  const lastSuccess = Number(sessionStorage.getItem(LOCATION_LAST_SUCCESS_KEY) || 0);
-  const lastError = Number(sessionStorage.getItem(LOCATION_LAST_ERROR_KEY) || 0);
-  const sameSession = loc?.sessionId && loc.sessionId === getLocationSessionId();
-  const fresh = lastSuccess && Date.now() - lastSuccess <= LOCATION_USABLE_MAX_AGE_MS;
-  const noErrorAfterSuccess = lastSuccess > 0 && lastError <= lastSuccess;
-  return loc?.lat != null && loc?.lng != null && sameSession && fresh && noErrorAfterSuccess;
-}
-
-function getFinalLocationState() {
-  return sessionStorage.getItem(LOCATION_FINAL_KEY);
-}
-
-function setFinalLocationState(finalState) {
-  sessionStorage.setItem(LOCATION_FINAL_KEY, finalState);
-}
-
-function readLocationStateFinal() {
-  return sessionStorage.getItem(LOCATION_FINAL_KEY);
+function setLocationSnapshot(snapshot) {
+  try {
+    sessionStorage.setItem(LOCATION_SNAPSHOT_KEY, JSON.stringify(snapshot));
+  } catch (_) {
+    // ignore
+  }
 }
 
 function getLocationPayload() {
-  return normalizeLocation(getStoredLocation());
+  return getLocationSnapshot();
 }
 
 function requestLocationOnAction() {
   try {
     if (!navigator.geolocation) return;
     if (window.location.protocol !== "https:" && window.location.hostname !== "localhost") return;
-    if (readLocationStateFinal()) return;
-    sessionStorage.setItem(LOCATION_PENDING_KEY, String(Date.now()));
-    storeLocation({ status: "requesting" });
+    if (getLocationSnapshot()) return;
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        const payload = {
-          status: "usable",
+        const snapshot = {
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
-          accuracy: pos.coords.accuracy,
           ts: Date.now(),
-          sessionId: getLocationSessionId(),
         };
-        storeLocation(payload);
-        sessionStorage.setItem(LOCATION_LAST_SUCCESS_KEY, String(Date.now()));
-        if (!readLocationStateFinal()) {
-          setFinalLocationState("usable");
-        }
+        setLocationSnapshot(snapshot);
+        storeLocation(snapshot);
         updateLocationStatusIndicator("usable");
       },
       (err) => {
-        const payload = {
-          status: "failed",
-          reason: err?.code === 1 ? "denied" : err?.code === 3 ? "timeout" : "error",
-          sessionId: getLocationSessionId(),
-        };
-        storeLocation(payload);
-        sessionStorage.setItem(LOCATION_LAST_ERROR_KEY, String(Date.now()));
-        if (!readLocationStateFinal()) {
-          setFinalLocationState("failed");
-        }
+        storeLocation({ error: err?.code === 1 ? "denied" : err?.code === 3 ? "timeout" : "error" });
         updateLocationStatusIndicator("failed");
       },
       { enableHighAccuracy: false, timeout: 5000, maximumAge: 600000 }
@@ -201,32 +154,18 @@ function requestLocationOnAction() {
 }
 
 function requestLocationWithRetry(attempt = 1) {
-  if (readLocationStateFinal()) return;
+  if (getLocationSnapshot()) return;
   if (attempt > 3) return;
   requestLocationOnAction();
   const delay = 500 + Math.floor(Math.random() * 500);
   setTimeout(() => {
-    const latest = normalizeLocation(getStoredLocation());
-    if (readLocationStateFinal()) return;
+    if (getLocationSnapshot()) return;
     requestLocationWithRetry(attempt + 1);
   }, delay);
 }
 
 function finalizeLocationPendingIfNeeded() {
-  const stored = normalizeLocation(getStoredLocation());
-  if (readLocationStateFinal()) return;
-  const startRaw = sessionStorage.getItem(LOCATION_PENDING_KEY);
-  if (!startRaw) return;
-  const start = Number(startRaw);
-  if (!Number.isFinite(start)) return;
-  if (Date.now() - start < LOCATION_PENDING_TIMEOUT_MS) return;
-  if (isLocationUsable(stored)) {
-    setFinalLocationState("usable");
-    updateLocationStatusIndicator("usable");
-    return;
-  }
-  setFinalLocationState("failed");
-  storeLocation({ status: "failed", reason: "timeout", sessionId: getLocationSessionId() });
+  if (getLocationSnapshot()) return;
   updateLocationStatusIndicator("failed");
 }
 
@@ -279,11 +218,7 @@ function clearHistory() {
   localStorage.removeItem(FIRST_QUESTION_KEY);
   sessionStorage.removeItem("kairo_location");
   sessionStorage.removeItem(LOCATION_PROMPT_KEY);
-  sessionStorage.removeItem(LOCATION_FINAL_KEY);
-  sessionStorage.removeItem(LOCATION_PENDING_KEY);
-  sessionStorage.removeItem(LOCATION_LAST_SUCCESS_KEY);
-  sessionStorage.removeItem(LOCATION_LAST_ERROR_KEY);
-  sessionStorage.removeItem(LOCATION_SESSION_KEY);
+  sessionStorage.removeItem(LOCATION_SNAPSHOT_KEY);
   sessionStorage.setItem("kairo_force_location_prompt", "true");
   // Clear server-side history, then reload to reset UI without DOM再生成
   fetch(CLEAR_URL, {
@@ -820,10 +755,7 @@ async function callOpenAI(message) {
             lang: navigator.language || "",
             tz: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
             locationPromptShown: sessionStorage.getItem(LOCATION_PROMPT_KEY) === "true",
-          locationUsable: isLocationUsable(getStoredLocation()),
-          locationSessionId: getLocationSessionId(),
-          locationLastSuccessTs: Number(sessionStorage.getItem(LOCATION_LAST_SUCCESS_KEY) || 0),
-          locationLastErrorTs: Number(sessionStorage.getItem(LOCATION_LAST_ERROR_KEY) || 0),
+          locationSnapshot: getLocationSnapshot(),
           },
         }),
       });
@@ -928,20 +860,14 @@ async function handleUserInput() {
         hideSummaryCard();
       }
       if (aiResponse.locationState) {
-        const normalized = normalizeLocation(aiResponse.locationState);
-        if (!readLocationStateFinal()) {
-          storeLocation(normalized);
-          if (normalized.status === "usable" || normalized.status === "failed") {
-            setFinalLocationState(normalized.status);
-          }
+        if (aiResponse.locationState?.lat != null && aiResponse.locationState?.lng != null) {
+          const snapshot = { lat: aiResponse.locationState.lat, lng: aiResponse.locationState.lng, ts: Date.now() };
+          setLocationSnapshot(snapshot);
+          storeLocation(snapshot);
+          updateLocationStatusIndicator("usable");
+        } else {
+          updateLocationStatusIndicator("failed");
         }
-        updateLocationStatusIndicator(isLocationUsable(normalized) ? "usable" : "failed");
-      }
-      if (aiResponse.locationStateFinal) {
-        if (!readLocationStateFinal()) {
-          setFinalLocationState(aiResponse.locationStateFinal);
-        }
-        updateLocationStatusIndicator(readLocationStateFinal() === "usable" ? "usable" : "failed");
       }
       } catch (error) {
         // Remove loading message
@@ -974,13 +900,8 @@ function init() {
   // Start fresh without re-rendering history
   hideSummaryCard();
   showInitialMessage();
-  const storedLocation = normalizeLocation(getStoredLocation());
-  const finalState = readLocationStateFinal();
-  const usableNow = isLocationUsable(storedLocation);
-  if (!finalState && (storedLocation?.status === "usable" || storedLocation?.status === "failed")) {
-    setFinalLocationState(storedLocation.status);
-  }
-  updateLocationStatusIndicator(usableNow ? "usable" : "failed");
+  const snapshot = getLocationSnapshot();
+  updateLocationStatusIndicator(snapshot ? "usable" : "failed");
   const forceLocationPrompt = sessionStorage.getItem("kairo_force_location_prompt") === "true";
   if (!sessionStorage.getItem(LOCATION_PROMPT_KEY) || forceLocationPrompt) {
     addMessage(LOCATION_PROMPT_MESSAGE);
@@ -990,7 +911,7 @@ function init() {
     }
   }
   requestLocationWithRetry(1);
-  setTimeout(finalizeLocationPendingIfNeeded, LOCATION_PENDING_TIMEOUT_MS);
+  setTimeout(finalizeLocationPendingIfNeeded, 5000);
 
   // Send button event
   document.getElementById("sendButton").addEventListener("click", () => {
