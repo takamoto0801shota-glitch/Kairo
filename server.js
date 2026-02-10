@@ -765,6 +765,8 @@ function normalizeLocation(raw) {
       ts: raw.ts,
       city: raw.city,
       country: raw.country,
+      permission: raw.permission,
+      sessionId: raw.sessionId,
     };
   }
   if (raw.status === "requesting") {
@@ -773,12 +775,25 @@ function normalizeLocation(raw) {
   return { status: "failed", reason: "error" };
 }
 
+function isLocationUsable(location, clientMeta) {
+  const fresh =
+    clientMeta?.locationLastSuccessTs &&
+    Date.now() - clientMeta.locationLastSuccessTs <= 10000;
+  const sameSession =
+    location?.sessionId && clientMeta?.locationSessionId
+      ? location.sessionId === clientMeta.locationSessionId
+      : true;
+  const noErrorAfterSuccess =
+    (clientMeta?.locationLastSuccessTs || 0) > (clientMeta?.locationLastErrorTs || 0);
+  return location?.lat != null && location?.lng != null && fresh && sameSession && noErrorAfterSuccess;
+}
+
 function canRecommendSpecificPlace(location) {
   return location?.status === "usable";
 }
 
 function canRecommendSpecificPlaceFinal(state) {
-  return state?.locationStateFinal === "usable";
+  return state?.locationUsable === true;
 }
 
 function initConversationState(input = {}) {
@@ -827,6 +842,7 @@ function initConversationState(input = {}) {
     hospitalCandidates: [],
     pharmacyCandidates: [],
     clientMeta: input.clientMeta || {},
+    locationUsable: false,
     summaryText: null,
     expectsPainScore: false,
     lastPainScore: null,
@@ -1221,7 +1237,7 @@ async function resolveLocationContext(state, clientMeta) {
   if (state?.locationStateFinal && state.locationContext) {
     return;
   }
-  if (state?.location?.lat && state?.location?.lng) {
+  if (state?.locationUsable && state?.location?.lat && state?.location?.lng) {
     const geo = await reverseGeocodeWithRetry(state.location, 2);
     const city = geo?.city || "unknown";
     const country = geo?.country || clientMeta?.country || "JP";
@@ -2654,6 +2670,62 @@ function matchAnswerToOption(answer, options) {
   return null;
 }
 
+function mapFreeTextToOptionIndex(answer, options, type) {
+  if (!answer || !Array.isArray(options) || options.length === 0) return null;
+  const text = (answer || "").trim();
+  if (!text) return null;
+  const severe = /強い|激しい|ひどい|高熱|息苦|意識|吐き|ぐったり|動けない|我慢でき|失神/;
+  const mild = /少し|軽い|ちょっと|わずか|違和感|気になる/;
+  const none = /ない|特にない|なし|思い当たらない/;
+  const unknown = /分からない|わからない|不明|はっきりしない|曖昧/;
+  const causeHints = /周り|人混み|冷房|咳|風邪|感染|寝不足|ストレス|運動|飲酒|食べ|仕事|花粉/;
+
+  if (type === "cause_category") {
+    if (causeHints.test(text)) return 1;
+    if (unknown.test(text)) return Math.min(2, options.length - 1);
+    if (none.test(text)) return 0;
+    return options.length >= 3 ? 1 : 0;
+  }
+
+  if (type === "associated_symptoms") {
+    if (none.test(text)) return 0;
+    if (severe.test(text)) return Math.min(2, options.length - 1);
+    return options.length >= 3 ? 1 : 0;
+  }
+
+  if (type === "daily_impact") {
+    if (/動けない|寝込|起き上がれ/.test(text)) return Math.min(2, options.length - 1);
+    if (mild.test(text)) return options.length >= 3 ? 1 : 0;
+    return 0;
+  }
+
+  if (type === "worsening") {
+    if (/悪化|ひどく|強く|増え/.test(text)) return Math.min(2, options.length - 1);
+    if (/変わらない|同じ|横ばい/.test(text)) return options.length >= 3 ? 1 : 0;
+    if (/良く|和らぎ|軽く/.test(text)) return 0;
+    return options.length >= 3 ? 1 : 0;
+  }
+
+  if (options.length === 2) {
+    return severe.test(text) ? 1 : 0;
+  }
+  if (options.length === 3) {
+    if (none.test(text)) return 0;
+    if (severe.test(text)) return 2;
+    if (mild.test(text)) return 1;
+    return 1;
+  }
+  return null;
+}
+
+function classifyAnswerToOption(answer, options, type) {
+  const exact = matchAnswerToOption(answer, options);
+  if (exact !== null) return { index: exact, usedFreeText: false };
+  const mapped = mapFreeTextToOptionIndex(answer, options, type);
+  if (mapped !== null) return { index: mapped, usedFreeText: true };
+  return { index: null, usedFreeText: false };
+}
+
 function computeUrgencyLevel(questionCount, totalScore) {
   if (questionCount <= 0) {
     return { ratio: 0, level: "🟢" };
@@ -2765,17 +2837,16 @@ app.post("/api/chat", async (req, res) => {
     });
     if (location) {
       state.location = normalizeLocation(location);
-      if (!state.locationStateFinal) {
-        if (state.location.status === "usable" || state.location.status === "failed") {
-          state.locationStateFinal = state.location.status;
-        }
-      }
     }
     if (clientMeta) {
       state.clientMeta = clientMeta;
       if (clientMeta.locationPromptShown === true) {
         state.locationPromptShown = true;
       }
+    }
+    state.locationUsable = isLocationUsable(state.location, state.clientMeta || {});
+    if (state.locationUsable) {
+      state.locationStateFinal = "usable";
     }
 
     const locationPromptMessage = null;
@@ -2850,7 +2921,9 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].lastQuestionType = null;
     } else if (conversationState[conversationId].lastOptions.length >= 2) {
       const lastOptionsSnapshot = conversationState[conversationId].lastOptions;
-      const selectedIndex = matchAnswerToOption(message, lastOptionsSnapshot);
+      const type = conversationState[conversationId].lastQuestionType;
+      const classified = classifyAnswerToOption(message, lastOptionsSnapshot, type);
+      const selectedIndex = classified.index;
       if (selectedIndex !== null) {
         const optionCount = lastOptionsSnapshot.length;
         const score =
@@ -2868,14 +2941,14 @@ app.post("/api/chat", async (req, res) => {
       }
 
       // 判断スロットの更新（埋まったスロットを記録）
-      const type = conversationState[conversationId].lastQuestionType;
       if (type && SLOT_KEYS.includes(type)) {
         if (!conversationState[conversationId].slotFilled[type]) {
           conversationState[conversationId].slotFilled[type] = true;
         }
         if (selectedIndex !== null && lastOptionsSnapshot[selectedIndex]) {
-          conversationState[conversationId].slotAnswers[type] =
-            lastOptionsSnapshot[selectedIndex];
+          conversationState[conversationId].slotAnswers[type] = classified.usedFreeText
+            ? message
+            : lastOptionsSnapshot[selectedIndex];
           const normalized = buildNormalizedAnswer(
             type,
             lastOptionsSnapshot[selectedIndex],
@@ -2888,7 +2961,8 @@ app.post("/api/chat", async (req, res) => {
           conversationState[conversationId].lastNormalizedAnswer = normalized;
           if (type === "cause_category") {
             const raw = lastOptionsSnapshot[selectedIndex] || "";
-            if (raw.includes("思い当たる")) {
+            const freeText = classified.usedFreeText ? message : "";
+            if (raw.includes("思い当たる") || /思い当たる|当たる|ある/.test(freeText)) {
               conversationState[conversationId].causeDetailPending = true;
               conversationState[conversationId].causeDetailAnswered = false;
               conversationState[conversationId].causeDetailAsked = false;

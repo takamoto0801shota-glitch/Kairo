@@ -37,8 +37,11 @@ const LOCATION_PROMPT_KEY = "kairo_location_prompt_shown";
 const LOCATION_RETRY_KEY = "kairo_location_retry_count";
 const LOCATION_FINAL_KEY = "kairo_location_state_final";
 const LOCATION_PENDING_KEY = "kairo_location_pending_start";
-const LOCATION_FAILED_NOTICE_KEY = "kairo_location_failed_notice";
+const LOCATION_SESSION_KEY = "kairo_location_session_id";
 const LOCATION_PENDING_TIMEOUT_MS = 5000;
+const LOCATION_USABLE_MAX_AGE_MS = 10000;
+const LOCATION_LAST_SUCCESS_KEY = "kairo_location_last_success_ts";
+const LOCATION_LAST_ERROR_KEY = "kairo_location_last_error_ts";
 
 function renderQuestionPayload(payload) {
   if (!payload || !payload.question || !Array.isArray(payload.introTemplateIds)) {
@@ -88,7 +91,14 @@ function normalizeLocation(raw) {
     return { status: "failed", reason: raw.reason || raw.error || "error" };
   }
   if ((raw.status === "usable" || raw.status === "requesting" || raw.lat || raw.lng) && raw.lat && raw.lng) {
-    return { status: "usable", lat: raw.lat, lng: raw.lng, accuracy: raw.accuracy, ts: raw.ts };
+    return {
+      status: "usable",
+      lat: raw.lat,
+      lng: raw.lng,
+      accuracy: raw.accuracy,
+      ts: raw.ts,
+      sessionId: raw.sessionId,
+    };
   }
   if (raw.status === "requesting") return { status: "requesting" };
   return { status: "failed", reason: "error" };
@@ -101,21 +111,33 @@ function updateLocationStatusIndicator(status) {
     target.style.display = "inline-flex";
     target.textContent = "📍現在地を取得済み";
   } else {
-    target.style.display = "none";
-    target.textContent = "";
+    target.style.display = "inline-flex";
+    target.textContent = "📍現在地を確認できていません";
   }
   const button = document.getElementById("locationButton");
   if (button) {
     const promptShown = sessionStorage.getItem(LOCATION_PROMPT_KEY) === "true";
-    button.style.display = promptShown ? "none" : "inline-flex";
+    button.style.display = status === "usable" || promptShown ? "none" : "inline-flex";
   }
 }
 
-function showLocationFailedNoticeOnce() {
-  const shown = sessionStorage.getItem(LOCATION_FAILED_NOTICE_KEY) === "true";
-  if (shown) return;
-  addMessage("📍 現在地を確認できませんでした（一般的な案内になります）");
-  sessionStorage.setItem(LOCATION_FAILED_NOTICE_KEY, "true");
+function getLocationSessionId() {
+  let id = sessionStorage.getItem(LOCATION_SESSION_KEY);
+  if (!id) {
+    id = `loc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    sessionStorage.setItem(LOCATION_SESSION_KEY, id);
+  }
+  return id;
+}
+
+function isLocationUsable(location) {
+  const loc = normalizeLocation(location);
+  const lastSuccess = Number(sessionStorage.getItem(LOCATION_LAST_SUCCESS_KEY) || 0);
+  const lastError = Number(sessionStorage.getItem(LOCATION_LAST_ERROR_KEY) || 0);
+  const sameSession = loc?.sessionId && loc.sessionId === getLocationSessionId();
+  const fresh = lastSuccess && Date.now() - lastSuccess <= LOCATION_USABLE_MAX_AGE_MS;
+  const noErrorAfterSuccess = lastSuccess > 0 && lastError <= lastSuccess;
+  return loc?.lat != null && loc?.lng != null && sameSession && fresh && noErrorAfterSuccess;
 }
 
 function getFinalLocationState() {
@@ -149,8 +171,10 @@ function requestLocationOnAction() {
           lng: pos.coords.longitude,
           accuracy: pos.coords.accuracy,
           ts: Date.now(),
+          sessionId: getLocationSessionId(),
         };
         storeLocation(payload);
+        sessionStorage.setItem(LOCATION_LAST_SUCCESS_KEY, String(Date.now()));
         if (!readLocationStateFinal()) {
           setFinalLocationState("usable");
         }
@@ -160,13 +184,14 @@ function requestLocationOnAction() {
         const payload = {
           status: "failed",
           reason: err?.code === 1 ? "denied" : err?.code === 3 ? "timeout" : "error",
+          sessionId: getLocationSessionId(),
         };
         storeLocation(payload);
+        sessionStorage.setItem(LOCATION_LAST_ERROR_KEY, String(Date.now()));
         if (!readLocationStateFinal()) {
           setFinalLocationState("failed");
         }
         updateLocationStatusIndicator("failed");
-        showLocationFailedNoticeOnce();
       },
       { enableHighAccuracy: false, timeout: 5000, maximumAge: 600000 }
     );
@@ -195,15 +220,14 @@ function finalizeLocationPendingIfNeeded() {
   const start = Number(startRaw);
   if (!Number.isFinite(start)) return;
   if (Date.now() - start < LOCATION_PENDING_TIMEOUT_MS) return;
-  if (stored.status === "usable") {
+  if (isLocationUsable(stored)) {
     setFinalLocationState("usable");
     updateLocationStatusIndicator("usable");
     return;
   }
   setFinalLocationState("failed");
-  storeLocation({ status: "failed", reason: "timeout" });
+  storeLocation({ status: "failed", reason: "timeout", sessionId: getLocationSessionId() });
   updateLocationStatusIndicator("failed");
-  showLocationFailedNoticeOnce();
 }
 
 // Save conversation history
@@ -257,7 +281,9 @@ function clearHistory() {
   sessionStorage.removeItem(LOCATION_PROMPT_KEY);
   sessionStorage.removeItem(LOCATION_FINAL_KEY);
   sessionStorage.removeItem(LOCATION_PENDING_KEY);
-  sessionStorage.removeItem(LOCATION_FAILED_NOTICE_KEY);
+  sessionStorage.removeItem(LOCATION_LAST_SUCCESS_KEY);
+  sessionStorage.removeItem(LOCATION_LAST_ERROR_KEY);
+  sessionStorage.removeItem(LOCATION_SESSION_KEY);
   sessionStorage.setItem("kairo_force_location_prompt", "true");
   // Clear server-side history, then reload to reset UI without DOM再生成
   fetch(CLEAR_URL, {
@@ -794,6 +820,10 @@ async function callOpenAI(message) {
             lang: navigator.language || "",
             tz: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
             locationPromptShown: sessionStorage.getItem(LOCATION_PROMPT_KEY) === "true",
+          locationUsable: isLocationUsable(getStoredLocation()),
+          locationSessionId: getLocationSessionId(),
+          locationLastSuccessTs: Number(sessionStorage.getItem(LOCATION_LAST_SUCCESS_KEY) || 0),
+          locationLastErrorTs: Number(sessionStorage.getItem(LOCATION_LAST_ERROR_KEY) || 0),
           },
         }),
       });
@@ -905,19 +935,13 @@ async function handleUserInput() {
             setFinalLocationState(normalized.status);
           }
         }
-        updateLocationStatusIndicator(readLocationStateFinal() || normalized.status);
-        if ((readLocationStateFinal() || normalized.status) === "failed") {
-          showLocationFailedNoticeOnce();
-        }
+        updateLocationStatusIndicator(isLocationUsable(normalized) ? "usable" : "failed");
       }
       if (aiResponse.locationStateFinal) {
         if (!readLocationStateFinal()) {
           setFinalLocationState(aiResponse.locationStateFinal);
         }
-        updateLocationStatusIndicator(readLocationStateFinal());
-        if (readLocationStateFinal() === "failed") {
-          showLocationFailedNoticeOnce();
-        }
+        updateLocationStatusIndicator(readLocationStateFinal() === "usable" ? "usable" : "failed");
       }
       } catch (error) {
         // Remove loading message
@@ -952,13 +976,11 @@ function init() {
   showInitialMessage();
   const storedLocation = normalizeLocation(getStoredLocation());
   const finalState = readLocationStateFinal();
+  const usableNow = isLocationUsable(storedLocation);
   if (!finalState && (storedLocation?.status === "usable" || storedLocation?.status === "failed")) {
     setFinalLocationState(storedLocation.status);
   }
-  updateLocationStatusIndicator(readLocationStateFinal() || storedLocation?.status);
-  if (readLocationStateFinal() === "failed" || storedLocation?.status === "failed") {
-    showLocationFailedNoticeOnce();
-  }
+  updateLocationStatusIndicator(usableNow ? "usable" : "failed");
   const forceLocationPrompt = sessionStorage.getItem("kairo_force_location_prompt") === "true";
   if (!sessionStorage.getItem(LOCATION_PROMPT_KEY) || forceLocationPrompt) {
     addMessage(LOCATION_PROMPT_MESSAGE);
@@ -982,6 +1004,15 @@ function init() {
       requestLocationOnAction();
     });
   }
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      requestLocationOnAction();
+    }
+  });
+  window.addEventListener("pageshow", () => {
+    requestLocationOnAction();
+  });
 
   // Enter key to send
   document.getElementById("userInput").addEventListener("keypress", (e) => {
