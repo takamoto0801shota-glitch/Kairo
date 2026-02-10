@@ -2062,10 +2062,22 @@ const SLOT_RISK_BY_INDEX = {
 const SUBJECTIVE_ALERT_WORDS = ["気になります", "引っかかります", "心配です", "注意が必要です"];
 
 function riskFromPainScore(rawScore) {
-  if (rawScore === null || rawScore === undefined) return null;
+  if (rawScore === null || rawScore === undefined) return RISK_LEVELS.MEDIUM;
   if (rawScore >= 8) return RISK_LEVELS.HIGH;
   if (rawScore >= 5) return RISK_LEVELS.MEDIUM;
   return RISK_LEVELS.LOW;
+}
+
+function normalizePainScoreInput(input) {
+  const normalizedText = String(input || "").replace(/[０-９]/g, (d) =>
+    String.fromCharCode(d.charCodeAt(0) - 0xff10 + 0x30)
+  );
+  const digits = normalizedText.replace(/[^\d]/g, "");
+  if (!digits) return null;
+  const parsed = Number(digits);
+  if (!Number.isFinite(parsed)) return null;
+  if (parsed < 1) return null;
+  return Math.min(parsed, 10);
 }
 
 function buildNormalizedAnswer(slotId, rawAnswer, selectedIndex, rawScore) {
@@ -2856,8 +2868,7 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].causeDetailAnswered = true;
     }
     if (conversationState[conversationId].expectsPainScore) {
-      const rawMatch = (message || "").match(/\b(10|[1-9])\b/);
-      const rawScore = rawMatch ? Number(rawMatch[1]) : null;
+      const rawScore = normalizePainScoreInput(message);
       let weight = 1.5;
       if (rawScore !== null) {
         if (rawScore >= 8) weight = 2.0;
@@ -2875,14 +2886,14 @@ app.post("/api/chat", async (req, res) => {
         if (!conversationState[conversationId].slotFilled[type]) {
           conversationState[conversationId].slotFilled[type] = true;
         }
-        const normalized = buildNormalizedAnswer(
+        let normalized = buildNormalizedAnswer(
           type,
           rawScore !== null ? String(rawScore) : "",
           0,
           rawScore
         );
         if (!normalized) {
-          throw new Error("riskLevel 未定義: pain_score");
+          normalized = { slotId: type, rawAnswer: rawScore !== null ? String(rawScore) : "", riskLevel: RISK_LEVELS.MEDIUM };
         }
         conversationState[conversationId].slotNormalized[type] = normalized;
         conversationState[conversationId].lastNormalizedAnswer = normalized;
@@ -2921,13 +2932,13 @@ app.post("/api/chat", async (req, res) => {
           conversationState[conversationId].slotAnswers[type] = classified.usedFreeText
             ? message
             : lastOptionsSnapshot[selectedIndex];
-          const normalized = buildNormalizedAnswer(
+          let normalized = buildNormalizedAnswer(
             type,
             lastOptionsSnapshot[selectedIndex],
             selectedIndex
           );
           if (!normalized) {
-            throw new Error(`riskLevel 未定義: ${type}`);
+            normalized = { slotId: type, rawAnswer: lastOptionsSnapshot[selectedIndex], riskLevel: RISK_LEVELS.MEDIUM };
           }
           conversationState[conversationId].slotNormalized[type] = normalized;
           conversationState[conversationId].lastNormalizedAnswer = normalized;
