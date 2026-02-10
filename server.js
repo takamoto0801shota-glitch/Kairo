@@ -1975,7 +1975,7 @@ function extractOptionsFromAssistant(text) {
     if (match && match[1]) {
       options.push(match[1].trim());
     }
-    if (options.length >= 2) {
+    if (options.length >= 3) {
       break;
     }
   }
