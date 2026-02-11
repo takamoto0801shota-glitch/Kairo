@@ -661,15 +661,6 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 ⸻
 
 
-🚨 もし次の症状が出たら（固定）
-
-必ず以下の固定文のみ表示すること：
-「もし今とは違う強い症状が出てきた場合は、もう一度Kairoに聞くか、医療機関に相談してください。」
-
-
-⸻
-
-
 🌱 最後に（必ずこのセクションを表示すること）
 
 
@@ -807,6 +798,7 @@ function initConversationState(input = {}) {
     hasSummaryBlockGenerated: false,
     decisionType: null,
     decisionLevel: null,
+    decisionRatio: null,
     followUpPhase: "idle",
     followUpStep: 0,
     followUpDestinationName: null,
@@ -844,9 +836,9 @@ function buildRepairPrompt(requiredLevel) {
 - 選択肢や箇条書きの記号は必ず「・」を使う
 - ❗どのブロックも欠けてはいけない（1ブロックのみの出力は禁止）
 - ❗見出しは必ず以下を全て含める（順番厳守）：
-  - 🟢 ここまでの情報を整理します / 🤝 今の状態について / ✅ 今すぐやること（これだけでOK） / ⏳ 今後の見通し / 🚨 もし次の症状が出たら / 🌱 最後に
+  - 🟢 ここまでの情報を整理します / 🤝 今の状態について / ✅ 今すぐやること（これだけでOK） / ⏳ 今後の見通し / 🌱 最後に
   - または 📝 いまの状態を整理します（メモ） / ⚠️ Kairoが気になっているポイント / 🏥 Kairoの判断 / 💬 最後に
-- 🟡の場合は「🚨 もし次の症状が出たら」と「🌱 最後に」の間に
+- 🟡の場合は「⏳ 今後の見通し」と「🌱 最後に」の間に
   💊 一般的な市販薬 のブロックを必ず追加する（順番厳守）
 - 💊ブロックは診断・病名の断定禁止
 - 商品名は「例示」として2〜3件提示（断定禁止）
@@ -874,7 +866,6 @@ function buildRepairPrompt(requiredLevel) {
   - 「今のあなたの状態なら、こう考えて大丈夫です」
   - 「だから今日はこれでいいですよ」
 - ⏳ 今後の見通しは「自然な流れの一言 → 具体トリガー1〜2個 → 固定締め文」で構成
-- 🚨 もし次の症状が出たらは固定文のみ
 
 🤝 今の状態について（順番厳守）：
 1) ユーザーのつらさ・不安への一文の寄り添い
@@ -921,7 +912,6 @@ function hasAnySummaryBlocks(text) {
     text.includes("🤝 今の状態について") ||
     text.includes("✅ 今すぐやること") ||
     text.includes("⏳ 今後の見通し") ||
-    text.includes("🚨 もし次の症状が出たら") ||
     text.includes("💊 一般的な市販薬") ||
     text.includes("🌱 最後に") ||
     text.includes("📝 いまの状態を整理します") ||
@@ -933,8 +923,8 @@ function hasAnySummaryBlocks(text) {
 
 function hasAllSummaryBlocks(text) {
   const hospitalHeaders = ["📝 いまの状態を整理します", "⚠️ Kairoが気になっているポイント", "🏥 Kairoの判断", "💬 最後に"];
-  const normalHeaders = ["🟢 ここまでの情報を整理します", "🤝 今の状態について", "✅ 今すぐやること", "⏳ 今後の見通し", "🚨 もし次の症状が出たら", "🌱 最後に"];
-  const yellowHeaders = ["🟡 ここまでの情報を整理します", "🤝 今の状態について", "✅ 今すぐやること", "⏳ 今後の見通し", "🚨 もし次の症状が出たら", "💊 一般的な市販薬", "🌱 最後に"];
+  const normalHeaders = ["🟢 ここまでの情報を整理します", "🤝 今の状態について", "✅ 今すぐやること", "⏳ 今後の見通し", "🌱 最後に"];
+  const yellowHeaders = ["🟡 ここまでの情報を整理します", "🤝 今の状態について", "✅ 今すぐやること", "⏳ 今後の見通し", "💊 一般的な市販薬", "🌱 最後に"];
   const required = isHospitalFlow(text)
     ? hospitalHeaders
     : text.includes("🟡")
@@ -1028,28 +1018,17 @@ function buildYellowOtcBlock(category, warningIndex = 0, pharmacyRec, otcExample
   const examples = otcExamples || [];
   const lines = [
     "💊 一般的な市販薬",
-    "今の症状と強さであれば、",
-    "まずは薬局で市販薬を使って様子を見る判断で問題ない状態です。",
-    "",
-    "無理に病院へ行く必要はなさそうです。",
-    "",
-    "⸻",
-    "",
     "⭐ おすすめの薬局",
   ];
   const top = pharmacyRec?.candidates?.[0] || (pharmacyRec?.name ? { name: pharmacyRec.name, mapsUrl: pharmacyRec.mapsUrl } : null);
   if (top?.name) {
-    lines.push(top.name);
+    lines.push(`**${top.name}**`);
     lines.push("・見つけやすく、行きやすい");
     lines.push("・薬の種類が多く、症状を伝えて相談しやすい");
-    if (top.mapsUrl) {
-      lines.push("");
-      lines.push(`📍 地図：${top.mapsUrl}`);
-    }
   }
-  lines.push("");
-  lines.push("⸻");
-  lines.push("");
+  if (pharmacyRec?.candidates?.[1]?.name) {
+    lines.push(`代替：${pharmacyRec.candidates[1].name}`);
+  }
   lines.push("薬はこの2つからでOK");
   const picked = examples.slice(0, 2);
   picked.forEach((item, index) => {
@@ -1065,15 +1044,9 @@ function buildYellowOtcBlock(category, warningIndex = 0, pharmacyRec, otcExample
       lines.push("・腸の動きが原因の痛みに向いている");
     }
   });
-  lines.push("");
   lines.push("※ どちらか1つで大丈夫です。");
-  lines.push("※ 迷ったら、このまま症状を薬剤師に伝えてください。");
-  lines.push("");
-  lines.push("⸻");
-  lines.push("");
-  lines.push("※これは診断ではありません。");
-  lines.push("※体質や持病によって合わない場合があります。");
-  lines.push("※不安が強くなったり、症状が変わったら次の判断を一緒に考えましょう。");
+  lines.push("※ 迷ったら、今の症状をそのまま薬剤師に見せてください。");
+  lines.push("一緒に確認してもらえます。");
   return lines.filter(Boolean).join("\n");
 }
 
@@ -1525,7 +1498,7 @@ function ensureYellowOtcBlock(
   const replaced = replaceSummaryBlock(text, "💊 一般的な市販薬", otcBlock);
   if (replaced !== text) return replaced;
   const lines = text.split("\n");
-  const insertAfterIndex = lines.findIndex((line) => line.includes("🚨 もし次の症状が出たら"));
+  const insertAfterIndex = lines.findIndex((line) => line.includes("⏳ 今後の見通し"));
   const beforeLastIndex = lines.findIndex((line) => line.includes("🌱 最後に"));
   if (insertAfterIndex >= 0 && beforeLastIndex > insertAfterIndex) {
     return [
@@ -1582,13 +1555,6 @@ function buildOutlookBlock(state) {
     opener,
     ...triggers.map((item) => `・${item}`),
     "そのタイミングで、もう一度Kairoに聞いてください。",
-  ].join("\n");
-}
-
-function buildFixedWarningBlock() {
-  return [
-    "🚨 もし次の症状が出たら",
-    "もし今とは違う強い症状が出てきた場合は、もう一度Kairoに聞くか、医療機関に相談してください。",
   ].join("\n");
 }
 
@@ -1687,8 +1653,18 @@ function ensureOutlookBlock(text, state) {
   return replaceSummaryBlock(text, "⏳ 今後の見通し", buildOutlookBlock(state));
 }
 
-function ensureFixedWarningBlock(text) {
-  return replaceSummaryBlock(text, "🚨 もし次の症状が出たら", buildFixedWarningBlock());
+function ensureYellowActionsBlock(text) {
+  return replaceSummaryBlock(
+    text,
+    "✅ 今すぐやること",
+    [
+      "✅ 今すぐやること（これだけでOK）",
+      "今日は次の3つだけ意識してみてください。",
+      "・少しずつ水分をとってみてください。体が乾くと刺激を感じやすいとされています。",
+      "・横になれるなら体を休めてみてください。力を抜くと楽になることがあります。",
+      "・今の症状と強さであれば、まずは薬局で市販薬を使って様子を見る判断で問題ない状態です。",
+    ].join("\n")
+  );
 }
 
 function buildSummaryIntroTemplate() {
@@ -1877,7 +1853,7 @@ function buildFollowUpJudgeMeta(state) {
   return {
     judgement: level,
     confidence: state?.confidence || 0,
-    ratio: 0,
+    ratio: state?.decisionRatio ?? null,
     shouldJudge: true,
     slotsFilledCount: countFilledSlots(state?.slotFilled),
     decisionAllowed: true,
@@ -2111,9 +2087,10 @@ function finalizeRiskLevel(state) {
   if (!state) return "🟡";
   if (state.decisionLevel) return state.decisionLevel;
   ensurePainScoreFallback(state);
-  const level = computeUrgencyLevel(state.questionCount, state.totalScore).level;
-  state.decisionLevel = level;
-  return level;
+  const computed = calculateRisk(state.questionCount, state.totalScore);
+  state.decisionLevel = computed.level;
+  state.decisionRatio = computed.ratio;
+  return computed.level;
 }
 
 function buildNormalizedAnswer(slotId, rawAnswer, selectedIndex, rawScore) {
@@ -2538,7 +2515,6 @@ function buildLocalSummaryFallback(level, history, state) {
     `🤝 今の状態について\n${buildStateFactsBullets(state).join("\n")}\n\n${buildStateAboutLine(state)}\n${buildStateDecisionLine(state)}`,
     `✅ 今すぐやること（これだけでOK）\n今日は次の3つだけ意識してみてください。\n・少しずつ水分をとってみてください。体が乾くと刺激を感じやすいとされています。\n・横になれるなら体を休めてみてください。力を抜くと楽になることがあります。\n・刺激になる飲食や冷えを避けてみてください。負担を減らすと落ち着くことがあります。`,
     `⏳ 今後の見通し\nこのタイプの症状は、時間の経過で変化することがあります。\n・もし明日の朝も同じ痛みが続いていたら\n・もし痛みが7以上に強くなったら\nそのタイミングで、もう一度Kairoに聞いてください。`,
-    `🚨 もし次の症状が出たら\nもし今とは違う強い症状が出てきた場合は、もう一度Kairoに聞くか、医療機関に相談してください。`,
   ];
   const pharmacyRec =
     state?.pharmacyRecommendation ||
@@ -2746,6 +2722,10 @@ function classifyAnswerToOption(answer, options, type) {
 }
 
 function computeUrgencyLevel(questionCount, totalScore) {
+  return calculateRisk(questionCount, totalScore);
+}
+
+function calculateRisk(questionCount, totalScore) {
   if (questionCount <= 0) {
     throw new Error("questionCount must be > 0 for ratio calculation");
   }
@@ -2763,7 +2743,7 @@ function computeUrgencyLevel(questionCount, totalScore) {
 
 function judgeDecision(state) {
   console.log("[DEBUG] judge function entered");
-  const { ratio, level } = computeUrgencyLevel(
+  const { ratio, level } = calculateRisk(
     state.questionCount,
     state.totalScore
   );
@@ -3260,8 +3240,10 @@ app.post("/api/chat", async (req, res) => {
           conversationState[conversationId]
         );
       }
+      if (level === "🟡") {
+        aiResponse = ensureYellowActionsBlock(aiResponse);
+      }
       aiResponse = ensureOutlookBlock(aiResponse, conversationState[conversationId]);
-      aiResponse = ensureFixedWarningBlock(aiResponse);
       if (level === "🔴") {
         aiResponse = ensureHospitalBlock(
           aiResponse,
@@ -3326,6 +3308,13 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].hasSummaryBlockGenerated = true;
       conversationState[conversationId].decisionType = decisionType;
       conversationState[conversationId].decisionLevel = level;
+      if (conversationState[conversationId].decisionRatio === null) {
+        const computed = calculateRisk(
+          conversationState[conversationId].questionCount,
+          conversationState[conversationId].totalScore
+        );
+        conversationState[conversationId].decisionRatio = computed.ratio;
+      }
       conversationState[conversationId].finalQuestionPending = false;
       if (decisionType === "C_WATCHFUL_WAITING") {
         conversationState[conversationId].followUpPhase = "questioning";
@@ -3551,10 +3540,14 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
+    const finalRisk = conversationState[conversationId].decisionLevel || level;
+    const finalScore = conversationState[conversationId].totalScore;
+    console.log("FINAL RISK:", finalRisk);
+    console.log("FINAL SCORE:", finalScore);
     const judgeMeta = {
-      judgement: level,
+      judgement: finalRisk,
       confidence,
-      ratio: Number(ratio.toFixed(2)),
+      ratio: conversationState[conversationId].decisionRatio ?? Number(ratio.toFixed(2)),
       shouldJudge: shouldJudgeNow,
       slotsFilledCount,
       decisionAllowed,
