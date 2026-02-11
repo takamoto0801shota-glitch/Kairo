@@ -2747,10 +2747,15 @@ function classifyAnswerToOption(answer, options, type) {
 
 function computeUrgencyLevel(questionCount, totalScore) {
   if (questionCount <= 0) {
-    return { ratio: 0, level: "🟢" };
+    throw new Error("questionCount must be > 0 for ratio calculation");
   }
-  const maxScore = questionCount * 2;
-  const ratio = totalScore / maxScore;
+  const denominator = questionCount * 2.0;
+  const rawRatio = totalScore / denominator;
+  const ratio = Math.max(0, Math.min(1, rawRatio));
+  console.log("totalScore:", totalScore);
+  console.log("questionCount:", questionCount);
+  console.log("denominator:", denominator);
+  console.log("ratio:", ratio);
   if (ratio >= 0.8) return { ratio, level: "🔴" };
   if (ratio >= 0.69) return { ratio, level: "🟡" };
   return { ratio, level: "🟢" };
@@ -2758,6 +2763,10 @@ function computeUrgencyLevel(questionCount, totalScore) {
 
 function judgeDecision(state) {
   console.log("[DEBUG] judge function entered");
+  const { ratio, level } = computeUrgencyLevel(
+    state.questionCount,
+    state.totalScore
+  );
   const confidence = state.confidence;
   const slotsFilledCount = countFilledSlots(state.slotFilled);
   const askedSlotsCount = countAskedSlots(state.askedSlots);
@@ -2778,7 +2787,7 @@ function judgeDecision(state) {
     getMissingSlots(state.slotFilled).join(",")
   );
 
-  return { ratio: 0, level: "🟡", confidence, shouldJudge, slotsFilledCount };
+  return { ratio, level, confidence, shouldJudge, slotsFilledCount };
 }
 
 function shouldAvoidSummary(text, shouldJudge) {
