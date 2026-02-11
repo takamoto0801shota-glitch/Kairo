@@ -1027,9 +1027,6 @@ function buildYellowOtcBlock(category, warningIndex = 0, pharmacyRec, otcExample
   if (pharmacyRec?.candidates?.[1]?.name) {
     lines.push(`代替：${pharmacyRec.candidates[1].name}`);
   }
-  lines.push("なぜここか：");
-  lines.push("・見つけやすく、行きやすい");
-  lines.push("・薬の種類が多く、症状を伝えて相談しやすい");
   lines.push("薬はこの2つからでOK");
   const picked = examples.slice(0, 2);
   picked.forEach((item, index) => {
@@ -1037,16 +1034,19 @@ function buildYellowOtcBlock(category, warningIndex = 0, pharmacyRec, otcExample
     lines.push("");
     lines.push(`${num} ${item.generic}（${item.brand}）`);
     lines.push(`👉 ${item.use}`);
-    if (index === 0) {
-      lines.push("・まず最初に選びやすい薬");
-      lines.push("・胃への負担が比較的少ない");
+    // 「どういう薬なのか」説明（必須：1〜2個）
+    const desc = Array.isArray(item?.descBullets)
+      ? item.descBullets.filter(Boolean).slice(0, 2)
+      : [];
+    if (desc.length > 0) {
+      desc.forEach((b) => lines.push(`・${b}`));
     } else {
-      lines.push("・「張る感じ」「キリキリする感じ」に使われることが多い");
-      lines.push("・腸の動きが原因の痛みに向いている");
+      // 最低保証（断定禁止の一般説明）
+      lines.push("・多くの場合、このタイプの症状のつらさをやわらげる目的で使われることがあります");
     }
   });
   lines.push("※ どちらか1つで大丈夫です。");
-  lines.push("※ 迷ったら、今の症状をそのまま薬剤師に見せてください。");
+  lines.push("迷ったら、今の症状をそのまま薬剤師に見せてください。");
   lines.push("一緒に確認してもらえます。");
   return lines.filter(Boolean).join("\n");
 }
@@ -1408,70 +1408,300 @@ function buildOtcExamples(category, country) {
   const byCountry = {
     Japan: {
       pain_fever: [
-        { generic: "アセトアミノフェン", brand: "タイレノールA", use: "痛みや発熱の緩和" },
-        { generic: "イブプロフェン", brand: "イブA錠", use: "痛みや発熱の緩和" },
+        {
+          generic: "アセトアミノフェン",
+          brand: "タイレノールA",
+          use: "痛みや発熱の緩和",
+          descBullets: [
+            "痛みや発熱のつらさをやわらげる目的で使われることが多い成分です",
+            "胃が気になる人でも選ばれることがあります（合うかは個人差があります）",
+          ],
+        },
+        {
+          generic: "イブプロフェン",
+          brand: "イブA錠",
+          use: "痛みや発熱の緩和",
+          descBullets: [
+            "痛み・発熱のつらさをやわらげる目的で使われることが多い成分です",
+            "胃が荒れやすい人は合わないこともあるので、薬剤師に確認すると安心です",
+          ],
+        },
       ],
       throat: [
-        { generic: "セチルピリジニウム塩化物", brand: "パブロンのどトローチ", use: "のどの痛みや違和感" },
-        { generic: "アズレンスルホン酸ナトリウム", brand: "浅田飴AZ", use: "のどの刺激や乾燥感" },
+        {
+          generic: "セチルピリジニウム塩化物",
+          brand: "パブロンのどトローチ",
+          use: "のどの痛みや違和感",
+          descBullets: [
+            "のどの不快感をやわらげる目的で使われることがあるトローチの例です",
+          ],
+        },
+        {
+          generic: "アズレンスルホン酸ナトリウム",
+          brand: "浅田飴AZ",
+          use: "のどの刺激や乾燥感",
+          descBullets: [
+            "のどの刺激感・乾燥感のつらさに対して選ばれることがある例です",
+          ],
+        },
       ],
       nose: [
-        { generic: "クロルフェニラミン", brand: "コンタック鼻炎Z", use: "鼻水・くしゃみの緩和" },
-        { generic: "フェキソフェナジン", brand: "アレグラFX", use: "アレルギー性鼻炎の緩和" },
+        {
+          generic: "クロルフェニラミン",
+          brand: "コンタック鼻炎Z",
+          use: "鼻水・くしゃみの緩和",
+          descBullets: [
+            "鼻水・くしゃみのつらさに対して使われることがある成分の例です",
+            "眠気が出ることがあるので、心配なら薬剤師に確認すると安心です",
+          ],
+        },
+        {
+          generic: "フェキソフェナジン",
+          brand: "アレグラFX",
+          use: "アレルギー性鼻炎の緩和",
+          descBullets: [
+            "アレルギー性の鼻症状に対して使われることが多い成分の例です",
+          ],
+        },
       ],
       cough: [
-        { generic: "デキストロメトルファン", brand: "パブロンせき止め", use: "咳の緩和" },
-        { generic: "カルボシステイン", brand: "ムコダイン去痰薬", use: "痰の切れをよくする" },
+        {
+          generic: "デキストロメトルファン",
+          brand: "パブロンせき止め",
+          use: "咳の緩和",
+          descBullets: [
+            "咳のつらさをやわらげる目的で使われることがある成分の例です",
+          ],
+        },
+        {
+          generic: "カルボシステイン",
+          brand: "ムコダイン去痰薬",
+          use: "痰の切れをよくする",
+          descBullets: [
+            "痰がからむタイプの咳で選ばれることがある成分の例です",
+          ],
+        },
       ],
       stomach: [
-        { generic: "ファモチジン", brand: "ガスター10", use: "胃の不快感" },
-        { generic: "スクラルファート", brand: "アルサルミン内服液", use: "胃の粘膜保護" },
+        {
+          generic: "ファモチジン",
+          brand: "ガスター10",
+          use: "胃の不快感",
+          descBullets: [
+            "胃のムカつき・不快感で選ばれることがある例です",
+          ],
+        },
+        {
+          generic: "スクラルファート",
+          brand: "アルサルミン内服液",
+          use: "胃の粘膜保護",
+          descBullets: [
+            "胃が荒れている感じの不快感で選ばれることがある例です",
+          ],
+        },
       ],
       bowel: [
-        { generic: "ロペラミド", brand: "ストッパ下痢止めEX", use: "下痢の緩和" },
-        { generic: "ビオフェルミン", brand: "新ビオフェルミンS", use: "腸内環境の調整" },
+        {
+          generic: "ロペラミド",
+          brand: "ストッパ下痢止めEX",
+          use: "下痢の緩和",
+          descBullets: [
+            "下痢のつらさを一時的におさえる目的で使われることがある成分の例です",
+          ],
+        },
+        {
+          generic: "ビオフェルミン",
+          brand: "新ビオフェルミンS",
+          use: "腸内環境の調整",
+          descBullets: [
+            "お腹の調子を整える目的で選ばれることがある例です",
+          ],
+        },
       ],
       fatigue: [
-        { generic: "経口補水液", brand: "OS-1", use: "水分・電解質補給" },
-        { generic: "電解質補給", brand: "アクエリアス経口補水液", use: "脱水気味の時の補給" },
+        {
+          generic: "経口補水液",
+          brand: "OS-1",
+          use: "水分・電解質補給",
+          descBullets: [
+            "水分と電解質を補う目的で選ばれることが多い例です",
+          ],
+        },
+        {
+          generic: "電解質補給",
+          brand: "アクエリアス経口補水液",
+          use: "脱水気味の時の補給",
+          descBullets: [
+            "脱水気味のときの回復サポートとして選ばれることがある例です",
+          ],
+        },
       ],
       allergy: [
-        { generic: "フェキソフェナジン", brand: "アレグラFX", use: "アレルギー症状の緩和" },
-        { generic: "ロラタジン", brand: "クラリチンEX", use: "くしゃみ・鼻水の緩和" },
+        {
+          generic: "フェキソフェナジン",
+          brand: "アレグラFX",
+          use: "アレルギー症状の緩和",
+          descBullets: [
+            "アレルギー症状（くしゃみ・鼻水など）で選ばれることが多い成分の例です",
+          ],
+        },
+        {
+          generic: "ロラタジン",
+          brand: "クラリチンEX",
+          use: "くしゃみ・鼻水の緩和",
+          descBullets: [
+            "くしゃみ・鼻水のつらさで選ばれることがある成分の例です",
+          ],
+        },
       ],
     },
     Singapore: {
       pain_fever: [
-        { generic: "Paracetamol", brand: "Panadol", use: "pain/fever relief" },
-        { generic: "Ibuprofen", brand: "Nurofen", use: "pain/fever relief" },
+        {
+          generic: "Paracetamol",
+          brand: "Panadol",
+          use: "pain/fever relief",
+          descBullets: [
+            "痛み・発熱のつらさをやわらげる目的で使われることが多い例です",
+            "胃が気になる人でも選ばれることがあります（合うかは個人差があります）",
+          ],
+        },
+        {
+          generic: "Ibuprofen",
+          brand: "Nurofen",
+          use: "pain/fever relief",
+          descBullets: [
+            "痛み・発熱のつらさに加え、炎症のつらさで選ばれることがある例です",
+            "胃が荒れやすい人は合わないこともあるので、薬剤師に確認すると安心です",
+          ],
+        },
       ],
       throat: [
-        { generic: "Benzocaine", brand: "Strepsils Plus", use: "throat pain relief" },
-        { generic: "Flurbiprofen", brand: "Strepsils Intensive", use: "throat inflammation relief" },
+        {
+          generic: "Benzocaine",
+          brand: "Strepsils Plus",
+          use: "throat pain relief",
+          descBullets: [
+            "のどの痛みのつらさをやわらげる目的で選ばれることがある例です",
+          ],
+        },
+        {
+          generic: "Flurbiprofen",
+          brand: "Strepsils Intensive",
+          use: "throat inflammation relief",
+          descBullets: [
+            "のどの炎症っぽい痛みで選ばれることがある例です",
+          ],
+        },
       ],
       nose: [
-        { generic: "Loratadine", brand: "Clarityn", use: "allergy-related runny nose" },
-        { generic: "Cetirizine", brand: "Zyrtec", use: "sneezing/runny nose relief" },
+        {
+          generic: "Loratadine",
+          brand: "Clarityn",
+          use: "allergy-related runny nose",
+          descBullets: [
+            "アレルギー関連の鼻水で選ばれることが多い成分の例です",
+          ],
+        },
+        {
+          generic: "Cetirizine",
+          brand: "Zyrtec",
+          use: "sneezing/runny nose relief",
+          descBullets: [
+            "くしゃみ・鼻水のつらさで選ばれることがある成分の例です",
+            "眠気が出ることがあるので、心配なら薬剤師に確認すると安心です",
+          ],
+        },
       ],
       cough: [
-        { generic: "Dextromethorphan", brand: "Robitussin DM", use: "cough suppression" },
-        { generic: "Guaifenesin", brand: "Mucinex", use: "phlegm relief" },
+        {
+          generic: "Dextromethorphan",
+          brand: "Robitussin DM",
+          use: "cough suppression",
+          descBullets: [
+            "咳のつらさをやわらげる目的で選ばれることがある成分の例です",
+          ],
+        },
+        {
+          generic: "Guaifenesin",
+          brand: "Mucinex",
+          use: "phlegm relief",
+          descBullets: [
+            "痰がからむ咳で選ばれることがある成分の例です",
+          ],
+        },
       ],
       stomach: [
-        { generic: "Famotidine", brand: "Pepcid", use: "stomach discomfort" },
-        { generic: "Antacid", brand: "Gaviscon", use: "acid reflux relief" },
+        {
+          generic: "Famotidine",
+          brand: "Pepcid",
+          use: "stomach discomfort",
+          descBullets: [
+            "胃のムカつき・不快感で選ばれることがある例です",
+          ],
+        },
+        {
+          generic: "Antacid",
+          brand: "Gaviscon",
+          use: "acid reflux relief",
+          descBullets: [
+            "胸やけ・胃酸っぽい不快感で選ばれることがある例です",
+          ],
+        },
       ],
       bowel: [
-        { generic: "Loperamide", brand: "Imodium", use: "diarrhea relief" },
-        { generic: "Probiotic", brand: "Culturelle", use: "gut balance support" },
+        {
+          generic: "Loperamide",
+          brand: "Imodium",
+          use: "diarrhea relief",
+          descBullets: [
+            "下痢のつらさを一時的におさえる目的で選ばれることがある例です",
+          ],
+        },
+        {
+          generic: "Probiotic",
+          brand: "Culturelle",
+          use: "gut balance support",
+          descBullets: [
+            "お腹の調子を整えるサポートとして選ばれることがある例です",
+          ],
+        },
       ],
       fatigue: [
-        { generic: "Oral rehydration salts", brand: "Hydralyte", use: "fluid/electrolyte replacement" },
-        { generic: "Electrolyte drink", brand: "100Plus", use: "recovery support" },
+        {
+          generic: "Oral rehydration salts",
+          brand: "Hydralyte",
+          use: "fluid/electrolyte replacement",
+          descBullets: [
+            "水分と電解質の補給目的で選ばれることが多い例です",
+          ],
+        },
+        {
+          generic: "Electrolyte drink",
+          brand: "100Plus",
+          use: "recovery support",
+          descBullets: [
+            "回復サポートとして選ばれることがある例です",
+          ],
+        },
       ],
       allergy: [
-        { generic: "Fexofenadine", brand: "Telfast", use: "allergy symptom relief" },
-        { generic: "Loratadine", brand: "Clarityn", use: "allergy symptom relief" },
+        {
+          generic: "Fexofenadine",
+          brand: "Telfast",
+          use: "allergy symptom relief",
+          descBullets: [
+            "アレルギー症状（くしゃみ・鼻水など）で選ばれることが多い成分の例です",
+          ],
+        },
+        {
+          generic: "Loratadine",
+          brand: "Clarityn",
+          use: "allergy symptom relief",
+          descBullets: [
+            "アレルギー症状のつらさで選ばれることがある成分の例です",
+          ],
+        },
       ],
     },
   };
@@ -1499,14 +1729,13 @@ function ensureYellowOtcBlock(
   const replaced = replaceSummaryBlock(text, "💊 一般的な市販薬", otcBlock);
   if (replaced !== text) return replaced;
   const lines = text.split("\n");
-  const insertAfterIndex = lines.findIndex((line) => line.includes("⏳ 今後の見通し"));
-  const beforeLastIndex = lines.findIndex((line) => line.includes("🌱 最後に"));
-  if (insertAfterIndex >= 0 && beforeLastIndex > insertAfterIndex) {
+  // 仕様：✅ 今すぐやること と ⏳ 今後の見通し の「間」に必ず入れる
+  const outlookIndex = lines.findIndex((line) => line.startsWith("⏳ 今後の見通し"));
+  if (outlookIndex >= 0) {
     return [
-      ...lines.slice(0, insertAfterIndex + 1),
-      ...lines.slice(insertAfterIndex + 1, beforeLastIndex),
+      ...lines.slice(0, outlookIndex),
       otcBlock,
-      ...lines.slice(beforeLastIndex),
+      ...lines.slice(outlookIndex),
     ].join("\n");
   }
   return `${text}\n${otcBlock}`;
@@ -1574,16 +1803,68 @@ function buildPlaceLines(candidates) {
   return lines;
 }
 
-function detectSpecialtyFromHistory(historyText) {
-  if (historyText.match(/歯|歯ぐき|虫歯/)) return "歯医者";
-  if (historyText.match(/耳|耳鳴り|耳が痛/)) return "耳鼻科";
-  if (historyText.match(/腹|お腹|胃|下痢|便秘/)) return "病院";
-  if (historyText.match(/頭痛|頭が痛|頭が重/)) return "病院";
-  return "病院";
+function detectCareDestinationFromHistory(historyText) {
+  const text = historyText || "";
+  // NOTE: ここは「表示」と「Places検索」を同じ判定に揃える（ズレ禁止）
+  if (text.match(/歯|歯ぐき|虫歯|親知らず|奥歯/)) {
+    return {
+      label: "歯医者",
+      header: "⭐ おすすめの歯医者（近くて行きやすい）",
+      places: { type: "dentist", keywords: ["dentist", "dental clinic"] },
+      fallbackNames: ["近くの歯科クリニック", "近くの歯医者"],
+    };
+  }
+  if (text.match(/耳|耳鳴り|耳が痛|のど|喉|鼻|鼻水|鼻づまり/)) {
+    return {
+      label: "耳鼻科",
+      header: "⭐ おすすめの耳鼻科（近くて行きやすい）",
+      places: { type: "doctor", keywords: ["ENT", "ENT clinic", "otolaryngologist"] },
+      fallbackNames: ["近くの耳鼻科", "近くのクリニック（耳鼻科）"],
+    };
+  }
+  // default
+  return {
+    label: "GP/病院",
+    header: "⭐ おすすめのGP（近くて行きやすい）",
+    places: { type: "doctor", keywords: ["clinic", "general practitioner", "medical clinic"] },
+    fallbackNames: null,
+  };
+}
+
+async function resolveCareCandidates(state, destination) {
+  if (!canRecommendSpecificPlaceFinal(state)) return [];
+  if (!state?.locationSnapshot?.lat || !state?.locationSnapshot?.lng) return [];
+  const type = destination?.places?.type || "doctor";
+  const keywords = destination?.places?.keywords || ["clinic"];
+  const results = [];
+  for (const keyword of keywords) {
+    const places = await fetchNearbyPlaces(state.locationSnapshot, {
+      keyword,
+      type,
+      rankByDistance: true,
+    });
+    results.push(...places);
+  }
+  if (results.length === 0) {
+    const fallback = await fetchNearbyPlaces(state.locationSnapshot, {
+      type,
+      rankByDistance: true,
+    });
+    results.push(...fallback);
+  }
+  const merged = sortPlacesByRatingThenDistance(mergePlaces(results)).slice(0, 2);
+  if (merged.length > 0) return merged;
+  const names = destination?.fallbackNames;
+  if (Array.isArray(names) && names.length > 0) {
+    return buildFallbackPlaces(names, state?.locationSnapshot);
+  }
+  // 最後の保険
+  return buildFallbackPlaces(["近くの医療機関"], state?.locationSnapshot);
 }
 
 function buildHospitalBlock(state, historyText, hospitalRec) {
-  const specialty = detectSpecialtyFromHistory(historyText || "");
+  const destination = detectCareDestinationFromHistory(historyText || "");
+  const specialty = destination.label;
   const candidates = hospitalRec?.candidates || [];
   const lines = [
     "🏥 Kairoの判断",
@@ -1595,7 +1876,7 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
     "",
     "⸻",
     "",
-    "⭐ おすすめのGP（近くて行きやすい）",
+    destination.header,
   ].filter(Boolean);
   const top = candidates[0];
   if (top?.name) {
@@ -1663,7 +1944,7 @@ function ensureYellowActionsBlock(text) {
       "今日は次の3つだけ意識してみてください。",
       "・少しずつ水分をとってみてください。体が乾くと刺激を感じやすいとされています。",
       "・横になれるなら体を休めてみてください。力を抜くと楽になることがあります。",
-      "・今の症状と強さであれば、まずは薬局で市販薬を使って様子を見る判断で問題ない状態です。",
+      "・市販薬という選択肢を持つ。現時点では緊急性は高くなく、段階的な対応が合っています。",
     ].join("\n")
   );
 }
@@ -2279,10 +2560,8 @@ function pickEmpathyTemplateId(isFirstQuestion) {
 
 function pickUniqueTemplateId(pool, usedSet) {
   const available = pool.filter((id) => !usedSet.has(id));
-  if (available.length === 0) {
-    throw new Error("intro template exhausted");
-  }
-  return available[Math.floor(Math.random() * available.length)];
+  const pickedFrom = available.length > 0 ? available : pool;
+  return pickedFrom[Math.floor(Math.random() * pickedFrom.length)];
 }
 
 function buildIntroTemplateIds(state, questionIndex, slotKey) {
@@ -2447,19 +2726,40 @@ function buildStateFactsBullets(state) {
   return filtered.length > 0 ? filtered : ["・今の症状について相談されている"];
 }
 
-function buildStateAboutLine(state) {
+function buildStateAboutLine(state, level) {
+  // 🟡のみ：指定の「型」に合わせて生成（固定文にはしない）
+  if (level === "🟡") {
+    const painScore = state?.lastPainScore;
+    const painPart =
+      painScore !== null && painScore !== undefined ? `（痛みは${painScore}くらい）` : "";
+    const otherStrong =
+      state?.slotAnswers?.associated_symptoms?.includes("ない")
+        ? "他に強い症状が見られない"
+        : "他に強い症状が目立たない";
+    const templates = [
+      `現在の症状の強さ${painPart}や${otherStrong}ことから、緊急性を示す特徴は確認されていません。`,
+      `現在の症状の強さ${painPart}と${otherStrong}点から見ても、緊急性を示す特徴は確認されていません。`,
+    ];
+    return templates[Math.floor(Math.random() * templates.length)];
+  }
   const painScore = state?.lastPainScore;
   const painText =
-    painScore !== null && painScore !== undefined
-      ? `痛みは${painScore}くらい`
-      : "痛みは中程度";
+    painScore !== null && painScore !== undefined ? `痛みは${painScore}くらい` : "痛みは中程度";
   const symptomsText = state?.slotAnswers?.associated_symptoms?.includes("ない")
     ? "他の症状は少ない"
     : "他の症状は多くない";
   return `今の情報を見る限り、${painText}で${symptomsText}ため、急ぐ状況ではなさそうです。`;
 }
 
-function buildStateDecisionLine(state) {
+function buildStateDecisionLine(state, level) {
+  // 🟡のみ：指定の要素（医療機関でできることが大きく変わらない可能性）を含めて生成（固定文にはしない）
+  if (level === "🟡") {
+    const templates = [
+      "そのため現時点では、医療機関を受診しても対応内容が大きく変わらない可能性がある状態と整理できます。",
+      "そのため現時点では、受診しても医療機関でできることが大きく変わらない可能性がある状態と整理できます。",
+    ];
+    return templates[Math.floor(Math.random() * templates.length)];
+  }
   return "なので、今は様子を見る判断で大丈夫そうです。";
 }
 
@@ -2473,12 +2773,13 @@ function normalizeStateBlockForGreenYellow(text, state) {
       idx > start && (line.startsWith("✅") || line.startsWith("⏳") || line.startsWith("🚨") || line.startsWith("💊") || line.startsWith("🌱"))
   );
   const sliceEnd = end >= 0 ? end : lines.length;
+  const level = state?.decisionLevel === "🟡" ? "🟡" : "🟢";
   const newBlock = [
     "🤝 今の状態について",
     ...buildStateFactsBullets(state),
     "",
-    buildStateAboutLine(state),
-    buildStateDecisionLine(state),
+    buildStateAboutLine(state, level),
+    buildStateDecisionLine(state, level),
   ];
   return [...lines.slice(0, start), ...newBlock, ...lines.slice(sliceEnd)].join("\n");
 }
@@ -2513,7 +2814,7 @@ function buildLocalSummaryFallback(level, history, state) {
 
   const baseBlocks = [
     `${level} ここまでの情報を整理します\n${buildSummaryIntroTemplate()}`,
-    `🤝 今の状態について\n${buildStateFactsBullets(state).join("\n")}\n\n${buildStateAboutLine(state)}\n${buildStateDecisionLine(state)}`,
+    `🤝 今の状態について\n${buildStateFactsBullets(state).join("\n")}\n\n${buildStateAboutLine(state, level)}\n${buildStateDecisionLine(state, level)}`,
     `✅ 今すぐやること（これだけでOK）\n今日は次の3つだけ意識してみてください。\n・少しずつ水分をとってみてください。体が乾くと刺激を感じやすいとされています。\n・横になれるなら体を休めてみてください。力を抜くと楽になることがあります。\n・刺激になる飲食や冷えを避けてみてください。負担を減らすと落ち着くことがあります。`,
     `⏳ 今後の見通し\nこのタイプの症状は、時間の経過で変化することがあります。\n・もし明日の朝も同じ痛みが続いていたら\n・もし痛みが7以上に強くなったら\nそのタイミングで、もう一度Kairoに聞いてください。`,
   ];
@@ -2728,7 +3029,7 @@ function computeUrgencyLevel(questionCount, totalScore) {
 
 function calculateRisk(questionCount, totalScore) {
   if (questionCount <= 0) {
-    throw new Error("questionCount must be > 0 for ratio calculation");
+    return { ratio: 0, level: "🟢" };
   }
   const denominator = questionCount * 2.0;
   const rawRatio = totalScore / denominator;
@@ -2816,12 +3117,25 @@ app.post("/api/chat", async (req, res) => {
   let locationRePromptBeforeSummary = null;
 
     if (!message) {
-      return res.status(400).json({ error: "メッセージが必要です" });
+      return res.status(200).json({
+        conversationId,
+        message: "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。",
+        response: "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。",
+        judgeMeta: { judgement: null, confidence: 0, ratio: null, shouldJudge: false, slotsFilledCount: 0, decisionAllowed: false, questionCount: 0, summaryLine: null, questionType: null, rawScore: null, painScoreRatio: null },
+        questionPayload: null,
+        normalizedAnswer: null,
+      });
     }
 
     if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({
-        error: "OpenAI APIキーが設定されていません。.envファイルを確認してください。",
+      const fallback = buildFixedQuestion("pain_score", true);
+      return res.status(200).json({
+        conversationId,
+        message: fallback.question,
+        response: fallback.question,
+        judgeMeta: { judgement: null, confidence: 0, ratio: null, shouldJudge: false, slotsFilledCount: 0, decisionAllowed: false, questionCount: 0, summaryLine: null, questionType: null, rawScore: null, painScoreRatio: null },
+        questionPayload: { introTemplateIds: buildIntroTemplateIds(initConversationState({ conversationId }), 0, "pain_score"), question: fallback.question },
+        normalizedAnswer: null,
       });
     }
 
@@ -3126,6 +3440,12 @@ app.post("/api/chat", async (req, res) => {
     // 判定確定トリガー発動時は、まとめを強制生成（初回のみ）
     if (shouldJudgeNow && !conversationState[conversationId].summaryShown) {
       const level = finalizeRiskLevel(conversationState[conversationId]);
+      const historyTextForCare = conversationHistory[conversationId]
+        .filter((msg) => msg.role === "user")
+        .map((msg) => msg.content)
+        .join("\n");
+      const careDestination = detectCareDestinationFromHistory(historyTextForCare);
+      conversationState[conversationId].careDestination = careDestination;
       const historyTextForOtc = conversationHistory[conversationId]
         .filter((msg) => msg.role === "user")
         .map((msg) => msg.content)
@@ -3147,9 +3467,12 @@ app.post("/api/chat", async (req, res) => {
       );
       const locationContext = conversationState[conversationId].locationContext || {};
       if (level === "🔴" && conversationState[conversationId].location) {
-        conversationState[conversationId].clinicCandidates = await resolveClinicCandidates(
-          conversationState[conversationId]
+        // 症状に合わせて受診先候補を選ぶ（歯痛→歯科、耳/鼻/喉→耳鼻科、基本はGP）
+        conversationState[conversationId].clinicCandidates = await resolveCareCandidates(
+          conversationState[conversationId],
+          careDestination
         );
+        // 「病院」候補は引き続き別枠で取得（重症時の選択肢として保持）
         conversationState[conversationId].hospitalCandidates = await resolveHospitalCandidates(
           conversationState[conversationId]
         );
@@ -3582,27 +3905,32 @@ app.post("/api/chat", async (req, res) => {
   } catch (error) {
     console.error("OpenAI API Error:", error);
     console.error("Error details:", {
-      message: error.message,
-      type: error.constructor.name,
-      stack: error.stack
+      message: error?.message,
+      type: error?.constructor?.name,
+      stack: error?.stack,
     });
-    
-    // より詳細なエラー情報を返す（開発環境用）
-    const errorResponse = {
-      error: "AIの応答を取得できませんでした",
-      details: error.message,
-    };
-    
-    // OpenAI APIのエラーの場合、より詳細な情報を追加
-    if (error.response) {
-      errorResponse.openaiError = {
-        status: error.response.status,
-        statusText: error.response.statusText,
-        data: error.response.data
-      };
-    }
-    
-    res.status(500).json(errorResponse);
+    const safeMessage =
+      "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。";
+    res.status(200).json({
+      conversationId: (req.body && req.body.conversationId) || null,
+      message: safeMessage,
+      response: safeMessage,
+      judgeMeta: {
+        judgement: "🟡",
+        confidence: 0,
+        ratio: null,
+        shouldJudge: false,
+        slotsFilledCount: 0,
+        decisionAllowed: false,
+        questionCount: 0,
+        summaryLine: null,
+        questionType: null,
+        rawScore: null,
+        painScoreRatio: null,
+      },
+      questionPayload: null,
+      normalizedAnswer: null,
+    });
   }
 });
 

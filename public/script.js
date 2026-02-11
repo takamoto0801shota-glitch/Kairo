@@ -9,6 +9,14 @@ const FIRST_QUESTION_KEY = "kairo_first_question";
 
 const SUBJECTIVE_ALERT_WORDS = ["気になります", "引っかかります", "心配です", "注意が必要です"];
 
+const appState = {
+  riskLevel: null,
+  painScore: null,
+  slots: {},
+};
+
+let currentRequestId = 0;
+
 const INTRO_TEMPLATE_TEXTS = {
   TEMPLATE_EMPATHY_1: "それはつらいですよね。体の不調があると、どうしても気になりますよね。",
   TEMPLATE_EMPATHY_2: "教えてくれてありがとうございます。ここで一緒に見ていきましょう。",
@@ -590,11 +598,7 @@ function addMessage(text, isUser = false, save = true) {
     }
     
     // 安心サマリーを抽出して表示
-    const summary = extractSummary(text);
-    if (summary) {
-      console.log("[Kairo] updateSummaryCard called", { summary, isCollecting });
-      updateSummaryCard(summary);
-    }
+    // summary card is rendered from appState only
   };
   
   if (blocks && blocks.length > 0) {
@@ -690,32 +694,61 @@ function addSummaryBlock(messageDiv, fullText) {
   saveHistory();
 }
 
-// Update summary card (サマリーカードを更新)
-function updateSummaryCard(judgeMeta) {
-  console.log("[DEBUG] updateSummaryCard entered", judgeMeta);
+function clearSummaryContainer() {
   const summaryCard = document.getElementById("summaryCard");
-  console.log("[DEBUG] summaryCard element", summaryCard);
-  let contentDiv = document.getElementById("summaryCardContent");
-  if (!contentDiv) {
-    contentDiv = document.createElement("div");
-    contentDiv.id = "summaryCardContent";
-    contentDiv.className = "summary-card-content";
-    summaryCard.appendChild(contentDiv);
-  }
+  if (!summaryCard) return;
+  summaryCard.innerHTML = "";
+}
 
-  const emoji = judgeMeta?.judgement || "🟢";
-  let label = "様子を見ましょう";
-  if (emoji === "🟡") {
-    label = "注意して様子見をしてください";
-  } else if (emoji === "🔴") {
-    label = "病院を推奨します";
-  }
-  const rawText = `${emoji} ${label}`;
-  contentDiv.textContent = rawText.length > 20 ? `${rawText.slice(0, 20)}` : rawText;
-
+function renderSummaryBase(text) {
+  const summaryCard = document.getElementById("summaryCard");
+  if (!summaryCard) return;
+  const contentDiv = document.createElement("div");
+  contentDiv.id = "summaryCardContent";
+  contentDiv.className = "summary-card-content";
+  contentDiv.textContent = text;
+  summaryCard.appendChild(contentDiv);
   summaryCard.style.display = "block";
   summaryCard.style.opacity = "1";
   summaryCard.style.visibility = "visible";
+}
+
+function renderRedCard() {
+  renderSummaryBase("🔴 病院を推奨します");
+}
+
+function renderYellowCard() {
+  renderSummaryBase("🟡 注意して様子見をしてください");
+}
+
+function renderGreenCard() {
+  renderSummaryBase("🟢 様子を見ましょう");
+}
+
+function renderSafeFallback() {
+  renderSummaryBase("🟡 注意して様子見をしてください");
+}
+
+function renderSummary() {
+  console.log("Rendering summary:", appState.riskLevel);
+  console.assert(
+    ["RED", "YELLOW", "GREEN"].includes(appState.riskLevel),
+    "Invalid riskLevel"
+  );
+  clearSummaryContainer();
+  switch (appState.riskLevel) {
+    case "RED":
+      renderRedCard();
+      break;
+    case "YELLOW":
+      renderYellowCard();
+      break;
+    case "GREEN":
+      renderGreenCard();
+      break;
+    default:
+      renderSafeFallback();
+  }
 }
 
 // Show initial message
@@ -740,6 +773,7 @@ async function callOpenAI(message) {
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   let lastError = null;
 
+  const requestId = ++currentRequestId;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const response = await fetch(API_URL, {
@@ -761,17 +795,26 @@ async function callOpenAI(message) {
       });
 
       if (!response.ok) {
-        let errorMessage = `HTTP error! status: ${response.status}`;
+        // UXは止めない。サーバー側が復旧するまでの間も、会話を継続するための固定フォールバックを返す。
+        let debug = `HTTP error! status: ${response.status}`;
         try {
           const errorData = await response.json();
-          errorMessage = errorData.error || errorData.details || errorMessage;
+          debug = errorData.error || errorData.details || debug;
           console.error("サーバーエラー:", errorData);
         } catch (parseError) {
           const text = await response.text();
           console.error("レスポンステキスト:", text);
-          errorMessage = `サーバーエラー (${response.status}): ${text.substring(0, 100)}`;
+          debug = `サーバーエラー (${response.status}): ${text.substring(0, 100)}`;
         }
-        throw new Error(errorMessage);
+        console.error("API non-OK (fallback):", debug);
+        return {
+          conversationId: conversationId || null,
+          message:
+            "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。",
+          response:
+            "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。",
+          judgeMeta: { judgement: "🟡" },
+        };
       }
 
       const data = await response.json();
@@ -791,7 +834,14 @@ async function callOpenAI(message) {
     stack: lastError?.stack,
     name: lastError?.name,
   });
-  throw lastError;
+  return {
+    conversationId: conversationId || null,
+    message:
+      "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。",
+    response:
+      "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。",
+    judgeMeta: { judgement: "🟡" },
+  };
 }
 
 // Handle user input
@@ -822,6 +872,10 @@ async function handleUserInput() {
     try {
       // Call OpenAI API
       const data = await callOpenAI(userText);
+      if (requestId !== currentRequestId) {
+        console.warn("Old response ignored");
+        return;
+      }
       console.log("[DEBUG] full aiResponse", data);
       const aiResponse = data;
       if (aiResponse.conversationId) {
@@ -853,10 +907,11 @@ async function handleUserInput() {
       }
 
       console.log("[DEBUG] judgeMeta", aiResponse.judgeMeta);
-      if (aiResponse.judgeMeta && aiResponse.judgeMeta.shouldJudge === true) {
-        console.log("[DEBUG] force summary render");
-        updateSummaryCard(aiResponse.judgeMeta);
-      } else {
+      if (aiResponse.judgeMeta && aiResponse.judgeMeta.shouldJudge === true && appState.riskLevel === null) {
+        const judgement = aiResponse.judgeMeta.judgement;
+        appState.riskLevel = judgement === "🔴" ? "RED" : judgement === "🟡" ? "YELLOW" : "GREEN";
+        renderSummary();
+      } else if (appState.riskLevel === null) {
         hideSummaryCard();
       }
       if (aiResponse.locationState) {
