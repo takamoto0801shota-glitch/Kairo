@@ -1023,12 +1023,13 @@ function buildYellowOtcBlock(category, warningIndex = 0, pharmacyRec, otcExample
   const top = pharmacyRec?.candidates?.[0] || (pharmacyRec?.name ? { name: pharmacyRec.name, mapsUrl: pharmacyRec.mapsUrl } : null);
   if (top?.name) {
     lines.push(`**${top.name}**`);
-    lines.push("・見つけやすく、行きやすい");
-    lines.push("・薬の種類が多く、症状を伝えて相談しやすい");
   }
   if (pharmacyRec?.candidates?.[1]?.name) {
     lines.push(`代替：${pharmacyRec.candidates[1].name}`);
   }
+  lines.push("なぜここか：");
+  lines.push("・見つけやすく、行きやすい");
+  lines.push("・薬の種類が多く、症状を伝えて相談しやすい");
   lines.push("薬はこの2つからでOK");
   const picked = examples.slice(0, 2);
   picked.forEach((item, index) => {
