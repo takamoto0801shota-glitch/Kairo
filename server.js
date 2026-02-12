@@ -1866,8 +1866,31 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
   const destination = detectCareDestinationFromHistory(historyText || "");
   const specialty = destination.label;
   const candidates = hospitalRec?.candidates || [];
+  // 🔴のみ：夜間（20:00〜5:59）のときだけ、無理をさせない一文を追加
+  const hour = (() => {
+    const tz = state?.clientMeta?.tz;
+    if (tz) {
+      try {
+        const parts = new Intl.DateTimeFormat("en-US", {
+          timeZone: tz,
+          hour: "2-digit",
+          hour12: false,
+        }).formatToParts(new Date());
+        const h = Number(parts.find((p) => p.type === "hour")?.value);
+        return Number.isFinite(h) ? h : new Date().getHours();
+      } catch (_) {
+        return new Date().getHours();
+      }
+    }
+    return new Date().getHours();
+  })();
+  const isLateNight = hour >= 20 || hour < 6;
+  const timeMessage = isLateNight
+    ? "現在は夜間の時間帯です。症状が強くなければ、明日受診する形が選択肢の一つです。"
+    : "";
   const lines = [
     "🏥 Kairoの判断",
+    timeMessage,
     "今の症状の出方を整理すると、",
     `薬で様子を見るより、一度${specialty}で確認した方が安心できる状態です。`,
     "",
@@ -2369,7 +2392,10 @@ function finalizeRiskLevel(state) {
   if (!state) return "🟡";
   if (state.decisionLevel) return state.decisionLevel;
   ensurePainScoreFallback(state);
-  const computed = calculateRisk(state.questionCount, state.totalScore);
+  const computed = calculateRisk(state.questionCount, state.totalScore, {
+    painScore: state?.lastPainScore ?? null,
+    painWeight: state?.lastPainWeight ?? null,
+  });
   state.decisionLevel = computed.level;
   state.decisionRatio = computed.ratio;
   return computed.level;
@@ -3023,31 +3049,47 @@ function classifyAnswerToOption(answer, options, type) {
   return { index: null, usedFreeText: false };
 }
 
-function computeUrgencyLevel(questionCount, totalScore) {
-  return calculateRisk(questionCount, totalScore);
+function computeUrgencyLevel(questionCount, totalScore, debugMeta = {}) {
+  return calculateRisk(questionCount, totalScore, debugMeta);
 }
 
-function calculateRisk(questionCount, totalScore) {
-  if (questionCount <= 0) {
-    return { ratio: 0, level: "🟢" };
-  }
-  const denominator = questionCount * 2.0;
-  const rawRatio = totalScore / denominator;
+function calculateRisk(questionCount, totalScore, debugMeta = {}) {
+  const painScore = debugMeta?.painScore ?? null;
+  const painWeight = debugMeta?.painWeight ?? null;
+  const maxScore = questionCount * 2;
+  const rawRatio = maxScore > 0 ? totalScore / maxScore : 0;
   const ratio = Math.max(0, Math.min(1, rawRatio));
+  let urgency = "green";
+  if (ratio >= 0.8) {
+    urgency = "red";
+  } else if (ratio >= 0.69) {
+    urgency = "yellow";
+  } else {
+    urgency = "green";
+  }
+  const level = urgency === "red" ? "🔴" : urgency === "yellow" ? "🟡" : "🟢";
+  console.log("---- KAIRO URGENCY DEBUG ----");
+  console.log("painScore (raw):", painScore);
+  console.log("painWeight:", painWeight);
   console.log("totalScore:", totalScore);
   console.log("questionCount:", questionCount);
-  console.log("denominator:", denominator);
+  console.log("maxPossibleScore:", questionCount * 2);
   console.log("ratio:", ratio);
-  if (ratio >= 0.8) return { ratio, level: "🔴" };
-  if (ratio >= 0.69) return { ratio, level: "🟡" };
-  return { ratio, level: "🟢" };
+  console.log("finalUrgency:", urgency);
+  console.log("------------------------------");
+  console.assert(ratio >= 0 && ratio <= 1, "ratio out of range", ratio);
+  return { ratio, level, urgency };
 }
 
 function judgeDecision(state) {
   console.log("[DEBUG] judge function entered");
   const { ratio, level } = calculateRisk(
     state.questionCount,
-    state.totalScore
+    state.totalScore,
+    {
+      painScore: state?.lastPainScore ?? null,
+      painWeight: state?.lastPainWeight ?? null,
+    }
   );
   const confidence = state.confidence;
   const slotsFilledCount = countFilledSlots(state.slotFilled);
@@ -3212,7 +3254,14 @@ app.post("/api/chat", async (req, res) => {
         else weight = 1.0;
       }
       conversationState[conversationId].questionCount += 1;
+      // painWeight が totalScore に加算されることを検証ログで可視化する
       conversationState[conversationId].totalScore += weight;
+      console.log("[KAIRO SCORE ADD] painWeight applied", {
+        painScoreRaw: rawScore,
+        painWeight: weight,
+        totalScore: conversationState[conversationId].totalScore,
+        questionCount: conversationState[conversationId].questionCount,
+      });
       conversationState[conversationId].expectsPainScore = false;
       updatePainScoreState(
         conversationState[conversationId],
@@ -3635,7 +3684,11 @@ app.post("/api/chat", async (req, res) => {
       if (conversationState[conversationId].decisionRatio === null) {
         const computed = calculateRisk(
           conversationState[conversationId].questionCount,
-          conversationState[conversationId].totalScore
+          conversationState[conversationId].totalScore,
+          {
+            painScore: conversationState[conversationId]?.lastPainScore ?? null,
+            painWeight: conversationState[conversationId]?.lastPainWeight ?? null,
+          }
         );
         conversationState[conversationId].decisionRatio = computed.ratio;
       }

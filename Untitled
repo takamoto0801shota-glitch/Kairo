@@ -1,0 +1,54 @@
+【緊急度ロジック検証モード追加】
+
+■ 目的
+現在のスコア比率ロジック（##7 および 7.1）が
+正しく100%適用されているかをMacBookのコンソールで確認できるようにする。
+
+■ 実装内容
+
+1️⃣ 判定直前に以下を console.log で出力すること：
+
+----------------------------------------
+
+console.log("---- KAIRO URGENCY DEBUG ----");
+console.log("painScore (raw):", painScore);
+console.log("painWeight:", painWeight);
+console.log("totalScore:", totalScore);
+console.log("questionCount:", questionCount);
+console.log("maxPossibleScore:", questionCount * 2);
+console.log("ratio:", ratio);
+console.log("finalUrgency:", urgency);
+console.log("------------------------------");
+
+----------------------------------------
+
+2️⃣ ratio の計算式を明示的に以下の形で統一すること：
+
+const maxScore = questionCount * 2;
+const ratio = totalScore / maxScore;
+
+3️⃣ 判定基準を明示的if文で書くこと（曖昧な比較禁止）：
+
+if (ratio >= 0.8) {
+    urgency = "red";
+} else if (ratio >= 0.69) {
+    urgency = "yellow";
+} else {
+    urgency = "green";
+}
+
+4️⃣ painWeight が必ず totalScore に加算されているか確認すること。
+
+例：
+totalScore += painWeight;
+
+■ 重要
+
+・痛みスコアは最初に必ず反映されること
+・painWeight が上書きされていないか確認
+・ratio 計算が 0〜1 の範囲になっていること
+
+■ 意図
+
+現在のロジックを変更せず、
+「正しく適用されているか」を検証するため。
