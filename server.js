@@ -457,20 +457,28 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 - 症状に応じた市販薬のカテゴリ＋具体例1つ
 - 今夜やることは1〜2個だけ
 
-【緊急度判定：スコア比率方式 - 最重要】
+【緊急度判定：危険フラグ優先モデル - 最重要】
 - すべての質問が終了した後にのみ、緊急度を判定する（途中で結論を出さない）。
 - 最終判定は必ず1回のみ表示する。
-- 各質問は二択 or 選択式で提示し、上から緊急度が上がる順に並べる。
-- 各選択肢の内部スコアは以下：
-  - 1つ目：1.0
-  - 2つ目：1.5
-  - 3つ目：2.0
-- ユーザーにはスコアや計算過程を一切表示しない。
-- 合計スコア ÷（質問回数 × 2）で「緊急度比率」を算出する。
+- Phase1（即時RED条件）：
+  1) pain_score が高（8以上）かつ daily_impact が高
+  2) pain_score が高（8以上）かつ associated_symptoms が中以上
+  3) daily_impact が高かつ associated_symptoms が中以上
+  4) criticalスロット（pain_score / daily_impact / associated_symptoms）のうち、高レベル（最大weight=3）が2つ以上
+- Phase2（重症指数）：
+  - 低=0 / 中=1 / 高=3
+  - pain_score ×1.4
+  - daily_impact ×1.4
+  - associated_symptoms ×1.3
+  - onset（発症タイミング）×1.0
+  - quality（痛みの質）×1.0
+  - cause（原因カテゴリ）×0.8
+  - severityIndex = weightedTotal / 20.7
 - 判定基準：
-  - 0.8〜1.0 → 🔴 病院受診をすすめる
-  - 0.6〜0.79 → 🟡 市販薬＋自宅ケアを具体的に提示
-  - 0.0〜0.59 → 🟢 様子見
+  - 0.65以上 → 🔴
+  - 0.45〜0.64 → 🟡
+  - 0.45未満 → 🟢
+- ユーザーには指数や内部計算過程を一切表示しない。
 
 【強制拾い条件 - 最重要】
 以下の語がユーザー発言に含まれる場合、次のKairo発話で必ず1回は感情に寄り添う文を入れる：
@@ -2392,10 +2400,7 @@ function finalizeRiskLevel(state) {
   if (!state) return "🟡";
   if (state.decisionLevel) return state.decisionLevel;
   ensurePainScoreFallback(state);
-  const computed = calculateRisk(state.questionCount, state.totalScore, {
-    painScore: state?.lastPainScore ?? null,
-    painWeight: state?.lastPainWeight ?? null,
-  });
+  const computed = calculateRiskFromState(state);
   state.decisionLevel = computed.level;
   state.decisionRatio = computed.ratio;
   return computed.level;
@@ -3050,6 +3055,9 @@ function classifyAnswerToOption(answer, options, type) {
 }
 
 function computeUrgencyLevel(questionCount, totalScore, debugMeta = {}) {
+  if (debugMeta?.state) {
+    return calculateRiskFromState(debugMeta.state);
+  }
   return calculateRisk(questionCount, totalScore, debugMeta);
 }
 
@@ -3081,16 +3089,91 @@ function calculateRisk(questionCount, totalScore, debugMeta = {}) {
   return { ratio, level, urgency };
 }
 
+function mapRiskLevelToSeverityScore(riskLevel) {
+  if (riskLevel === RISK_LEVELS.HIGH) return 3;
+  if (riskLevel === RISK_LEVELS.MEDIUM) return 1;
+  return 0;
+}
+
+function getPainSeverityScore(state) {
+  const pain = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
+  if (pain !== null) {
+    if (pain >= 8) return 3;
+    if (pain >= 5) return 1;
+    return 0;
+  }
+  return mapRiskLevelToSeverityScore(state?.slotNormalized?.pain_score?.riskLevel);
+}
+
+function calculateRiskFromState(state) {
+  const scores = {
+    pain: getPainSeverityScore(state),
+    quality: mapRiskLevelToSeverityScore(state?.slotNormalized?.worsening?.riskLevel),
+    onset: mapRiskLevelToSeverityScore(state?.slotNormalized?.duration?.riskLevel),
+    impact: mapRiskLevelToSeverityScore(state?.slotNormalized?.daily_impact?.riskLevel),
+    symptoms: mapRiskLevelToSeverityScore(state?.slotNormalized?.associated_symptoms?.riskLevel),
+    cause: mapRiskLevelToSeverityScore(state?.slotNormalized?.cause_category?.riskLevel),
+  };
+
+  const painHigh = scores.pain === 3;
+  const impactHigh = scores.impact === 3;
+  const symptomsMidOrHigh = scores.symptoms >= 1;
+  const criticalHighCount = [scores.pain, scores.impact, scores.symptoms].filter((v) => v === 3).length;
+
+  const phase1Triggered =
+    (painHigh && impactHigh) ||
+    (painHigh && symptomsMidOrHigh) ||
+    (impactHigh && symptomsMidOrHigh) ||
+    criticalHighCount >= 2;
+
+  if (phase1Triggered) {
+    console.log("---- KAIRO URGENCY DEBUG (Phase1 RED) ----");
+    console.log("scores:", scores);
+    console.log("phase1:", {
+      painHigh,
+      impactHigh,
+      symptomsMidOrHigh,
+      criticalHighCount,
+    });
+    console.log("severityIndex:", 1);
+    console.log("finalUrgency:", "red");
+    console.log("-------------------------------------------");
+    return { ratio: 1, level: "🔴", urgency: "red" };
+  }
+
+  const weightedTotal =
+    scores.pain * 1.4 +
+    scores.impact * 1.4 +
+    scores.symptoms * 1.3 +
+    scores.onset * 1.0 +
+    scores.quality * 1.0 +
+    scores.cause * 0.8;
+  const maxWeighted = 20.7;
+  const rawIndex = weightedTotal / maxWeighted;
+  const severityIndex = Math.max(0, Math.min(1, rawIndex));
+
+  let urgency = "green";
+  if (severityIndex >= 0.65) {
+    urgency = "red";
+  } else if (severityIndex >= 0.45) {
+    urgency = "yellow";
+  }
+  const level = urgency === "red" ? "🔴" : urgency === "yellow" ? "🟡" : "🟢";
+
+  console.log("---- KAIRO URGENCY DEBUG (Phase2 Index) ----");
+  console.log("scores:", scores);
+  console.log("weightedTotal:", weightedTotal);
+  console.log("maxWeighted:", maxWeighted);
+  console.log("severityIndex:", severityIndex);
+  console.log("finalUrgency:", urgency);
+  console.log("--------------------------------------------");
+  console.assert(severityIndex >= 0 && severityIndex <= 1, "severityIndex out of range", severityIndex);
+  return { ratio: severityIndex, level, urgency };
+}
+
 function judgeDecision(state) {
   console.log("[DEBUG] judge function entered");
-  const { ratio, level } = calculateRisk(
-    state.questionCount,
-    state.totalScore,
-    {
-      painScore: state?.lastPainScore ?? null,
-      painWeight: state?.lastPainWeight ?? null,
-    }
-  );
+  const { ratio, level } = calculateRiskFromState(state);
   const confidence = state.confidence;
   const slotsFilledCount = countFilledSlots(state.slotFilled);
   const askedSlotsCount = countAskedSlots(state.askedSlots);
@@ -3473,7 +3556,7 @@ app.post("/api/chat", async (req, res) => {
       decisionAllowed &&
       !(conversationState[conversationId].causeDetailPending && !conversationState[conversationId].causeDetailAnswered);
     const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled);
-    const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n合計スコア: ${conversationState[conversationId].totalScore}\n最大スコア: ${conversationState[conversationId].questionCount * 2}\n判断スロット埋まり数: ${slotsFilledCount}/6\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が7以上、または判断スロットが6つ埋まった時点で必ず判定・まとめへ移行する。\n※スコアや計算はユーザーに表示しないこと。最終判断はまとめ直前の1回のみ実行すること。`;
+    const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n判断スロット埋まり数: ${slotsFilledCount}/6\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n緊急度判定は「危険フラグ優先モデル」を使用する（Phase1: 即時RED条件 / Phase2: 重症指数）。\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が7以上、または判断スロットが6つ埋まった時点で必ず判定・まとめへ移行する。\n※内部計算はユーザーに表示しないこと。最終判断はまとめ直前の1回のみ実行すること。`;
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini", // Cost-effective model
       messages: [
@@ -3682,14 +3765,7 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].decisionType = decisionType;
       conversationState[conversationId].decisionLevel = level;
       if (conversationState[conversationId].decisionRatio === null) {
-        const computed = calculateRisk(
-          conversationState[conversationId].questionCount,
-          conversationState[conversationId].totalScore,
-          {
-            painScore: conversationState[conversationId]?.lastPainScore ?? null,
-            painWeight: conversationState[conversationId]?.lastPainWeight ?? null,
-          }
-        );
+        const computed = calculateRiskFromState(conversationState[conversationId]);
         conversationState[conversationId].decisionRatio = computed.ratio;
       }
       conversationState[conversationId].finalQuestionPending = false;
