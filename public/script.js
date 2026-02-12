@@ -772,8 +772,6 @@ async function callOpenAI(message) {
   const conversationId = getConversationId();
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   let lastError = null;
-
-  const requestId = ++currentRequestId;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const response = await fetch(API_URL, {
@@ -846,6 +844,11 @@ async function callOpenAI(message) {
 
 // Handle user input
 async function handleUserInput() {
+  const requestId =
+    (window.crypto && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : Date.now().toString();
+  currentRequestId = requestId;
   const input = document.getElementById("userInput");
   const sendButton = document.getElementById("sendButton");
   const userText = input.value.trim();
