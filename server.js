@@ -1028,12 +1028,13 @@ function buildYellowOtcBlock(category, warningIndex = 0, pharmacyRec, otcExample
     "💊 一般的な市販薬",
     "⭐ おすすめの薬局",
   ];
-  const top = pharmacyRec?.candidates?.[0] || (pharmacyRec?.name ? { name: pharmacyRec.name, mapsUrl: pharmacyRec.mapsUrl } : null);
-  if (top?.name) {
-    lines.push(`**${top.name}**`);
-  }
-  if (pharmacyRec?.candidates?.[1]?.name) {
-    lines.push(`代替：${pharmacyRec.candidates[1].name}`);
+  const pharmacyNames = (pharmacyRec?.candidates || [])
+    .map((c) => c?.name)
+    .filter(Boolean)
+    .slice(0, 2);
+  if (pharmacyNames.length === 0 && pharmacyRec?.name) pharmacyNames.push(pharmacyRec.name);
+  if (pharmacyNames.length > 0) {
+    lines.push(`**${pharmacyNames.join("・")}**`);
   }
   lines.push("薬はこの2つからでOK");
   const picked = examples.slice(0, 2);
@@ -1047,10 +1048,18 @@ function buildYellowOtcBlock(category, warningIndex = 0, pharmacyRec, otcExample
       ? item.descBullets.filter(Boolean).slice(0, 2)
       : [];
     if (desc.length > 0) {
-      desc.forEach((b) => lines.push(`・${b}`));
+      desc.forEach((b) => {
+        const normalized = String(b)
+          .replace(/使われることがある/g, "使われます")
+          .replace(/使われることが多い/g, "使われます")
+          .replace(/使われることがあります/g, "使われます")
+          .replace(/選ばれることがある/g, "選ばれます")
+          .replace(/選ばれることが多い/g, "選ばれます")
+          .replace(/選ばれることがあります/g, "選ばれます");
+        lines.push(`・${normalized}`);
+      });
     } else {
-      // 最低保証（断定禁止の一般説明）
-      lines.push("・多くの場合、このタイプの症状のつらさをやわらげる目的で使われることがあります");
+      lines.push("・このタイプの症状のつらさをやわらげる目的で使われます");
     }
   });
   lines.push("※ どちらか1つで大丈夫です。");
@@ -1974,21 +1983,104 @@ function ensureOutlookBlock(text, state) {
   return replaceSummaryBlock(text, "⏳ 今後の見通し", buildOutlookBlock(state));
 }
 
-function ensureYellowActionsBlock(text) {
-  return replaceSummaryBlock(
-    text,
-    "✅ 今すぐやること",
-    [
-      "✅ 今すぐやること（これだけでOK）",
-      "今日は次の3つだけ意識してみてください。",
-      "・少しずつ水分をとってみてください。体が乾くと刺激を感じやすいとされています。",
-      "・横になれるなら体を休めてみてください。力を抜くと楽になることがあります。",
-      "・市販薬という選択肢を持つ。現時点では緊急性は高くなく、段階的な対応が合っています。",
-    ].join("\n")
+function buildImmediateActionsBlock(level, state, historyText = "") {
+  const restLevel = resolveRestLevelFromState(state);
+  const symptomSource = historyText || Object.values(state?.slotAnswers || {}).join("\n");
+  const category = detectSymptomCategory(symptomSource);
+  const lines = ["✅ 今すぐやること（これだけでOK）"];
+
+  const action1ByCategory = {
+    stomach: {
+      title: "1️⃣ 水分をしっかりとりましょう",
+      reason: "→ 水分不足は不調を悪化させる要因になります。十分な水分補給は回復を助けます。",
+    },
+    head: {
+      title: "1️⃣ 水分をとって、静かな環境で過ごしましょう",
+      reason: "→ 脱水や刺激は頭痛のつらさを強めることがあります。体を回復モードに切り替えることが大切です。",
+    },
+    throat: {
+      title: "1️⃣ こまめに水分をとり、のどを乾かさないようにしましょう",
+      reason: "→ 乾燥が続くとのどの刺激が強くなりやすいため、保湿と水分補給が回復を助けます。",
+    },
+    other: {
+      title: "1️⃣ 水分をしっかりとりましょう",
+      reason: "→ 体内の水分不足は痛みや倦怠感を悪化させる要因になります。十分な水分補給は回復を助けます。",
+    },
+  };
+  const action1 = action1ByCategory[category] || action1ByCategory.other;
+
+  if (level === "🟡") {
+    const openers = [
+      [
+        "現時点では市販薬の使用＋十分な休息が合理的な対応です。",
+        "体を回復モードに切り替えることが最優先です。",
+      ],
+      [
+        "現時点では市販薬と休息を組み合わせる対応が医学的に妥当です。",
+        "まずは無理を減らして、回復を優先する進め方が合っています。",
+      ],
+    ];
+    const opener = openers[Math.floor(Math.random() * openers.length)];
+    lines.push(...opener, "", action1.title, action1.reason, "");
+
+    if (restLevel === "LIGHT" || restLevel === "STRONG") {
+      lines.push(
+        "2️⃣ 今日は無理をせず、できるだけ横になって休みましょう",
+        "→ 活動を続けると症状が長引く可能性があります。休息は治療の一部です。",
+        "",
+        "症状の回復のために十分な休息が必要と感じる場合は、オンライン診療を利用し、医師の判断のもとでMC（医療証明書）を取得することができます。"
+      );
+    } else {
+      lines.push(
+        "2️⃣ 痛みが続く場合は市販の鎮痛薬を検討できます",
+        "→ 痛みを早めに抑えることで、症状の悪化を防げる可能性があります。",
+        "3️⃣ 今日は刺激の少ない環境で、体を休ませる時間を確保しましょう",
+        "→ 回復に必要な休息時間を先に確保すると、症状が長引くリスクを下げられます。"
+      );
+    }
+    return lines.join("\n");
+  }
+
+  // 🟢
+  lines.push(
+    action1.title,
+    action1.reason,
+    "2️⃣ 刺激物は避けましょう",
+    "→ お酒やタバコは控えてください。刺激を減らすと回復しやすくなります。"
   );
+  if (restLevel === "LIGHT" || restLevel === "STRONG") {
+    lines.push(
+      "3️⃣ 今日は無理をせず、少し早めに休みましょう",
+      "→ 初期段階で休息を取ると悪化を防げます。"
+    );
+  } else {
+    lines.push(
+      "3️⃣ 通常生活を続けながら様子をみましょう",
+      "→ 現時点では医療介入の必要性は低い状態です。"
+    );
+  }
+  return lines.join("\n");
+}
+
+function ensureImmediateActionsBlock(text, level, state, historyText = "") {
+  if (!text) return text;
+  if (level !== "🟡" && level !== "🟢") return text;
+  return replaceSummaryBlock(text, "✅ 今すぐやること", buildImmediateActionsBlock(level, state, historyText));
+}
+
+function mapDailyImpactAnswerToRestLevel(answer) {
+  const normalized = String(answer || "").trim();
+  if (normalized === "普通に動ける") return "NONE";
+  if (normalized === "少しつらいが動ける") return "LIGHT";
+  if (normalized === "動けないほどつらい") return "STRONG";
+  return null;
 }
 
 function resolveRestLevelFromState(state) {
+  // Rest判定は4問目（日常生活への影響）のみを参照する
+  const byAnswer = mapDailyImpactAnswerToRestLevel(state?.slotAnswers?.daily_impact);
+  if (byAnswer) return byAnswer;
+  // 自由記述は近似マッピング結果（slotNormalized）でフォールバック
   const dailyImpact = state?.slotNormalized?.daily_impact?.riskLevel;
   if (dailyImpact === RISK_LEVELS.HIGH) return "STRONG";
   if (dailyImpact === RISK_LEVELS.MEDIUM) return "LIGHT";
@@ -2042,6 +2134,10 @@ function buildRestMcDecisionBlock(level, state) {
 
 function ensureRestMcDecisionBlock(text, level, state) {
   if (!text) return text;
+  if (resolveRestLevelFromState(state) === "NONE") {
+    // NONEではMC表示を一切出さない
+    return text;
+  }
   const block = buildRestMcDecisionBlock(level, state);
   const replaced = replaceSummaryBlock(text, "🧾 休息とMCの目安", block);
   if (replaced !== text) return replaced;
@@ -2919,7 +3015,7 @@ function buildLocalSummaryFallback(level, history, state) {
   const baseBlocks = [
     `${level} ここまでの情報を整理します\n${buildSummaryIntroTemplate()}`,
     `🤝 今の状態について\n${buildStateFactsBullets(state).join("\n")}\n\n${buildStateAboutLine(state, level)}\n${buildStateDecisionLine(state, level)}`,
-    `✅ 今すぐやること（これだけでOK）\n今日は次の3つだけ意識してみてください。\n・少しずつ水分をとってみてください。体が乾くと刺激を感じやすいとされています。\n・横になれるなら体を休めてみてください。力を抜くと楽になることがあります。\n・刺激になる飲食や冷えを避けてみてください。負担を減らすと落ち着くことがあります。`,
+    buildImmediateActionsBlock(level, state, historyText),
     `⏳ 今後の見通し\nこのタイプの症状は、時間の経過で変化することがあります。\n・もし明日の朝も同じ痛みが続いていたら\n・もし痛みが7以上に強くなったら\nそのタイミングで、もう一度Kairoに聞いてください。`,
   ];
   const pharmacyRec =
@@ -2937,7 +3033,15 @@ function buildLocalSummaryFallback(level, history, state) {
 
   if (level === "🟡") {
     return sanitizeSummaryBullets(
-      [...baseBlocks, otcBlock, buildRestMcDecisionBlock(level, state), closing].join("\n"),
+      [
+        baseBlocks[0],
+        baseBlocks[1],
+        baseBlocks[2],
+        otcBlock,
+        baseBlocks[3],
+        buildRestMcDecisionBlock(level, state),
+        closing,
+      ].join("\n"),
       state
     );
   }
@@ -3775,9 +3879,12 @@ app.post("/api/chat", async (req, res) => {
           aiResponse,
           conversationState[conversationId]
         );
-      }
-      if (level === "🟡") {
-        aiResponse = ensureYellowActionsBlock(aiResponse);
+        aiResponse = ensureImmediateActionsBlock(
+          aiResponse,
+          level,
+          conversationState[conversationId],
+          historyTextForOtc
+        );
       }
       aiResponse = ensureOutlookBlock(aiResponse, conversationState[conversationId]);
       if (level === "🔴") {
