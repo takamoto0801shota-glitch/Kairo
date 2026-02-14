@@ -1832,7 +1832,7 @@ function detectCareDestinationFromHistory(historyText) {
   }
   // default
   return {
-    label: "GP/病院",
+    label: "GP",
     header: "⭐ おすすめのGP（近くて行きやすい）",
     places: { type: "doctor", keywords: ["clinic", "general practitioner", "medical clinic"] },
     fallbackNames: null,
@@ -1899,9 +1899,6 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
   const lines = [
     "🏥 Kairoの判断",
     timeMessage,
-    "今の症状の出方を整理すると、",
-    `薬で様子を見るより、一度${specialty}で確認した方が安心できる状態です。`,
-    "",
     "「危険」という判断ではありませんが、",
     "ここで一度プロに見てもらう選択が、いちばん迷いが残りません。",
     "",
@@ -1915,19 +1912,30 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
     lines.push("・予約なしでも行きやすい");
     lines.push("・英語が苦手でも対応に慣れている");
     lines.push("・必要があれば検査や紹介につなげやすい");
-    if (top.mapsUrl) {
-      lines.push("");
-      lines.push(`📍 地図：${top.mapsUrl}`);
-    }
   }
   lines.push("");
-  lines.push("⸻");
-  lines.push("");
-  lines.push("行く前に知っておくと安心なこと");
-  lines.push("・今の症状は、軽い処置や確認だけで終わるケースも多いです");
-  lines.push("・その場で「薬だけ出して終わる」「様子見でOKと言われる」こともあります");
-  lines.push("・必要なら検査を提案されるため、次の一歩がはっきりします");
+  lines.push("もし、外出がつらい場合は、オンライン診療という方法もあります。");
+  lines.push("今の症状であればオンラインでの初期相談は可能です。");
+  lines.push("Doctor Anywhere / WhiteCoat");
+  lines.push("オンラインでもMCは発行されます。");
   return lines.join("\n");
+}
+
+function buildHospitalConcernPoint(historyText) {
+  const destination = detectCareDestinationFromHistory(historyText || "");
+  return `今の症状の出方を整理すると、薬で様子を見るより、一度${destination.label}で確認した方が安心できる状態です。`;
+}
+
+function ensureHospitalConcernBlock(text, historyText) {
+  if (!text) return text;
+  return replaceSummaryBlock(
+    text,
+    "⚠️ Kairoが気になっているポイント",
+    [
+      "⚠️ Kairoが気になっているポイント",
+      buildHospitalConcernPoint(historyText),
+    ].join("\n")
+  );
 }
 
 function ensureHospitalBlock(text, state, historyText) {
@@ -1951,7 +1959,7 @@ function replaceSummaryBlock(text, header, block) {
   if (startIndex === -1) return text;
   const nextIndex = lines.findIndex((line, idx) => {
     if (idx <= startIndex) return false;
-    return /^(🟢|🟡|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬)\s/.test(line);
+    return /^(🟢|🟡|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(line);
   });
   const endIndex = nextIndex === -1 ? lines.length : nextIndex;
   const updated = [
@@ -1978,6 +1986,71 @@ function ensureYellowActionsBlock(text) {
       "・市販薬という選択肢を持つ。現時点では緊急性は高くなく、段階的な対応が合っています。",
     ].join("\n")
   );
+}
+
+function resolveRestLevelFromState(state) {
+  const dailyImpact = state?.slotNormalized?.daily_impact?.riskLevel;
+  if (dailyImpact === RISK_LEVELS.HIGH) return "STRONG";
+  if (dailyImpact === RISK_LEVELS.MEDIUM) return "LIGHT";
+  return "NONE";
+}
+
+function resolveMcRecommendation(restLevel) {
+  if (restLevel === "STRONG") return "true";
+  if (restLevel === "LIGHT") return "optional";
+  return "false";
+}
+
+function buildRestMcDecisionBlock(level, state) {
+  const restLevel = resolveRestLevelFromState(state);
+  const mcRecommended = resolveMcRecommendation(restLevel);
+  const lines = ["🧾 休息とMCの目安"];
+
+  if (level === "🔴") {
+    lines.push("・医学的判断：今は対面受診を優先する段階です。");
+    lines.push("・社会的対応（MC）：MC取得は副次目的として扱い、まず受診先で相談する形が合います。");
+    return lines.join("\n");
+  }
+
+  if (level === "🟡") {
+    if (restLevel === "NONE") {
+      lines.push("・医学的判断：今は市販薬＋自宅ケアが基本です。");
+      lines.push("・社会的対応（MC）：通常勤務が難しくなければ、MC取得は必須ではありません。");
+    } else if (restLevel === "LIGHT") {
+      lines.push("・医学的判断：今は市販薬＋休息で整える流れが合っています。");
+      lines.push("・社会的対応（MC）：MCが必要な場合は、オンライン診療で取得可能なレベルです。");
+    } else {
+      lines.push("・医学的判断：今は市販薬＋強い休息を優先する流れが合っています。");
+      lines.push("・社会的対応（MC）：MC取得目的なら、オンライン診療を第一選択にできます。");
+    }
+    return lines.join("\n");
+  }
+
+  if (restLevel === "NONE") {
+    lines.push("・医学的判断：今は自宅で様子を見る対応が合っています。");
+    lines.push("・社会的対応（MC）：通常勤務が可能なら、MC取得は不要です。");
+  } else if (restLevel === "LIGHT") {
+    lines.push("・医学的判断：今は自宅で軽く休息を取る対応が合っています。");
+    lines.push("・社会的対応（MC）：会社規定で必要な場合は、オンライン診療を選択できます。");
+  } else {
+    lines.push("・医学的判断：今は自宅でしっかり休息を取る対応が合っています。");
+    lines.push("・社会的対応（MC）：MCが必要な場合は、オンライン診療を活用できます。");
+  }
+
+  return lines.join("\n");
+}
+
+function ensureRestMcDecisionBlock(text, level, state) {
+  if (!text) return text;
+  const block = buildRestMcDecisionBlock(level, state);
+  const replaced = replaceSummaryBlock(text, "🧾 休息とMCの目安", block);
+  if (replaced !== text) return replaced;
+  const lines = text.split("\n");
+  const lastIndex = lines.findIndex((line) => line.startsWith("🌱 最後に"));
+  if (lastIndex >= 0) {
+    return [...lines.slice(0, lastIndex), block, ...lines.slice(lastIndex)].join("\n");
+  }
+  return `${text}\n${block}`;
 }
 
 function buildSummaryIntroTemplate() {
@@ -2053,7 +2126,7 @@ function extractSummaryFacts(summaryText) {
       inStateBlock = true;
       continue;
     }
-    if (inStateBlock && /^(🟢|🟡|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬)\s/.test(line)) {
+    if (inStateBlock && /^(🟢|🟡|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(line)) {
       break;
     }
     if (inStateBlock && line.startsWith("・")) {
@@ -2863,7 +2936,10 @@ function buildLocalSummaryFallback(level, history, state) {
   const closing = `🌱 最後に\nまた不安になったら、いつでもここで聞いてください。`;
 
   if (level === "🟡") {
-    return sanitizeSummaryBullets([...baseBlocks, otcBlock, closing].join("\n"), state);
+    return sanitizeSummaryBullets(
+      [...baseBlocks, otcBlock, buildRestMcDecisionBlock(level, state), closing].join("\n"),
+      state
+    );
   }
   if (level === "🔴") {
     const hospitalRec = buildHospitalRecommendationDetail(
@@ -2877,15 +2953,19 @@ function buildLocalSummaryFallback(level, history, state) {
       "📝 いまの状態を整理します（メモ）",
       facts.join("\n") || "・現在の症状について相談されています",
       "⚠️ Kairoが気になっているポイント",
-      "急に悪化している可能性があり、様子見と言い切れない点があります。",
+      buildHospitalConcernPoint(historyText),
       "🏥 Kairoの判断",
       hospitalBlock.replace(/^🏥 Kairoの判断\n/, ""),
+      buildRestMcDecisionBlock(level, state),
       "💬 最後に",
       "不安な状況だと思います。迷ったときは受診する判断は慎重で正しいです。",
     ].join("\n"), state);
   }
 
-  return sanitizeSummaryBullets([...baseBlocks, closing].join("\n"), state);
+  return sanitizeSummaryBullets(
+    [...baseBlocks, buildRestMcDecisionBlock(level, state), closing].join("\n"),
+    state
+  );
 }
 
 function normalizeAnswerText(text) {
@@ -3701,6 +3781,7 @@ app.post("/api/chat", async (req, res) => {
       }
       aiResponse = ensureOutlookBlock(aiResponse, conversationState[conversationId]);
       if (level === "🔴") {
+        aiResponse = ensureHospitalConcernBlock(aiResponse, historyTextForOtc);
         aiResponse = ensureHospitalBlock(
           aiResponse,
           conversationState[conversationId],
@@ -3751,6 +3832,11 @@ app.post("/api/chat", async (req, res) => {
         );
       }
       aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
+      aiResponse = ensureRestMcDecisionBlock(
+        aiResponse,
+        level,
+        conversationState[conversationId]
+      );
       aiResponse = sanitizeGeneralPhrases(aiResponse);
       aiResponse = sanitizeSummaryQuestions(aiResponse);
       aiResponse = enforceSummaryIntroTemplate(aiResponse);
