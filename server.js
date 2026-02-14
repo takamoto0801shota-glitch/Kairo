@@ -465,6 +465,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
   2) pain_score が高（8以上）かつ associated_symptoms が中以上
   3) daily_impact が高かつ associated_symptoms が中以上
   4) criticalスロット（pain_score / daily_impact / associated_symptoms）のうち、高レベル（最大weight=3）が2つ以上
+  5) criticalスロット（pain_score / daily_impact / associated_symptoms）のうち、高レベルが1つだけの場合は🟡固定
 - Phase2（重症指数）：
   - 低=0 / 中=1 / 高=3
   - pain_score ×1.4
@@ -819,6 +820,9 @@ function initConversationState(input = {}) {
     clientMeta: input.clientMeta || {},
     locationSnapshot: null,
     summaryText: null,
+    judgmentSnapshot: null,
+    followUpSnapshotPendingField: null,
+    followUpSnapshotResume: null,
     expectsPainScore: false,
     lastPainScore: null,
     lastPainWeight: null,
@@ -1992,19 +1996,19 @@ function buildImmediateActionsBlock(level, state, historyText = "") {
   const action1ByCategory = {
     stomach: {
       title: "・水分をしっかりとりましょう",
-      reason: "・水分不足は不調を悪化させる要因になります。十分な水分補給は回復を助けます。",
+      reason: "→ 水分不足は不調を悪化させる要因になります。十分な水分補給は回復を助けます。",
     },
     head: {
       title: "・水分をとって、静かな環境で過ごしましょう",
-      reason: "・脱水や刺激は頭痛のつらさを強めることがあります。体を回復モードに切り替えることが大切です。",
+      reason: "→ 脱水や刺激は頭痛のつらさを強めることがあります。体を回復モードに切り替えることが大切です。",
     },
     throat: {
       title: "・こまめに水分をとり、のどを乾かさないようにしましょう",
-      reason: "・乾燥が続くとのどの刺激が強くなりやすいため、保湿と水分補給が回復を助けます。",
+      reason: "→ 乾燥が続くとのどの刺激が強くなりやすいため、保湿と水分補給が回復を助けます。",
     },
     other: {
       title: "・水分をしっかりとりましょう",
-      reason: "・体内の水分不足は痛みや倦怠感を悪化させる要因になります。十分な水分補給は回復を助けます。",
+      reason: "→ 体内の水分不足は痛みや倦怠感を悪化させる要因になります。十分な水分補給は回復を助けます。",
     },
   };
   const action1 = action1ByCategory[category] || action1ByCategory.other;
@@ -2026,16 +2030,16 @@ function buildImmediateActionsBlock(level, state, historyText = "") {
     if (restLevel === "LIGHT" || restLevel === "STRONG") {
       lines.push(
         "・今日は無理をせず、できるだけ横になって休みましょう",
-        "・活動を続けると症状が長引く可能性があります。休息は治療の一部です。",
+        "→ 活動を続けると症状が長引く可能性があります。休息は治療の一部です。",
         "",
         "症状の回復のために十分な休息が必要と感じる場合は、オンライン診療を利用し、医師の判断のもとでMC（医療証明書）を取得することができます。"
       );
     } else {
       lines.push(
         "・痛みが続く場合は市販の鎮痛薬を検討できます",
-        "・痛みを早めに抑えることで、症状の悪化を防げる可能性があります。",
+        "→ 痛みを早めに抑えることで、症状の悪化を防げる可能性があります。",
         "・今日は静かな環境で、体を休ませる時間を確保しましょう",
-        "・回復に必要な休息時間を先に確保すると、症状が長引くリスクを下げられます。"
+        "→ 回復に必要な休息時間を先に確保すると、症状が長引くリスクを下げられます。"
       );
     }
     return lines.join("\n");
@@ -2046,19 +2050,19 @@ function buildImmediateActionsBlock(level, state, historyText = "") {
     action1.title,
     action1.reason,
     "・体を冷やさず、楽な姿勢で過ごしましょう",
-    "・体への負担を減らすことで、回復しやすい状態を保てます。"
+    "→ 体への負担を減らすことで、回復しやすい状態を保てます。"
   );
   if (restLevel === "LIGHT" || restLevel === "STRONG") {
     lines.push(
       "・今日は無理をせず、少し早めに休みましょう",
-      "・無理を続けると回復が遅れるため、今日は治す日と決めて休むのが安全です。",
+      "→ 無理を続けると回復が遅れるため、今日は治す日と決めて休むのが安全です。",
       "",
       "症状の回復のために十分な休息が必要と感じる場合は、オンライン診療を利用し、医師の判断のもとでMC（医療証明書）を取得することができます。"
     );
   } else {
     lines.push(
       "・通常生活を続けながら様子をみましょう",
-      "・現時点では医療介入の必要性は低い状態です。"
+      "→ 現時点では医療介入の必要性は低い状態です。"
     );
   }
   return lines.join("\n");
@@ -2212,33 +2216,147 @@ function buildDecisionReasonBullets(state) {
   return reasons.slice(0, 3);
 }
 
-function extractSummaryFacts(summaryText) {
-  if (!summaryText) return [];
-  const lines = summaryText.split("\n");
-  const facts = [];
-  let inStateBlock = false;
-  for (const line of lines) {
-    if (line.startsWith("🤝 今の状態について") || line.startsWith("📝 いまの状態を整理します")) {
-      inStateBlock = true;
-      continue;
-    }
-    if (inStateBlock && /^(🟢|🟡|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(line)) {
-      break;
-    }
-    if (inStateBlock && line.startsWith("・")) {
-      facts.push(line.replace(/^・\s*/, ""));
-    }
+function freezeJudgmentSnapshot(snapshot) {
+  if (!snapshot) return null;
+  const normalized = {
+    main_symptom: snapshot.main_symptom || "",
+    duration: snapshot.duration || "",
+    severity: snapshot.severity || "",
+    red_flags: Array.isArray(snapshot.red_flags) ? [...snapshot.red_flags] : [],
+    risk_factors: Array.isArray(snapshot.risk_factors) ? [...snapshot.risk_factors] : [],
+    user_original_phrases: Array.isArray(snapshot.user_original_phrases)
+      ? [...snapshot.user_original_phrases]
+      : [],
+    judgment_type: snapshot.judgment_type || "C_WATCHFUL_WAITING",
+  };
+  Object.freeze(normalized.red_flags);
+  Object.freeze(normalized.risk_factors);
+  Object.freeze(normalized.user_original_phrases);
+  return Object.freeze(normalized);
+}
+
+function detectMainSymptomFromText(text) {
+  const source = String(text || "");
+  if (/頭痛|頭が痛|偏頭痛|こめかみ/.test(source)) return "頭痛";
+  if (/腹痛|お腹|胃痛|下痢|便秘|吐き気/.test(source)) return "腹部症状";
+  if (/喉|のど|咳|せき|痰/.test(source)) return "のど・咳の症状";
+  if (/歯|歯ぐき|親知らず/.test(source)) return "歯の痛み";
+  if (/耳|耳鳴り|聞こえ/.test(source)) return "耳の症状";
+  if (/鼻|鼻水|鼻づまり|くしゃみ/.test(source)) return "鼻の症状";
+  if (/熱|発熱|だるい|倦怠/.test(source)) return "発熱・だるさ";
+  return "";
+}
+
+function buildJudgmentSnapshot(state, history = [], decisionType) {
+  const userPhrases = history
+    .filter((msg) => msg?.role === "user")
+    .map((msg) => String(msg?.content || "").trim())
+    .filter(Boolean)
+    .slice(-10);
+  const answers = state?.slotAnswers || {};
+  const answerPhrases = Object.values(answers)
+    .map((v) => String(v || "").trim())
+    .filter(Boolean);
+  if (state?.causeDetailText) {
+    answerPhrases.push(String(state.causeDetailText).trim());
   }
-  if (facts.length > 0) return facts.slice(0, 3);
-  return lines
-    .filter((line) => line.startsWith("・"))
-    .map((line) => line.replace(/^・\s*/, ""))
-    .slice(0, 3);
+  const mergedPhrases = [];
+  for (const p of [...userPhrases, ...answerPhrases]) {
+    if (!p || mergedPhrases.includes(p)) continue;
+    mergedPhrases.push(p);
+  }
+  const symptomSource = mergedPhrases.join("\n");
+  const mainSymptom = detectMainSymptomFromText(symptomSource) || detectMainSymptomFromText(Object.keys(answers).join(" "));
+  const duration = String(answers.duration || "").trim();
+  const severity = Number.isFinite(state?.lastPainScore)
+    ? `${state.lastPainScore}/10`
+    : state?.slotNormalized?.pain_score?.riskLevel === RISK_LEVELS.HIGH
+      ? "高め"
+      : state?.slotNormalized?.pain_score?.riskLevel === RISK_LEVELS.MEDIUM
+        ? "中等度"
+        : state?.slotNormalized?.pain_score?.riskLevel === RISK_LEVELS.LOW
+          ? "軽め"
+          : "";
+
+  const redFlags = [];
+  if (state?.slotNormalized?.associated_symptoms?.riskLevel === RISK_LEVELS.HIGH) {
+    redFlags.push("強い付随症状");
+  }
+  if (Number.isFinite(state?.lastPainScore) && state.lastPainScore >= 8) {
+    redFlags.push("痛みスコアが高い");
+  }
+  if (state?.slotNormalized?.daily_impact?.riskLevel === RISK_LEVELS.HIGH) {
+    redFlags.push("日常動作への強い影響");
+  }
+
+  const riskFactors = [];
+  if (answers.cause_category && !/思い当たらない|ない|なし/.test(answers.cause_category)) {
+    riskFactors.push(`きっかけ: ${answers.cause_category}`);
+  }
+  if (duration) {
+    riskFactors.push(`経過: ${duration}`);
+  }
+  if (answers.associated_symptoms && !/ない|なし|特にない/.test(answers.associated_symptoms)) {
+    riskFactors.push(`付随症状: ${answers.associated_symptoms}`);
+  }
+
+  return freezeJudgmentSnapshot({
+    main_symptom: mainSymptom,
+    duration,
+    severity,
+    red_flags: redFlags.slice(0, 3),
+    risk_factors: riskFactors.slice(0, 4),
+    user_original_phrases: mergedPhrases.slice(0, 10),
+    judgment_type: decisionType || state?.decisionType || "C_WATCHFUL_WAITING",
+  });
+}
+
+function getMissingFieldForFollowUp(snapshot) {
+  if (!snapshot?.main_symptom) {
+    return {
+      field: "main_symptom",
+      question: "行動を正確に整理するため、主な症状をひとことで教えてください。",
+    };
+  }
+  if (!snapshot?.severity) {
+    return {
+      field: "severity",
+      question: "行動の優先度をそろえるため、つらさは10段階でどのくらいか教えてください。",
+    };
+  }
+  if (!snapshot?.duration) {
+    return {
+      field: "duration",
+      question: "判断根拠をそろえるため、症状がいつ頃から続いているかだけ教えてください。",
+    };
+  }
+  return null;
+}
+
+function patchSnapshotField(snapshot, field, value) {
+  if (!snapshot || !field) return snapshot;
+  const nextValue = String(value || "").trim();
+  if (!nextValue) return snapshot;
+  const next = {
+    ...snapshot,
+    user_original_phrases: [...(snapshot.user_original_phrases || [])],
+  };
+  if (!next[field]) {
+    next[field] = nextValue;
+  }
+  if (!next.user_original_phrases.includes(nextValue)) {
+    next.user_original_phrases.push(nextValue);
+  }
+  return freezeJudgmentSnapshot(next);
 }
 
 function buildCommunicationScript(state, destinationName, decisionType) {
-  const facts = extractSummaryFacts(state?.summaryText);
-  const factsSentence = facts.length > 0 ? `症状は${facts.join("、")}です。` : "症状について相談したいです。";
+  const snapshot = state?.judgmentSnapshot || {};
+  const facts = [];
+  if (snapshot.main_symptom) facts.push(`${snapshot.main_symptom}`);
+  if (snapshot.severity) facts.push(`つらさは${snapshot.severity}`);
+  if (snapshot.duration) facts.push(`${snapshot.duration}から続いています`);
+  const factsSentence = facts.length > 0 ? `症状は${facts.join("、")}。` : "症状について相談したいです。";
   const jp = [
     `こんにちは。${destinationName}で症状の相談をしたくて来ました。`,
     factsSentence,
@@ -2288,13 +2406,11 @@ function buildFollowUpQuestion1(destinationName) {
 }
 
 function buildWatchfulActions(state) {
-  const painLevel =
-    state?.lastPainScore !== null && state?.lastPainScore !== undefined
-      ? `${state.lastPainScore} / 10`
-      : "不明";
+  const snapshot = state?.judgmentSnapshot || {};
+  const painLevel = snapshot.severity || "不明";
   const mobility = state?.slotAnswers?.daily_impact || "普通に動ける";
-  const historyText = Object.values(state?.slotAnswers || {}).join(" ");
-  const category = detectSymptomCategory(historyText);
+  const historyText = [snapshot.main_symptom, ...(snapshot.user_original_phrases || [])].join(" ");
+  const category = detectSymptomCategory(historyText || Object.values(state?.slotAnswers || {}).join(" "));
   const symptomLine =
     category === "stomach"
       ? "お腹の張りが主症状のため、消化管への刺激を避ける目的"
@@ -2349,6 +2465,10 @@ function buildFollowUpJudgeMeta(state) {
 
 function handleFollowUpFlow(message, state) {
   if (!state?.hasSummaryBlockGenerated) return null;
+  const trimmed = (message || "").trim();
+  if (!state.judgmentSnapshot) {
+    state.judgmentSnapshot = buildJudgmentSnapshot(state, [], state.decisionType);
+  }
   const decisionType = state?.decisionType;
   const rawDestinationName =
     state?.followUpDestinationName ||
@@ -2356,11 +2476,45 @@ function handleFollowUpFlow(message, state) {
       ? state?.hospitalRecommendation?.name
       : state?.pharmacyRecommendation?.name);
   const destinationName = formatDestinationName(rawDestinationName, decisionType);
+  const q2 = "今できることを、理由と一緒に整理しますか？";
+
+  // 最低限の行動生成に必要な情報が不足している場合のみ、1問だけ確認する
+  if (state.followUpSnapshotPendingField) {
+    if (isDecline(trimmed)) {
+      state.followUpPhase = "closed";
+      state.followUpSnapshotPendingField = null;
+      state.followUpSnapshotResume = null;
+      return { message: buildClosingMessage() };
+    }
+    state.judgmentSnapshot = patchSnapshotField(
+      state.judgmentSnapshot,
+      state.followUpSnapshotPendingField,
+      trimmed
+    );
+    const resume = state.followUpSnapshotResume;
+    state.followUpSnapshotPendingField = null;
+    state.followUpSnapshotResume = null;
+    if (resume === "watchful_actions") {
+      state.followUpPhase = "closed";
+      return { message: `${buildWatchfulActions(state)}\n\n${buildClosingMessage()}` };
+    }
+    if (resume === "communication_script") {
+      state.followUpStep = 2;
+      const script = buildCommunicationScript(state, destinationName, decisionType);
+      return { message: `${script}\n\n${q2}` };
+    }
+  }
 
   if (decisionType === "C_WATCHFUL_WAITING") {
     const qWatchful = "今できることを、理由と一緒に整理しますか？";
     if (state.followUpStep <= 1) {
       if (isAffirmative(trimmed)) {
+        const missing = getMissingFieldForFollowUp(state.judgmentSnapshot);
+        if (missing) {
+          state.followUpSnapshotPendingField = missing.field;
+          state.followUpSnapshotResume = "watchful_actions";
+          return { message: missing.question };
+        }
         state.followUpPhase = "closed";
         return { message: `${buildWatchfulActions(state)}\n\n${buildClosingMessage()}` };
       }
@@ -2375,9 +2529,7 @@ function handleFollowUpFlow(message, state) {
   }
 
   const q1 = buildFollowUpQuestion1(destinationName);
-  const q2 = "今できることを、理由と一緒に整理しますか？";
   const q3 = "今後の目安も含めて整理しますか？";
-  const trimmed = (message || "").trim();
 
   if (state.followUpPhase === "closed") {
     return { message: buildClosingMessage() };
@@ -2385,6 +2537,12 @@ function handleFollowUpFlow(message, state) {
 
   if (state.followUpStep <= 1) {
     if (isAffirmative(trimmed)) {
+      const missing = getMissingFieldForFollowUp(state.judgmentSnapshot);
+      if (missing) {
+        state.followUpSnapshotPendingField = missing.field;
+        state.followUpSnapshotResume = "communication_script";
+        return { message: missing.question };
+      }
       state.followUpStep = 2;
       const script = buildCommunicationScript(state, destinationName, decisionType);
       return { message: `${script}\n\n${q2}` };
@@ -2921,9 +3079,71 @@ function validateSummaryAgainstNormalized(text, state) {
 }
 
 function buildStateFactsBullets(state) {
-  const facts = buildFactsFromSlotAnswers(state);
-  const filtered = facts.filter((line) => !/^・(ない|特にない|なし)$/.test(line.trim()));
-  return filtered.length > 0 ? filtered : ["・今の症状について相談されている"];
+  const answers = state?.slotAnswers || {};
+  const bullets = [];
+
+  const isNoneLike = (value) =>
+    /(ない|なし|特にない|思い当たらない|分からない|わからない|不明|はっきりしない)/.test(String(value || ""));
+  const isLongDuration = (value) => {
+    const text = String(value || "");
+    if (!text) return false;
+    if (/(さっき|今さっき|数分|数十分|30分|30 分)/.test(text)) return false;
+    return /(時間|半日|1日|一日|数日|昨日|今朝|昨夜|ずっと|続いて)/.test(text);
+  };
+
+  // 1) 危険兆候の有無
+  const symptomRisk = state?.slotNormalized?.associated_symptoms?.riskLevel;
+  if (symptomRisk === RISK_LEVELS.HIGH) {
+    bullets.push("・危険兆候を示す付随症状がみられる");
+  } else {
+    bullets.push("・危険兆候は現時点で目立たない");
+  }
+
+  // 2) daily impact
+  if (answers.daily_impact) {
+    if (answers.daily_impact === "動けないほどつらい") {
+      bullets.push("・日常生活への影響が強い");
+    } else if (answers.daily_impact === "少しつらいが動ける") {
+      bullets.push("・日常生活に支障が出ている");
+    } else if (answers.daily_impact === "普通に動ける") {
+      bullets.push("・日常生活への影響は軽い");
+    } else {
+      bullets.push(`・日常生活への影響は「${answers.daily_impact}」`);
+    }
+  }
+
+  // 3) pain score（5以上のみ）
+  const pain = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
+  if (pain !== null && pain >= 5) {
+    const painLevel = pain >= 8 ? "強め" : "中等度";
+    bullets.push(`・痛みは${pain}/10程度で${painLevel}`);
+  }
+
+  // 4) 経過時間（数時間以上）
+  if (isLongDuration(answers.duration)) {
+    bullets.push("・症状は数時間以上続いている");
+  }
+
+  // 5) 付随症状（ある場合のみ）
+  if (answers.associated_symptoms && !isNoneLike(answers.associated_symptoms)) {
+    bullets.push(`・付随症状として「${answers.associated_symptoms}」がある`);
+  }
+
+  // 6) きっかけ（医学的に意味がある場合のみ）
+  const hasMeaningfulCause =
+    (answers.cause_category && !isNoneLike(answers.cause_category)) ||
+    (state?.causeDetailText && !isNoneLike(state.causeDetailText));
+  if (hasMeaningfulCause) {
+    const causeText = state?.causeDetailText || answers.cause_category;
+    bullets.push(`・きっかけとして「${causeText}」が考えられる`);
+  }
+
+  const uniq = [];
+  for (const line of bullets) {
+    if (!line || uniq.includes(line)) continue;
+    uniq.push(line);
+  }
+  return uniq.slice(0, 4).length > 0 ? uniq.slice(0, 4) : ["・今の症状について相談されている"];
 }
 
 function buildStateAboutLine(state, level) {
@@ -3301,6 +3521,16 @@ function calculateRiskFromState(state) {
   const impactHigh = scores.impact === 3;
   const symptomsMidOrHigh = scores.symptoms >= 1;
   const criticalHighCount = [scores.pain, scores.impact, scores.symptoms].filter((v) => v === 3).length;
+
+  // 仕様: critical高レベルが1つだけのときは必ず🟡（2つ以上は従来どおりRED優先）
+  if (criticalHighCount === 1) {
+    console.log("---- KAIRO URGENCY DEBUG (Forced YELLOW) ----");
+    console.log("scores:", scores);
+    console.log("criticalHighCount:", criticalHighCount);
+    console.log("finalUrgency:", "yellow");
+    console.log("----------------------------------------------");
+    return { ratio: 0.45, level: "🟡", urgency: "yellow" };
+  }
 
   const phase1Triggered =
     (painHigh && impactHigh) ||
@@ -3955,6 +4185,13 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].hasSummaryBlockGenerated = true;
       conversationState[conversationId].decisionType = decisionType;
       conversationState[conversationId].decisionLevel = level;
+      if (!conversationState[conversationId].judgmentSnapshot) {
+        conversationState[conversationId].judgmentSnapshot = buildJudgmentSnapshot(
+          conversationState[conversationId],
+          conversationHistory[conversationId],
+          decisionType
+        );
+      }
       if (conversationState[conversationId].decisionRatio === null) {
         const computed = calculateRiskFromState(conversationState[conversationId]);
         conversationState[conversationId].decisionRatio = computed.ratio;
