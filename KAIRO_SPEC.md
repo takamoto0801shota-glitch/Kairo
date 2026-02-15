@@ -50,10 +50,9 @@
 
 ## 4. 質問回数の下限・上限
 - 最低質問回数は5回。
-- 質問の上限は7回。
-- 質問回数が7以上になった時点で、理由を問わず必ず判定＋まとめに移行する（追加質問禁止）。
-- まとめに移行する条件は「判断スロットが6つ以上埋まった時点」または「質問回数が7以上になった時点」。
-- 7回以内に6スロットを埋める設計を必須とする。
+- 質問の上限は設けない（6スロット充填を最優先）。
+- まとめに移行する条件は「判断スロットが6つ全て埋まった時点」のみ。
+- 6スロットが未充填のまま判定＋まとめへ進むことを禁止する。
 
 ## 5. 最後の質問
 - Kairoが「最後の質問」と判断した場合、質問文頭は
@@ -123,8 +122,8 @@ severityIndex =
 
 指数や内部計算はユーザーに表示しない。
 
-## 7.1 6問固定スロット
-判定に使うスロットは以下の6つで固定する。
+## 7.1 6スロット固定（動的充填）
+判定に使うスロットは以下の6つで固定する（外部仕様は変更しない）。
 1. pain_score（1〜10）
 2. 痛みの質
 3. 発症タイミング
@@ -132,14 +131,40 @@ severityIndex =
 5. 追加症状
 6. 原因カテゴリ
 
+### 発話優先原則（必須）
+- ユーザー発話にスロット情報が含まれる場合は、そのターンで自動充填する。
+- 自動充填されたスロットは対応質問をスキップする。
+- 既に埋まったスロットは再質問しない。
+- 未充填スロットは優先順で必ず確認する（飛ばさない）。
+
+### 内部管理（必須）
+```
+slot_status = {
+  severity: { filled: boolean, source: "user_spontaneous" | "question_response" | null },
+  worsening: { filled: boolean, source: "user_spontaneous" | "question_response" | null },
+  duration: { filled: boolean, source: "user_spontaneous" | "question_response" | null },
+  impact: { filled: boolean, source: "user_spontaneous" | "question_response" | null },
+  associated: { filled: boolean, source: "user_spontaneous" | "question_response" | null },
+  cause_category: { filled: boolean, source: "user_spontaneous" | "question_response" | null }
+}
+```
+
+### 質問生成ルール（必須）
+- 1ターンで質問は最大1つ。
+- 対象は未充填スロットのみ。
+- 優先順：pain_score → worsening → duration → daily_impact → associated_symptoms → cause_category。
+- 充填済みスロットの再質問は禁止。
+- 6スロットが全て埋まるまで、未充填スロットへの質問を継続する（強制）。
+- 6スロット未充填でまとめへ遷移することを禁止する。
+
 ## 7.2 Rest & MC Decision Layer（後段レイヤー）
 目的：
 - 既存の緊急度判定（Phase1/Phase2）には一切影響させない。
 - 医学的判断と社会的対応（MC）を分離して提示する。
 - 6問固定仕様は変更しない。
 
-### 6問固定（変更禁止）
-以下の6問を順番固定・文言固定で出す。これ以外の質問は出さない。
+### 6スロット固定（質問は動的）
+以下の6スロット自体は固定。質問は「未充填スロットのみ」に対して出す。
 1. pain_score（1〜10）
 2. 痛みの質
 3. 発症タイミング
@@ -229,6 +254,8 @@ severityIndex =
   4) 経過時間（数時間以上なら重要）
   5) 付随症状（ある場合のみ）
   6) きっかけ（医学的に意味がある場合のみ）
+- ※この優先度ルールは固定（変更禁止）
+- `source`（`user_spontaneous` / `question_response`）は内部管理のみ。ユーザー表示は禁止。
 - 箇条書きの後に改行を挟む
 - 2文のみ（3文以上は禁止）
 - 構成：事実 → 判断（感想・解説は禁止）

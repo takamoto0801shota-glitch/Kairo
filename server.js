@@ -790,6 +790,15 @@ function initConversationState(input = {}) {
     lastTemplateId: null,
     slotAnswers: {},
     slotNormalized: {},
+    slotStatus: {
+      severity: { filled: false, source: null },
+      worsening: { filled: false, source: null },
+      duration: { filled: false, source: null },
+      impact: { filled: false, source: null },
+      associated: { filled: false, source: null },
+      cause_category: { filled: false, source: null },
+    },
+    noNewInformationTurns: 0,
     askedSlots: {},
     causeDetailPending: false,
     causeDetailAsked: false,
@@ -2652,6 +2661,15 @@ const SLOT_KEYS = [
   "cause_category",
 ];
 
+const SLOT_STATUS_KEY_MAP = {
+  pain_score: "severity",
+  worsening: "worsening",
+  duration: "duration",
+  daily_impact: "impact",
+  associated_symptoms: "associated",
+  cause_category: "cause_category",
+};
+
 const FIXED_SLOT_ORDER = [
   "pain_score",
   "worsening",
@@ -2696,6 +2714,117 @@ function normalizePainScoreInput(input) {
   return Math.min(parsed, 10);
 }
 
+function ensureSlotStatusShape(state) {
+  if (!state) return;
+  if (!state.slotStatus) state.slotStatus = {};
+  for (const key of Object.values(SLOT_STATUS_KEY_MAP)) {
+    if (!state.slotStatus[key]) {
+      state.slotStatus[key] = { filled: false, source: null };
+    }
+  }
+}
+
+function markSlotStatus(state, slotKey, source) {
+  if (!state || !slotKey) return;
+  ensureSlotStatusShape(state);
+  const statusKey = SLOT_STATUS_KEY_MAP[slotKey];
+  if (!statusKey) return;
+  state.slotStatus[statusKey] = {
+    filled: true,
+    source: source || state.slotStatus[statusKey]?.source || null,
+  };
+}
+
+function setSlotFromSpontaneous(state, slotKey, payload = {}) {
+  if (!state || !slotKey || state.slotFilled?.[slotKey]) return false;
+  const { rawAnswer = "", selectedIndex = null, riskLevel = null, rawScore = null } = payload;
+  state.slotFilled[slotKey] = true;
+  state.slotAnswers[slotKey] = rawAnswer || state.slotAnswers[slotKey] || "";
+  let normalized = null;
+  if (slotKey === "pain_score") {
+    normalized = buildNormalizedAnswer(slotKey, rawAnswer || String(rawScore ?? ""), 0, rawScore);
+    const weight = rawScore >= 8 ? 2.0 : rawScore >= 5 ? 1.5 : 1.0;
+    if (Number.isFinite(rawScore)) {
+      updatePainScoreState(state, rawScore, weight, rawAnswer || String(rawScore));
+    }
+  } else if (selectedIndex !== null && selectedIndex !== undefined) {
+    normalized = buildNormalizedAnswer(slotKey, rawAnswer, selectedIndex);
+  } else if (riskLevel) {
+    normalized = { slotId: slotKey, rawAnswer, riskLevel };
+  }
+  if (normalized) {
+    state.slotNormalized[slotKey] = normalized;
+    state.lastNormalizedAnswer = normalized;
+  }
+  markSlotStatus(state, slotKey, "user_spontaneous");
+  state.confidence = computeConfidenceFromSlots(state.slotFilled);
+  return true;
+}
+
+function applySpontaneousSlotFill(state, message) {
+  if (!state) return 0;
+  const text = String(message || "").trim();
+  if (!text) return 0;
+  let added = 0;
+
+  const pain = normalizePainScoreInput(text);
+  if (pain !== null && setSlotFromSpontaneous(state, "pain_score", { rawAnswer: text, rawScore: pain })) {
+    added += 1;
+  }
+
+  if (!state.slotFilled.worsening) {
+    let idx = null;
+    if (/悪化|ひどく|強く|増え|悪く/.test(text)) idx = 2;
+    else if (/変わらない|同じ|横ばい/.test(text)) idx = 1;
+    else if (/良く|まし|軽く|落ち着/.test(text)) idx = 0;
+    if (idx !== null && setSlotFromSpontaneous(state, "worsening", { rawAnswer: text, selectedIndex: idx })) {
+      added += 1;
+    }
+  }
+
+  if (!state.slotFilled.duration) {
+    let idx = null;
+    if (/さっき|今さっき|数分|数十分/.test(text)) idx = 0;
+    else if (/数時間|時間前|今朝|昨夜/.test(text)) idx = 1;
+    else if (/昨日|一日前|数日|数週間|ずっと/.test(text)) idx = 2;
+    if (idx !== null && setSlotFromSpontaneous(state, "duration", { rawAnswer: text, selectedIndex: idx })) {
+      added += 1;
+    }
+  }
+
+  if (!state.slotFilled.daily_impact) {
+    let idx = null;
+    if (/動けない|寝込|仕事できない|学校行けない|起き上がれ/.test(text)) idx = 2;
+    else if (/少しつらい|しんどい|ややつらい|無理すれば/.test(text)) idx = 1;
+    else if (/普通に動ける|問題なく動ける|動ける/.test(text)) idx = 0;
+    if (idx !== null && setSlotFromSpontaneous(state, "daily_impact", { rawAnswer: text, selectedIndex: idx })) {
+      added += 1;
+    }
+  }
+
+  if (!state.slotFilled.associated_symptoms) {
+    let idx = null;
+    if (/しびれ|視界|意識|胸痛|呼吸苦|失神/.test(text)) idx = 2;
+    else if (/吐き気|めまい|ふらつき|発熱|だるい/.test(text)) idx = 1;
+    else if (/これ以外はない|他はない|特にない|なし/.test(text)) idx = 0;
+    if (idx !== null && setSlotFromSpontaneous(state, "associated_symptoms", { rawAnswer: text, selectedIndex: idx })) {
+      added += 1;
+    }
+  }
+
+  if (!state.slotFilled.cause_category) {
+    let idx = null;
+    if (/思い当たらない|不明|分からない|わからない/.test(text)) idx = 0;
+    else if (/周り|人混み|冷房|寝不足|ストレス|飲酒|食べ|運動|花粉|感染|咳/.test(text)) idx = 1;
+    else if (/はっきりとは分からない|曖昧/.test(text)) idx = 2;
+    if (idx !== null && setSlotFromSpontaneous(state, "cause_category", { rawAnswer: text, selectedIndex: idx })) {
+      added += 1;
+    }
+  }
+
+  return added;
+}
+
 function updatePainScoreState(state, rawScore, weight, rawAnswer) {
   if (!state) return;
   if (rawScore === null || rawScore === undefined) {
@@ -2715,6 +2844,7 @@ function updatePainScoreState(state, rawScore, weight, rawAnswer) {
     };
   state.slotNormalized.pain_score = normalized;
   state.lastNormalizedAnswer = normalized;
+  markSlotStatus(state, "pain_score", "question_response");
 }
 
 function ensurePainScoreFallback(state) {
@@ -3522,16 +3652,6 @@ function calculateRiskFromState(state) {
   const symptomsMidOrHigh = scores.symptoms >= 1;
   const criticalHighCount = [scores.pain, scores.impact, scores.symptoms].filter((v) => v === 3).length;
 
-  // 仕様: critical高レベルが1つだけのときは必ず🟡（2つ以上は従来どおりRED優先）
-  if (criticalHighCount === 1) {
-    console.log("---- KAIRO URGENCY DEBUG (Forced YELLOW) ----");
-    console.log("scores:", scores);
-    console.log("criticalHighCount:", criticalHighCount);
-    console.log("finalUrgency:", "yellow");
-    console.log("----------------------------------------------");
-    return { ratio: 0.45, level: "🟡", urgency: "yellow" };
-  }
-
   const phase1Triggered =
     (painHigh && impactHigh) ||
     (painHigh && symptomsMidOrHigh) ||
@@ -3551,6 +3671,16 @@ function calculateRiskFromState(state) {
     console.log("finalUrgency:", "red");
     console.log("-------------------------------------------");
     return { ratio: 1, level: "🔴", urgency: "red" };
+  }
+
+  // 仕様: critical高レベルが1つだけのときは必ず🟡（ただしPhase1 RED該当時はRED優先）
+  if (criticalHighCount === 1) {
+    console.log("---- KAIRO URGENCY DEBUG (Forced YELLOW) ----");
+    console.log("scores:", scores);
+    console.log("criticalHighCount:", criticalHighCount);
+    console.log("finalUrgency:", "yellow");
+    console.log("----------------------------------------------");
+    return { ratio: 0.45, level: "🟡", urgency: "yellow" };
   }
 
   const weightedTotal =
@@ -3589,8 +3719,8 @@ function judgeDecision(state) {
   const confidence = state.confidence;
   const slotsFilledCount = countFilledSlots(state.slotFilled);
   const askedSlotsCount = countAskedSlots(state.askedSlots);
-  const decisionCompleted =
-    state.questionCount >= 7 || slotsFilledCount >= 6 || askedSlotsCount >= 6;
+  // 強制仕様: 6スロットが全て埋まるまでまとめに遷移しない
+  const decisionCompleted = slotsFilledCount >= 6;
   const shouldJudge = decisionCompleted;
 
   console.log(
@@ -3602,6 +3732,8 @@ function judgeDecision(state) {
     slotsFilledCount,
     "askedSlots=",
     askedSlotsCount,
+    "noNewInformationTurns=",
+    state.noNewInformationTurns || 0,
     "missingSlots=",
     getMissingSlots(state.slotFilled).join(",")
   );
@@ -3735,6 +3867,8 @@ app.post("/api/chat", async (req, res) => {
     }
 
     // ユーザー回答のスコアを集計
+    const filledBeforeTurn = countFilledSlots(conversationState[conversationId].slotFilled);
+    applySpontaneousSlotFill(conversationState[conversationId], message);
     if (conversationState[conversationId].expectsCauseDetail) {
       conversationState[conversationId].causeDetailText = message.trim();
       conversationState[conversationId].expectsCauseDetail = false;
@@ -3778,6 +3912,7 @@ app.post("/api/chat", async (req, res) => {
         ) || { slotId: type, rawAnswer: rawScore !== null ? String(rawScore) : "", riskLevel: RISK_LEVELS.MEDIUM };
         conversationState[conversationId].slotNormalized[type] = normalized;
         conversationState[conversationId].lastNormalizedAnswer = normalized;
+        markSlotStatus(conversationState[conversationId], type, "question_response");
         conversationState[conversationId].confidence = computeConfidenceFromSlots(
           conversationState[conversationId].slotFilled
         );
@@ -3823,6 +3958,7 @@ app.post("/api/chat", async (req, res) => {
           }
           conversationState[conversationId].slotNormalized[type] = normalized;
           conversationState[conversationId].lastNormalizedAnswer = normalized;
+          markSlotStatus(conversationState[conversationId], type, "question_response");
           if (type === "cause_category") {
             const raw = lastOptionsSnapshot[selectedIndex] || "";
             const freeText = classified.usedFreeText ? message : "";
@@ -3847,6 +3983,14 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].lastQuestionType = null;
     }
 
+    const filledAfterTurn = countFilledSlots(conversationState[conversationId].slotFilled);
+    if (filledAfterTurn > filledBeforeTurn) {
+      conversationState[conversationId].noNewInformationTurns = 0;
+    } else {
+      conversationState[conversationId].noNewInformationTurns =
+        (conversationState[conversationId].noNewInformationTurns || 0) + 1;
+    }
+
     // Add user message to history
     conversationHistory[conversationId].push({
       role: "user",
@@ -3857,7 +4001,7 @@ app.post("/api/chat", async (req, res) => {
     if (
       conversationState[conversationId].causeDetailPending &&
       !conversationState[conversationId].causeDetailAsked &&
-      askedSlotsCount >= 6
+      countFilledSlots(conversationState[conversationId].slotFilled) >= 4
     ) {
       const followupQuestion = "具体的に教えてもらってもいいですか？";
       conversationState[conversationId].causeDetailAsked = true;
@@ -3959,10 +4103,8 @@ app.post("/api/chat", async (req, res) => {
     const { ratio, level, confidence, shouldJudge, slotsFilledCount } = judgeDecision(
       conversationState[conversationId]
     );
-    const decisionAllowed =
-      conversationState[conversationId].questionCount >= 7 ||
-      slotsFilledCount >= 6 ||
-      askedSlotsCount >= 6;
+    // 強制仕様: 6スロット充填完了時のみ判定・まとめを許可
+    const decisionAllowed = slotsFilledCount >= 6;
     const shouldJudgeNow =
       shouldJudge &&
       decisionAllowed &&
@@ -4256,11 +4398,12 @@ app.post("/api/chat", async (req, res) => {
     // 6スロット埋めを保証するため、質問が不適切なら補正する
     if (!shouldJudgeNow) {
       const missingSlots = FIXED_SLOT_ORDER.filter(
-        (slot) => !conversationState[conversationId].askedSlots?.[slot]
+        (slot) => !conversationState[conversationId].slotFilled?.[slot]
       );
       const isFirstQuestion =
         conversationState[conversationId].questionCount === 0 &&
         conversationState[conversationId].lastPainScore === null;
+      // 強制仕様: 未充填スロットがある限り、必ずそのスロット質問を出す
       const nextSlot = isFirstQuestion ? "pain_score" : missingSlots[0];
       if (nextSlot) {
         const useFinalPrefix =

@@ -370,6 +370,11 @@ function isDecisionCompleted(text) {
 
 // Get urgency level from AI message (緊急度を判定)
 function getUrgencyLevel(text) {
+  // Single source of truth: server judgement -> appState.riskLevel
+  if (appState.riskLevel === "RED") return "high";
+  if (appState.riskLevel === "YELLOW") return "medium";
+  if (appState.riskLevel === "GREEN") return "low";
+
   // 病院をおすすめする場合
   if (
     text.includes('🏥 Kairoの判断') ||
@@ -910,7 +915,7 @@ async function handleUserInput() {
       }
 
       console.log("[DEBUG] judgeMeta", aiResponse.judgeMeta);
-      if (aiResponse.judgeMeta && aiResponse.judgeMeta.shouldJudge === true && appState.riskLevel === null) {
+      if (aiResponse.judgeMeta && aiResponse.judgeMeta.shouldJudge === true) {
         const judgement = aiResponse.judgeMeta.judgement;
         appState.riskLevel = judgement === "🔴" ? "RED" : judgement === "🟡" ? "YELLOW" : "GREEN";
         renderSummary();
