@@ -8,11 +8,15 @@
 </head>
 <body>
     <div class="chat-container">
-        <div class="chat-header">
-            <h1>Kairo</h1>
-            <div id="locationStatus" class="location-status">📍 現在地未取得</div>
-            <button id="locationButton" class="location-button" type="button">位置情報を許可する</button>
-            <button id="clearButton" class="clear-button" title="新しい会話を始める">はじめから</button>
+        <div class="chat-header mobile-header">
+            <div id="locationStatus" class="location-status">📍現在地を未確認</div>
+            <div class="header-main">
+                <div class="header-left">
+                    <button id="locationButton" class="location-button" type="button">位置情報を許可する</button>
+                </div>
+                <div class="header-title">Kairo</div>
+                <button id="clearButton" class="clear-button header-reset" title="新しい会話を始める">はじめから</button>
+            </div>
         </div>
         
         <div id="summaryCard" class="summary-card" style="display: none;">

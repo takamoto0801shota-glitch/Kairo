@@ -98,12 +98,17 @@ function normalizeLocation(raw) {
 function updateLocationStatusIndicator(status) {
   const target = document.getElementById("locationStatus");
   if (!target) return;
+  target.style.display = "inline-flex";
+  target.classList.remove("location-status--usable", "location-status--requesting", "location-status--failed");
   if (status === "usable") {
-    target.style.display = "inline-flex";
-    target.textContent = "📍現在地を取得済み";
+    target.textContent = "📍現在地を確認済み";
+    target.classList.add("location-status--usable");
+  } else if (status === "requesting") {
+    target.textContent = "📍現在地を確認中";
+    target.classList.add("location-status--requesting");
   } else {
-    target.style.display = "inline-flex";
-    target.textContent = "📍現在地を取得できていません";
+    target.textContent = "📍現在地を未確認";
+    target.classList.add("location-status--failed");
   }
   const button = document.getElementById("locationButton");
   if (button) {
@@ -139,6 +144,7 @@ function requestLocationOnAction() {
     if (!navigator.geolocation) return;
     if (window.location.protocol !== "https:" && window.location.hostname !== "localhost") return;
     if (getLocationSnapshot()) return;
+    updateLocationStatusIndicator("requesting");
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         const snapshot = {

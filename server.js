@@ -790,6 +790,10 @@ function initConversationState(input = {}) {
     lastTemplateId: null,
     slotAnswers: {},
     slotNormalized: {},
+    primarySymptom: null,
+    worseningMeta: null,
+    durationMeta: null,
+    associatedSymptoms: [],
     slotStatus: {
       severity: { filled: false, value: null, source: null },
       worsening: { filled: false, value: null, source: null },
@@ -2728,6 +2732,129 @@ function ensureSlotStatusShape(state) {
   }
 }
 
+function normalizeUserText(input) {
+  const raw = String(input || "");
+  const halfWidth = raw.replace(/[０-９]/g, (d) =>
+    String.fromCharCode(d.charCodeAt(0) - 0xff10 + 0x30)
+  );
+  // 曖昧語は保持したまま、表記ゆれのみ正規化する
+  return halfWidth.replace(/きのう/g, "昨日").replace(/おととい/g, "一昨日");
+}
+
+function hasCorrectionIntent(text) {
+  return /(やっぱ|やはり|訂正|正しくは|違う|いや|前の|さっきの|言い直|むしろ)/.test(String(text || ""));
+}
+
+function extractSeverityFromText(text) {
+  const normalized = normalizeUserText(text);
+  const direct = normalized.match(/(?:^|[^\d])(10|[1-9])\s*(?:\/\s*10|点|くらい|ぐらい)?(?:$|[^\d])/);
+  let score = direct ? Number(direct[1]) : null;
+  if (!Number.isFinite(score)) {
+    const parsed = normalizePainScoreInput(normalized);
+    if (parsed !== null && normalized.length <= 12) score = parsed;
+  }
+  if (!Number.isFinite(score)) return null;
+  return {
+    raw: direct ? direct[0].trim() : String(score),
+    score: Math.max(1, Math.min(10, score)),
+  };
+}
+
+function extractWorseningFromText(text) {
+  const normalized = normalizeUserText(text);
+  let trend = null;
+  if (/だんだん.*悪|悪化|ひどく|強くな|増えて/.test(normalized)) trend = "worsening";
+  else if (/良くな|まし|和らい|軽くな/.test(normalized)) trend = "improving";
+  else if (/変わらない|同じ|横ばい/.test(normalized)) trend = "stable";
+  else if (/波がある|波があ|上がったり下がったり|ムラ/.test(normalized)) trend = "fluctuating";
+
+  const qualityWords = ["ズキズキ", "キリキリ", "チクチク", "ジンジン", "ピリピリ", "締め付け", "鈍い", "重い"];
+  const quality = qualityWords.find((w) => normalized.includes(w)) || null;
+  if (!trend && !quality) return null;
+
+  const selectedIndex =
+    trend === "worsening" ? 2 : trend === "improving" ? 0 : 1;
+  const raw = [trend ? `変化:${trend}` : "", quality ? `痛み方:${quality}` : ""]
+    .filter(Boolean)
+    .join(" / ");
+  return { trend, quality, raw, selectedIndex };
+}
+
+function extractDurationFromText(text) {
+  const normalized = normalizeUserText(text);
+  if (/(さっき|今さっき|数分|数十分)/.test(normalized)) {
+    const raw = (normalized.match(/(さっき|今さっき|数分|数十分)/) || [])[0] || "さっき";
+    return { raw_text: raw, normalized: "short", selectedIndex: 0 };
+  }
+  const h = normalized.match(/(\d+)\s*時間前/);
+  if (h) return { raw_text: `${h[1]}時間前`, normalized: `${h[1]}h_ago`, selectedIndex: 1 };
+  if (/(数時間|今朝|昨夜)/.test(normalized)) {
+    const raw = (normalized.match(/(数時間|今朝|昨夜)/) || [])[0] || "数時間前";
+    return { raw_text: raw, normalized: "hours", selectedIndex: 1 };
+  }
+  const d = normalized.match(/(\d+)\s*日前/);
+  if (d) return { raw_text: `${d[1]}日前`, normalized: `${d[1]}d_ago`, selectedIndex: 2 };
+  if (/(昨日|一日前|数日|ずっと|前から|一昨日)/.test(normalized)) {
+    const raw = (normalized.match(/(昨日|一日前|数日|ずっと|前から|一昨日)/) || [])[0] || "昨日";
+    return { raw_text: raw, normalized: "day_or_more", selectedIndex: 2 };
+  }
+  return null;
+}
+
+function extractImpactFromText(text) {
+  const normalized = normalizeUserText(text);
+  if (/仕事できない|学校休んだ|寝込|動けない|家事できない|集中できないほど/.test(normalized)) {
+    return { raw: (normalized.match(/仕事できない|学校休んだ|寝込んでる|動けない|家事できない|集中できないほど/) || [])[0] || normalized, selectedIndex: 2 };
+  }
+  if (/動けるけどつらい|少しつらいが動ける|無理すれば|つらいけど/.test(normalized)) {
+    return { raw: (normalized.match(/動けるけどつらい|少しつらいが動ける|無理すれば|つらいけど/) || [])[0] || normalized, selectedIndex: 1 };
+  }
+  if (/普通に生活できる|普通に動ける|問題なく動ける/.test(normalized)) {
+    return { raw: (normalized.match(/普通に生活できる|普通に動ける|問題なく動ける/) || [])[0] || normalized, selectedIndex: 0 };
+  }
+  return null;
+}
+
+function extractAssociatedSymptoms(text) {
+  const normalized = normalizeUserText(text);
+  if (/これ以外は特にない|他はない|特にない|なし/.test(normalized)) {
+    return { primary: null, associated: [], raw: "これ以外は特にない", selectedIndex: 0 };
+  }
+  const terms = [
+    "下痢", "腹痛", "頭痛", "吐き気", "めまい", "発熱", "熱", "咳", "鼻水", "鼻づまり",
+    "のど", "喉", "しびれ", "視界異常", "耳鳴り", "だるい", "倦怠感", "ピクピク", "ゴロゴロ",
+  ];
+  const found = [];
+  for (const term of terms) {
+    const idx = normalized.indexOf(term);
+    if (idx >= 0) found.push({ term, idx });
+  }
+  if (found.length === 0) return null;
+  found.sort((a, b) => a.idx - b.idx);
+  const unique = [...new Set(found.map((f) => f.term))];
+  const primary = unique[0] || null;
+  const associated = unique.slice(1);
+  const high = /(しびれ|視界異常|意識|失神)/.test(normalized);
+  const selectedIndex = high ? 2 : 1;
+  const raw = associated.length > 0 ? associated.join("、") : unique.join("、");
+  return { primary, associated, raw, selectedIndex };
+}
+
+function extractCauseCategory(text) {
+  const normalized = normalizeUserText(text);
+  if (/思い当たらない|わからない|分からない|不明/.test(normalized)) {
+    return { raw: (normalized.match(/思い当たらない|わからない|分からない|不明/) || [])[0] || normalized, selectedIndex: 0 };
+  }
+  const m = normalized.match(/([^。！？\n]{0,24}(食あたり|寝不足|ストレス|ぶつけ|冷房|冷え|ブルーライト|感染|花粉|飲酒|過労|疲れ|人混み|仕事)[^。！？\n]{0,24})/);
+  if (m) {
+    return { raw: m[1].trim(), selectedIndex: 1 };
+  }
+  if (/(かも|と思う|かもしれない)/.test(normalized) && normalized.length <= 30) {
+    return { raw: normalized.trim(), selectedIndex: 2 };
+  }
+  return null;
+}
+
 function markSlotStatus(state, slotKey, source, value = null) {
   if (!state || !slotKey) return;
   ensureSlotStatusShape(state);
@@ -2745,7 +2872,9 @@ function markSlotStatus(state, slotKey, source, value = null) {
 }
 
 function setSlotFromSpontaneous(state, slotKey, payload = {}) {
-  if (!state || !slotKey || state.slotFilled?.[slotKey]) return false;
+  if (!state || !slotKey) return false;
+  const allowOverwrite = !!payload.allowOverwrite;
+  if (state.slotFilled?.[slotKey] && !allowOverwrite) return false;
   const { rawAnswer = "", selectedIndex = null, riskLevel = null, rawScore = null } = payload;
   state.slotFilled[slotKey] = true;
   state.slotAnswers[slotKey] = rawAnswer || state.slotAnswers[slotKey] || "";
@@ -2772,63 +2901,81 @@ function setSlotFromSpontaneous(state, slotKey, payload = {}) {
 
 function applySpontaneousSlotFill(state, message) {
   if (!state) return 0;
-  const text = String(message || "").trim();
+  const text = normalizeUserText(message);
   if (!text) return 0;
+  ensureSlotStatusShape(state);
+  const symptomType = detectSymptomCategory(text);
   let added = 0;
+  const correction = hasCorrectionIntent(text);
 
-  const pain = normalizePainScoreInput(text);
-  if (pain !== null && setSlotFromSpontaneous(state, "pain_score", { rawAnswer: text, rawScore: pain })) {
+  const severity = extractSeverityFromText(text);
+  if (severity && setSlotFromSpontaneous(state, "pain_score", {
+    rawAnswer: severity.raw,
+    rawScore: severity.score,
+    allowOverwrite: correction,
+  })) {
     added += 1;
   }
 
-  if (!state.slotFilled.worsening) {
-    let idx = null;
-    if (/悪化|ひどく|強く|増え|悪く/.test(text)) idx = 2;
-    else if (/変わらない|同じ|横ばい/.test(text)) idx = 1;
-    else if (/良く|まし|軽く|落ち着/.test(text)) idx = 0;
-    if (idx !== null && setSlotFromSpontaneous(state, "worsening", { rawAnswer: text, selectedIndex: idx })) {
+  const worsening = extractWorseningFromText(text);
+  if (worsening && setSlotFromSpontaneous(state, "worsening", {
+    rawAnswer: worsening.raw,
+    selectedIndex: worsening.selectedIndex,
+    allowOverwrite: correction,
+  })) {
+    state.worseningMeta = {
+      trend: worsening.trend || null,
+      quality: worsening.quality || null,
+    };
+    added += 1;
+  }
+
+  const duration = extractDurationFromText(text);
+  if (duration && setSlotFromSpontaneous(state, "duration", {
+    rawAnswer: duration.raw_text,
+    selectedIndex: duration.selectedIndex,
+    allowOverwrite: correction,
+  })) {
+    state.durationMeta = {
+      raw_text: duration.raw_text,
+      normalized: duration.normalized,
+    };
+    added += 1;
+  }
+
+  const impact = extractImpactFromText(text);
+  if (impact && setSlotFromSpontaneous(state, "daily_impact", {
+    rawAnswer: impact.raw,
+    selectedIndex: impact.selectedIndex,
+    allowOverwrite: correction,
+  })) {
+    added += 1;
+  }
+
+  const associated = extractAssociatedSymptoms(text);
+  if (associated) {
+    if (!state.primarySymptom && associated.primary) {
+      state.primarySymptom = associated.primary;
+    } else if (!state.primarySymptom && symptomType && symptomType !== "other") {
+      state.primarySymptom = symptomType;
+    }
+    if (setSlotFromSpontaneous(state, "associated_symptoms", {
+      rawAnswer: associated.raw,
+      selectedIndex: associated.selectedIndex,
+      allowOverwrite: correction,
+    })) {
+      state.associatedSymptoms = associated.associated || [];
       added += 1;
     }
   }
 
-  if (!state.slotFilled.duration) {
-    let idx = null;
-    if (/さっき|今さっき|数分|数十分/.test(text)) idx = 0;
-    else if (/数時間|時間前|今朝|昨夜/.test(text)) idx = 1;
-    else if (/昨日|一日前|数日|数週間|ずっと/.test(text)) idx = 2;
-    if (idx !== null && setSlotFromSpontaneous(state, "duration", { rawAnswer: text, selectedIndex: idx })) {
-      added += 1;
-    }
-  }
-
-  if (!state.slotFilled.daily_impact) {
-    let idx = null;
-    if (/動けない|寝込|仕事できない|学校行けない|起き上がれ/.test(text)) idx = 2;
-    else if (/少しつらい|しんどい|ややつらい|無理すれば/.test(text)) idx = 1;
-    else if (/普通に動ける|問題なく動ける|動ける/.test(text)) idx = 0;
-    if (idx !== null && setSlotFromSpontaneous(state, "daily_impact", { rawAnswer: text, selectedIndex: idx })) {
-      added += 1;
-    }
-  }
-
-  if (!state.slotFilled.associated_symptoms) {
-    let idx = null;
-    if (/しびれ|視界|意識|胸痛|呼吸苦|失神/.test(text)) idx = 2;
-    else if (/吐き気|めまい|ふらつき|発熱|だるい/.test(text)) idx = 1;
-    else if (/これ以外はない|他はない|特にない|なし/.test(text)) idx = 0;
-    if (idx !== null && setSlotFromSpontaneous(state, "associated_symptoms", { rawAnswer: text, selectedIndex: idx })) {
-      added += 1;
-    }
-  }
-
-  if (!state.slotFilled.cause_category) {
-    let idx = null;
-    if (/思い当たらない|不明|分からない|わからない/.test(text)) idx = 0;
-    else if (/周り|人混み|冷房|寝不足|ストレス|飲酒|食べ|運動|花粉|感染|咳/.test(text)) idx = 1;
-    else if (/はっきりとは分からない|曖昧/.test(text)) idx = 2;
-    if (idx !== null && setSlotFromSpontaneous(state, "cause_category", { rawAnswer: text, selectedIndex: idx })) {
-      added += 1;
-    }
+  const cause = extractCauseCategory(text);
+  if (cause && setSlotFromSpontaneous(state, "cause_category", {
+    rawAnswer: cause.raw,
+    selectedIndex: cause.selectedIndex,
+    allowOverwrite: correction,
+  })) {
+    added += 1;
   }
 
   return added;
@@ -3225,28 +3372,28 @@ function buildStateFactsBullets(state) {
   const val = (statusKey, fallback = "") =>
     String(slotStatus?.[statusKey]?.value || fallback || "").trim();
 
-  // 優先度順に、filled済みスロットのみを出す（質問有無は不問）
-  if (filled.associated_symptoms) {
-    const v = val("associated", answers.associated_symptoms);
-    if (v) bullets.push(`・付随症状: ${v}`);
-  }
-  if (filled.daily_impact) {
-    const v = val("impact", answers.daily_impact);
-    if (v) bullets.push(`・日常生活への影響: ${v}`);
-  }
+  // 優先度順（6スロット定義順）に、filled済みスロットのみを出す（質問有無は不問）
   if (filled.pain_score) {
     const v =
       val("severity", answers.pain_score) ||
       (Number.isFinite(state?.lastPainScore) ? `${state.lastPainScore}/10` : "");
     if (v) bullets.push(`・痛みの強さ: ${v}`);
   }
+  if (filled.worsening) {
+    const v = val("worsening", answers.worsening);
+    if (v) bullets.push(`・悪化傾向: ${v}`);
+  }
   if (filled.duration) {
     const v = val("duration", answers.duration);
     if (v) bullets.push(`・経過時間: ${v}`);
   }
-  if (filled.worsening) {
-    const v = val("worsening", answers.worsening);
-    if (v) bullets.push(`・悪化傾向: ${v}`);
+  if (filled.daily_impact) {
+    const v = val("impact", answers.daily_impact);
+    if (v) bullets.push(`・日常生活への影響: ${v}`);
+  }
+  if (filled.associated_symptoms) {
+    const v = val("associated", answers.associated_symptoms);
+    if (v) bullets.push(`・付随症状: ${v}`);
   }
   if (filled.cause_category) {
     const v = val("cause_category", state?.causeDetailText || answers.cause_category);

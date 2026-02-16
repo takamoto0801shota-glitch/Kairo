@@ -11,6 +11,7 @@
     --header-height: 56px;
     --input-height: 56px;
     --summary-height: 72px;
+    --header-control-min-width: 118px;
 }
 
 html, body {
@@ -70,6 +71,27 @@ body {
     color: #4a9b8e;
 }
 
+.header-main {
+    position: relative;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.header-left {
+    min-width: var(--header-control-min-width);
+    display: flex;
+    justify-content: flex-start;
+}
+
+.header-title {
+    color: #4a9b8e;
+    font-size: 20px;
+    font-weight: 300;
+    letter-spacing: 0.5px;
+}
+
 .location-status {
     position: absolute;
     top: 20px;
@@ -82,6 +104,8 @@ body {
     padding: 4px 8px;
     line-height: 1;
     white-space: nowrap;
+    min-width: var(--header-control-min-width);
+    text-align: center;
 }
 
 .location-button {
@@ -116,6 +140,7 @@ body {
     cursor: pointer;
     transition: all 0.2s;
     font-weight: 400;
+    min-width: var(--header-control-min-width);
 }
 
 .clear-button:hover {
@@ -405,4 +430,89 @@ body {
     font-weight: 700;
     font-size: 18px;
     border-bottom: 2px solid #b8d4ce;
+}
+
+@media (max-width: 768px) {
+    :root {
+        --header-height: 96px;
+    }
+
+    .chat-header.mobile-header {
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-start;
+        padding: 8px 16px;
+        padding-top: calc(8px + env(safe-area-inset-top));
+        height: calc(var(--header-height) + env(safe-area-inset-top));
+    }
+
+    .chat-header.mobile-header .location-status {
+        position: static;
+        align-self: flex-end;
+        margin-bottom: 6px;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 12px;
+        line-height: 1.25;
+        background-color: #e6f4ea;
+        border: 1px solid #c9e7d1;
+        min-width: var(--header-control-min-width);
+        text-align: center;
+    }
+
+    .chat-header.mobile-header .location-status.location-status--requesting {
+        background-color: #eef3ff;
+        border-color: #d5ddff;
+        animation: pulse 1.4s ease-in-out infinite;
+    }
+
+    .chat-header.mobile-header .location-status.location-status--failed {
+        background-color: #f2f4f6;
+        border-color: #dde2e6;
+    }
+
+    .chat-header.mobile-header .header-main {
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        width: 100%;
+    }
+
+    .chat-header.mobile-header .header-left {
+        min-width: var(--header-control-min-width);
+    }
+
+    .chat-header.mobile-header .header-title {
+        position: absolute;
+        left: 50%;
+        transform: translateX(-50%);
+        font-weight: 600;
+        font-size: 18px;
+        white-space: nowrap;
+        pointer-events: none;
+    }
+
+    .chat-header.mobile-header .header-reset {
+        position: static;
+        right: auto;
+        top: auto;
+        background: none;
+        border: none;
+        color: #666;
+        font-size: 14px;
+        padding: 4px 10px;
+        min-width: var(--header-control-min-width);
+        text-align: center;
+    }
+
+    .chat-header.mobile-header .location-button {
+        display: none;
+    }
+}
+
+@keyframes pulse {
+    0% { opacity: 0.6; }
+    50% { opacity: 1; }
+    100% { opacity: 0.6; }
 }
