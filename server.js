@@ -13,6 +13,22 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public"))); // Serve static files from public directory
 
+// DO NOT reintroduce location explanation bubble.
+// UX policy: header status only.
+app.use((req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = (payload) => {
+    if (payload && typeof payload === "object") {
+      delete payload.location_explanation;
+      delete payload.locationExplanation;
+      delete payload.locationPromptMessage;
+      delete payload.locationRePromptMessage;
+    }
+    return originalJson(payload);
+  };
+  next();
+});
+
 // Initialize OpenAI client
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -477,8 +493,8 @@ contextFlag = true の場合、次のKairoの発話のどこかで
   - severityIndex = weightedTotal / 20.7
 - 判定基準：
   - 0.65以上 → 🔴
-  - 0.45〜0.64 → 🟡
-  - 0.45未満 → 🟢
+  - 0.4〜0.64 → 🟡
+  - 0.4未満 → 🟢
 - ユーザーには指数や内部計算過程を一切表示しない。
 
 【強制拾い条件 - 最重要】
@@ -2694,7 +2710,7 @@ const SLOT_RISK_BY_INDEX = {
   duration: [RISK_LEVELS.LOW, RISK_LEVELS.MEDIUM, RISK_LEVELS.HIGH],
   daily_impact: [RISK_LEVELS.LOW, RISK_LEVELS.MEDIUM, RISK_LEVELS.HIGH],
   associated_symptoms: [RISK_LEVELS.LOW, RISK_LEVELS.MEDIUM, RISK_LEVELS.HIGH],
-  cause_category: [RISK_LEVELS.LOW, RISK_LEVELS.MEDIUM, RISK_LEVELS.MEDIUM],
+  cause_category: [RISK_LEVELS.LOW, RISK_LEVELS.MEDIUM, RISK_LEVELS.HIGH],
 };
 
 const SUBJECTIVE_ALERT_WORDS = ["気になります", "引っかかります", "心配です", "注意が必要です"];
@@ -3842,7 +3858,7 @@ function calculateRiskFromState(state) {
   let urgency = "green";
   if (severityIndex >= 0.65) {
     urgency = "red";
-  } else if (severityIndex >= 0.45) {
+  } else if (severityIndex >= 0.4) {
     urgency = "yellow";
   }
   const level = urgency === "red" ? "🔴" : urgency === "yellow" ? "🟡" : "🟢";

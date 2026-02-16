@@ -8,6 +8,7 @@ const CONVERSATION_ID_KEY = "kairo_conversation_id";
 const FIRST_QUESTION_KEY = "kairo_first_question";
 
 const SUBJECTIVE_ALERT_WORDS = ["気になります", "引っかかります", "心配です", "注意が必要です"];
+const FEATURE_SHOW_LOCATION_EXPLANATION = false;
 
 const appState = {
   riskLevel: null,
@@ -37,10 +38,10 @@ const INTRO_TEMPLATE_TEXTS = {
   FOCUS_5: "ここは整理の要なので確認します。",
 };
 
-const LOCATION_PROMPT_MESSAGE =
-  "より正確な案内のため、現在地を使用できます。\n今回は許可しなくても会話は続けられます。";
-const LOCATION_REPROMPT_MESSAGE =
-  "より近くて適切な場所をご案内するため、\n現在地の共有をもう一度お願いしてもいいですか？";
+// DO NOT reintroduce location explanation bubble.
+// UX policy: header status only.
+const LOCATION_PROMPT_MESSAGE = "";
+const LOCATION_REPROMPT_MESSAGE = "";
 const LOCATION_PROMPT_KEY = "kairo_location_prompt_shown";
 const LOCATION_RETRY_KEY = "kairo_location_retry_count";
 const LOCATION_SNAPSHOT_KEY = "kairo_location_snapshot";
@@ -549,6 +550,17 @@ function extractSummary(text) {
 // Add message to chat (AIは即時表示)
 let isCollecting = true;
 function addMessage(text, isUser = false, save = true) {
+  if (!isUser) {
+    const raw = String(text || "");
+    if (
+      FEATURE_SHOW_LOCATION_EXPLANATION !== true &&
+      (raw.includes("より正確な案内のため") ||
+        raw.includes("現在地を使用できます") ||
+        raw.includes("今回は許可しなくても会話は続けられます"))
+    ) {
+      return;
+    }
+  }
   const messagesContainer = document.getElementById("chatMessages");
   const messageDiv = document.createElement("div");
   messageDiv.className = `message ${isUser ? "user" : "ai"}`;
@@ -906,10 +918,10 @@ async function handleUserInput() {
       }
 
       // Show AI response immediately
-      if (aiResponse.locationPromptMessage) {
+      if (FEATURE_SHOW_LOCATION_EXPLANATION === true && aiResponse.locationPromptMessage) {
         addMessage(aiResponse.locationPromptMessage);
       }
-      if (aiResponse.locationRePromptMessage) {
+      if (FEATURE_SHOW_LOCATION_EXPLANATION === true && aiResponse.locationRePromptMessage) {
         addMessage(aiResponse.locationRePromptMessage);
       }
       addMessage(aiMessage);
@@ -971,14 +983,10 @@ function init() {
   showInitialMessage();
   const snapshot = getLocationSnapshot();
   updateLocationStatusIndicator(snapshot ? "usable" : "failed");
-  const forceLocationPrompt = sessionStorage.getItem("kairo_force_location_prompt") === "true";
-  if (!sessionStorage.getItem(LOCATION_PROMPT_KEY) || forceLocationPrompt) {
-    addMessage(LOCATION_PROMPT_MESSAGE);
-    sessionStorage.setItem(LOCATION_PROMPT_KEY, "true");
-    if (forceLocationPrompt) {
-      sessionStorage.removeItem("kairo_force_location_prompt");
-    }
-  }
+  // DO NOT reintroduce location explanation bubble.
+  // UX policy: header status only.
+  sessionStorage.setItem(LOCATION_PROMPT_KEY, "true");
+  sessionStorage.removeItem("kairo_force_location_prompt");
   requestLocationWithRetry(1);
   setTimeout(finalizeLocationPendingIfNeeded, 5000);
 
