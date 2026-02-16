@@ -791,12 +791,12 @@ function initConversationState(input = {}) {
     slotAnswers: {},
     slotNormalized: {},
     slotStatus: {
-      severity: { filled: false, source: null },
-      worsening: { filled: false, source: null },
-      duration: { filled: false, source: null },
-      impact: { filled: false, source: null },
-      associated: { filled: false, source: null },
-      cause_category: { filled: false, source: null },
+      severity: { filled: false, value: null, source: null },
+      worsening: { filled: false, value: null, source: null },
+      duration: { filled: false, value: null, source: null },
+      impact: { filled: false, value: null, source: null },
+      associated: { filled: false, value: null, source: null },
+      cause_category: { filled: false, value: null, source: null },
     },
     noNewInformationTurns: 0,
     askedSlots: {},
@@ -2719,19 +2719,28 @@ function ensureSlotStatusShape(state) {
   if (!state.slotStatus) state.slotStatus = {};
   for (const key of Object.values(SLOT_STATUS_KEY_MAP)) {
     if (!state.slotStatus[key]) {
-      state.slotStatus[key] = { filled: false, source: null };
+      state.slotStatus[key] = { filled: false, value: null, source: null };
+      continue;
+    }
+    if (!("value" in state.slotStatus[key])) {
+      state.slotStatus[key].value = null;
     }
   }
 }
 
-function markSlotStatus(state, slotKey, source) {
+function markSlotStatus(state, slotKey, source, value = null) {
   if (!state || !slotKey) return;
   ensureSlotStatusShape(state);
   const statusKey = SLOT_STATUS_KEY_MAP[slotKey];
   if (!statusKey) return;
+  const current = state.slotStatus[statusKey] || { filled: false, value: null, source: null };
+  const nextValue = value !== null && value !== undefined && String(value).trim() !== ""
+    ? String(value).trim()
+    : current.value;
   state.slotStatus[statusKey] = {
     filled: true,
-    source: source || state.slotStatus[statusKey]?.source || null,
+    value: nextValue,
+    source: current.source || source || null,
   };
 }
 
@@ -2756,7 +2765,7 @@ function setSlotFromSpontaneous(state, slotKey, payload = {}) {
     state.slotNormalized[slotKey] = normalized;
     state.lastNormalizedAnswer = normalized;
   }
-  markSlotStatus(state, slotKey, "user_spontaneous");
+  markSlotStatus(state, slotKey, "user_spontaneous", rawAnswer);
   state.confidence = computeConfidenceFromSlots(state.slotFilled);
   return true;
 }
@@ -2844,7 +2853,7 @@ function updatePainScoreState(state, rawScore, weight, rawAnswer) {
     };
   state.slotNormalized.pain_score = normalized;
   state.lastNormalizedAnswer = normalized;
-  markSlotStatus(state, "pain_score", "question_response");
+  markSlotStatus(state, "pain_score", "question_response", rawAnswer ?? String(rawScore));
 }
 
 function ensurePainScoreFallback(state) {
@@ -3210,62 +3219,38 @@ function validateSummaryAgainstNormalized(text, state) {
 
 function buildStateFactsBullets(state) {
   const answers = state?.slotAnswers || {};
+  const filled = state?.slotFilled || {};
+  const slotStatus = state?.slotStatus || {};
   const bullets = [];
+  const val = (statusKey, fallback = "") =>
+    String(slotStatus?.[statusKey]?.value || fallback || "").trim();
 
-  const isNoneLike = (value) =>
-    /(ない|なし|特にない|思い当たらない|分からない|わからない|不明|はっきりしない)/.test(String(value || ""));
-  const isLongDuration = (value) => {
-    const text = String(value || "");
-    if (!text) return false;
-    if (/(さっき|今さっき|数分|数十分|30分|30 分)/.test(text)) return false;
-    return /(時間|半日|1日|一日|数日|昨日|今朝|昨夜|ずっと|続いて)/.test(text);
-  };
-
-  // 1) 危険兆候の有無
-  const symptomRisk = state?.slotNormalized?.associated_symptoms?.riskLevel;
-  if (symptomRisk === RISK_LEVELS.HIGH) {
-    bullets.push("・危険兆候を示す付随症状がみられる");
-  } else {
-    bullets.push("・危険兆候は現時点で目立たない");
+  // 優先度順に、filled済みスロットのみを出す（質問有無は不問）
+  if (filled.associated_symptoms) {
+    const v = val("associated", answers.associated_symptoms);
+    if (v) bullets.push(`・付随症状: ${v}`);
   }
-
-  // 2) daily impact
-  if (answers.daily_impact) {
-    if (answers.daily_impact === "動けないほどつらい") {
-      bullets.push("・日常生活への影響が強い");
-    } else if (answers.daily_impact === "少しつらいが動ける") {
-      bullets.push("・日常生活に支障が出ている");
-    } else if (answers.daily_impact === "普通に動ける") {
-      bullets.push("・日常生活への影響は軽い");
-    } else {
-      bullets.push(`・日常生活への影響は「${answers.daily_impact}」`);
-    }
+  if (filled.daily_impact) {
+    const v = val("impact", answers.daily_impact);
+    if (v) bullets.push(`・日常生活への影響: ${v}`);
   }
-
-  // 3) pain score（5以上のみ）
-  const pain = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
-  if (pain !== null && pain >= 5) {
-    const painLevel = pain >= 8 ? "強め" : "中等度";
-    bullets.push(`・痛みは${pain}/10程度で${painLevel}`);
+  if (filled.pain_score) {
+    const v =
+      val("severity", answers.pain_score) ||
+      (Number.isFinite(state?.lastPainScore) ? `${state.lastPainScore}/10` : "");
+    if (v) bullets.push(`・痛みの強さ: ${v}`);
   }
-
-  // 4) 経過時間（数時間以上）
-  if (isLongDuration(answers.duration)) {
-    bullets.push("・症状は数時間以上続いている");
+  if (filled.duration) {
+    const v = val("duration", answers.duration);
+    if (v) bullets.push(`・経過時間: ${v}`);
   }
-
-  // 5) 付随症状（ある場合のみ）
-  if (answers.associated_symptoms && !isNoneLike(answers.associated_symptoms)) {
-    bullets.push(`・付随症状として「${answers.associated_symptoms}」がある`);
+  if (filled.worsening) {
+    const v = val("worsening", answers.worsening);
+    if (v) bullets.push(`・悪化傾向: ${v}`);
   }
-
-  // 6) きっかけ（医学的に意味がある場合のみ）
-  const hasMeaningfulCause =
-    (answers.cause_category && !isNoneLike(answers.cause_category)) ||
-    (state?.causeDetailText && !isNoneLike(state.causeDetailText));
-  if (hasMeaningfulCause) {
-    const causeText = state?.causeDetailText || answers.cause_category;
-    bullets.push(`・きっかけとして「${causeText}」が考えられる`);
+  if (filled.cause_category) {
+    const v = val("cause_category", state?.causeDetailText || answers.cause_category);
+    if (v) bullets.push(`・きっかけ: ${v}`);
   }
 
   const uniq = [];
@@ -3273,7 +3258,7 @@ function buildStateFactsBullets(state) {
     if (!line || uniq.includes(line)) continue;
     uniq.push(line);
   }
-  return uniq.slice(0, 4).length > 0 ? uniq.slice(0, 4) : ["・今の症状について相談されている"];
+  return uniq.length > 0 ? uniq : ["・今の症状について相談されている"];
 }
 
 function buildStateAboutLine(state, level) {
@@ -3578,6 +3563,19 @@ function mapFreeTextToOptionIndex(answer, options, type) {
   return null;
 }
 
+function hasConcreteCauseDetail(text) {
+  const normalized = String(text || "").trim();
+  if (!normalized) return false;
+  // 「ある」「思い当たる」だけの短い返答は具体自由記述とみなさない
+  if (/^(ある|あり|思い当たる|思い当たるかも|はい|うん|yes)$/i.test(normalized)) {
+    return false;
+  }
+  // きっかけの具体が含まれる場合は、追加質問なしで原因詳細取得済みとみなす
+  return /周り|人混み|冷房|咳|風邪|感染|寝不足|ストレス|運動|飲酒|食べ|食事|仕事|花粉|寝冷え|ブルーライト|目の使いすぎ/.test(
+    normalized
+  );
+}
+
 function classifyAnswerToOption(answer, options, type) {
   const exact = matchAnswerToOption(answer, options);
   if (exact !== null) return { index: exact, usedFreeText: false };
@@ -3841,6 +3839,8 @@ app.post("/api/chat", async (req, res) => {
 
     const locationPromptMessage = null;
     const locationRePromptMessage = null;
+    const filledBeforeTurn = countFilledSlots(conversationState[conversationId].slotFilled);
+    applySpontaneousSlotFill(conversationState[conversationId], message);
 
     const followUpResult = handleFollowUpFlow(message, state);
     if (followUpResult) {
@@ -3867,8 +3867,7 @@ app.post("/api/chat", async (req, res) => {
     }
 
     // ユーザー回答のスコアを集計
-    const filledBeforeTurn = countFilledSlots(conversationState[conversationId].slotFilled);
-    applySpontaneousSlotFill(conversationState[conversationId], message);
+    // 毎ターン先頭で自然発話解析を実施済み
     if (conversationState[conversationId].expectsCauseDetail) {
       conversationState[conversationId].causeDetailText = message.trim();
       conversationState[conversationId].expectsCauseDetail = false;
@@ -3912,7 +3911,12 @@ app.post("/api/chat", async (req, res) => {
         ) || { slotId: type, rawAnswer: rawScore !== null ? String(rawScore) : "", riskLevel: RISK_LEVELS.MEDIUM };
         conversationState[conversationId].slotNormalized[type] = normalized;
         conversationState[conversationId].lastNormalizedAnswer = normalized;
-        markSlotStatus(conversationState[conversationId], type, "question_response");
+        markSlotStatus(
+          conversationState[conversationId],
+          type,
+          "question_response",
+          rawScore !== null ? String(rawScore) : message
+        );
         conversationState[conversationId].confidence = computeConfidenceFromSlots(
           conversationState[conversationId].slotFilled
         );
@@ -3958,11 +3962,22 @@ app.post("/api/chat", async (req, res) => {
           }
           conversationState[conversationId].slotNormalized[type] = normalized;
           conversationState[conversationId].lastNormalizedAnswer = normalized;
-          markSlotStatus(conversationState[conversationId], type, "question_response");
+          markSlotStatus(
+            conversationState[conversationId],
+            type,
+            "question_response",
+            classified.usedFreeText ? message : lastOptionsSnapshot[selectedIndex]
+          );
           if (type === "cause_category") {
             const raw = lastOptionsSnapshot[selectedIndex] || "";
             const freeText = classified.usedFreeText ? message : "";
-            if (raw.includes("思い当たる") || /思い当たる|当たる|ある/.test(freeText)) {
+            if (classified.usedFreeText && hasConcreteCauseDetail(freeText)) {
+              // 具体的な自由記述がある場合は7問目をスキップし、まとめへ進める
+              conversationState[conversationId].causeDetailText = freeText.trim();
+              conversationState[conversationId].causeDetailPending = false;
+              conversationState[conversationId].causeDetailAnswered = true;
+              conversationState[conversationId].causeDetailAsked = false;
+            } else if (raw.includes("思い当たる") || /思い当たる|当たる|ある/.test(freeText)) {
               conversationState[conversationId].causeDetailPending = true;
               conversationState[conversationId].causeDetailAnswered = false;
               conversationState[conversationId].causeDetailAsked = false;
@@ -4403,7 +4418,7 @@ app.post("/api/chat", async (req, res) => {
       const isFirstQuestion =
         conversationState[conversationId].questionCount === 0 &&
         conversationState[conversationId].lastPainScore === null;
-      // 強制仕様: 未充填スロットがある限り、必ずそのスロット質問を出す
+      // 強制仕様: 未充填スロットを固定順で質問する
       const nextSlot = isFirstQuestion ? "pain_score" : missingSlots[0];
       if (nextSlot) {
         const useFinalPrefix =
