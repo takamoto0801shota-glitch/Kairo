@@ -940,9 +940,10 @@ async function handleUserInput() {
       let streamedText = "";
       let finalPayload = null;
       let sectionMode = false;
+      let receivedAnyStreamData = false;
       const es = new EventSource(buildStreamUrl(userText));
 
-      const finalizeStream = () => {
+      const finalizeStream = ({ suppressMessage = false } = {}) => {
         es.close();
         if (requestId !== currentRequestId) return;
         if (streamNode && streamNode.parentNode && sectionMode) {
@@ -959,7 +960,7 @@ async function handleUserInput() {
         const aiMessage = aiResponse.questionPayload
           ? renderQuestionPayload(aiResponse.questionPayload)
           : (streamedText || aiResponse.message);
-        if (!sectionMode) {
+        if (!sectionMode && !suppressMessage) {
           addMessage(aiMessage);
         }
         if (aiResponse.followUpMessage) {
@@ -980,6 +981,7 @@ async function handleUserInput() {
       es.addEventListener("triage", (e) => {
         try {
           const triage = JSON.parse(e.data || "{}");
+          receivedAnyStreamData = true;
           if (triage?.shouldJudge === true && triage?.judgement && appState.userHasSubmitted) {
             appState.riskLevel = triage.judgement === "🔴" ? "RED" : triage.judgement === "🟡" ? "YELLOW" : "GREEN";
             renderSummary();
@@ -991,6 +993,7 @@ async function handleUserInput() {
 
       es.addEventListener("message_chunk", (e) => {
         if (sectionMode) return;
+        receivedAnyStreamData = true;
         streamedText += e.data || "";
         streamNode.textContent = streamedText;
       });
@@ -999,6 +1002,7 @@ async function handleUserInput() {
         try {
           const payload = JSON.parse(e.data || "{}");
           sectionMode = true;
+          receivedAnyStreamData = true;
           if (streamNode && streamNode.parentNode) {
             streamNode.remove();
           }
@@ -1010,22 +1014,37 @@ async function handleUserInput() {
 
       es.addEventListener("final", (e) => {
         try {
+          receivedAnyStreamData = true;
           finalPayload = JSON.parse(e.data || "{}");
         } catch (parseError) {
           console.error("final parse error:", parseError);
         }
       });
 
-      await new Promise((resolve) => {
+      const streamResult = await new Promise((resolve) => {
         es.addEventListener("done", () => {
           finalizeStream();
-          resolve();
+          resolve({ errored: false });
         });
         es.onerror = () => {
-          finalizeStream();
-          resolve();
+          const noData = receivedAnyStreamData === false;
+          finalizeStream({ suppressMessage: noData });
+          resolve({ errored: true, receivedAnyStreamData });
         };
       });
+      if (streamResult?.errored === true && streamResult?.receivedAnyStreamData === false) {
+        // SSE接続そのものが失敗した場合は通常APIにフォールバックして会話継続を保証する
+        const data = await callOpenAI(userText);
+        if (requestId !== currentRequestId) return;
+        const aiResponse = data || {};
+        if (aiResponse.conversationId) {
+          localStorage.setItem(CONVERSATION_ID_KEY, aiResponse.conversationId);
+        }
+        const aiMessage = aiResponse.questionPayload
+          ? renderQuestionPayload(aiResponse.questionPayload)
+          : aiResponse.message;
+        addMessage(aiMessage || "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。");
+      }
     } catch (error) {
         // Show fallback message and keep conversation moving
         const errorMessage = "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね";

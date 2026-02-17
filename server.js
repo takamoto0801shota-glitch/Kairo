@@ -3,6 +3,8 @@ const express = require("express");
 const cors = require("cors");
 const OpenAI = require("openai");
 const path = require("path");
+const http = require("http");
+const https = require("https");
 require("dotenv").config();
 
 const app = express();
@@ -4927,6 +4929,48 @@ function writeSseEvent(res, eventName, payload) {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
+function postJsonInternal(baseUrl, routePath, payload) {
+  return new Promise((resolve, reject) => {
+    try {
+      const target = new URL(routePath, baseUrl);
+      const body = JSON.stringify(payload || {});
+      const isHttps = target.protocol === "https:";
+      const client = isHttps ? https : http;
+      const req = client.request(
+        {
+          protocol: target.protocol,
+          hostname: target.hostname,
+          port: target.port || (isHttps ? 443 : 80),
+          path: `${target.pathname}${target.search || ""}`,
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Content-Length": Buffer.byteLength(body),
+          },
+        },
+        (res) => {
+          let data = "";
+          res.on("data", (chunk) => {
+            data += chunk;
+          });
+          res.on("end", () => {
+            try {
+              resolve(JSON.parse(data || "{}"));
+            } catch (parseError) {
+              reject(parseError);
+            }
+          });
+        }
+      );
+      req.on("error", reject);
+      req.write(body);
+      req.end();
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
 function getSummaryBlockPlanByJudgement(judgement) {
   if (judgement === "🔴") {
     return [
@@ -5036,18 +5080,13 @@ app.get("/api/chat/stream", async (req, res) => {
     });
 
     const baseUrl = `${req.protocol}://${req.get("host")}`;
-    const internal = await fetch(`${baseUrl}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        message,
-        conversationId: convId,
-        location,
-        clientMeta,
-        streamMode: true,
-      }),
+    const payload = await postJsonInternal(baseUrl, "/api/chat", {
+      message,
+      conversationId: convId,
+      location,
+      clientMeta,
+      streamMode: true,
     });
-    const payload = await internal.json();
     const fullText = payload?.message || payload?.response || "";
     const shouldJudge = payload?.judgeMeta?.shouldJudge === true;
     writeSseEvent(res, "triage", {
