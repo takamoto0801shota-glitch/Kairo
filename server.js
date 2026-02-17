@@ -4878,6 +4878,204 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function splitSummarySections(text) {
+  if (!text || typeof text !== "string") return [];
+  const lines = text.split("\n");
+  const sections = [];
+  let current = [];
+  const isHeader = (line) =>
+    /^🟢|^🟡|^🔴|^📝|^⚠️|^🤝|^✅|^💊|^⏳|^🏥|^🌱|^💬/.test((line || "").trim());
+  for (const line of lines) {
+    if (isHeader(line) && current.length > 0) {
+      sections.push(current.join("\n").trim());
+      current = [line];
+    } else {
+      current.push(line);
+    }
+  }
+  if (current.length > 0) {
+    sections.push(current.join("\n").trim());
+  }
+  return sections.filter(Boolean);
+}
+
+function writeSseEvent(res, eventName, payload) {
+  res.write(`event: ${eventName}\n`);
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function getSummarySectionSpecsByJudgement(judgement) {
+  if (judgement === "🔴") {
+    return [
+      { id: 1, title: "📝 いまの状態を整理します（メモ）", patterns: [/^📝\s*いまの状態を整理します（メモ）/, /^📝\s*いまの状態を整理します/] },
+      { id: 2, title: "⚠️ Kairoが気になっているポイント", patterns: [/^⚠️\s*Kairoが気になっているポイント/] },
+      { id: 3, title: "🏥 Kairoの判断", patterns: [/^🏥\s*Kairoの判断/] },
+      { id: 4, title: "💬 最後に", patterns: [/^💬\s*最後に/] },
+    ];
+  }
+  if (judgement === "🟡") {
+    return [
+      { id: 1, title: "🟢 ここまでの情報を整理します", patterns: [/^🟢\s*ここまでの情報を整理します/] },
+      { id: 2, title: "🤝 今の状態について", patterns: [/^🤝\s*今の状態について/] },
+      { id: 3, title: "✅ 今すぐやること（これだけでOK）", patterns: [/^✅\s*今すぐやること（これだけでOK）/, /^✅\s*今すぐやること/] },
+      { id: 4, title: "💊 一般的な市販薬", patterns: [/^💊\s*一般的な市販薬/, /^💊\s*市販薬の候補/] },
+      { id: 5, title: "⏳ 今後の見通し", patterns: [/^⏳\s*今後の見通し/, /^⏳\s*この先の見通し/] },
+      { id: 6, title: "🌱 最後に", patterns: [/^🌱\s*最後に/] },
+    ];
+  }
+  return [
+    { id: 1, title: "🟢 ここまでの情報を整理します", patterns: [/^🟢\s*ここまでの情報を整理します/] },
+    { id: 2, title: "🤝 今の状態について", patterns: [/^🤝\s*今の状態について/] },
+    { id: 3, title: "✅ 今すぐやること（これだけでOK）", patterns: [/^✅\s*今すぐやること（これだけでOK）/, /^✅\s*今すぐやること/] },
+    { id: 4, title: "⏳ 今後の見通し", patterns: [/^⏳\s*今後の見通し/, /^⏳\s*この先の見通し/] },
+    { id: 5, title: "🌱 最後に", patterns: [/^🌱\s*最後に/] },
+  ];
+}
+
+function extractSectionsBySpecs(text, specs) {
+  if (!text || !Array.isArray(specs) || specs.length === 0) return [];
+  const buckets = specs.map(() => []);
+  const findSpecIndex = (line) => {
+    const trimmed = (line || "").trim();
+    return specs.findIndex((spec) =>
+      spec.patterns.some((pattern) => pattern.test(trimmed))
+    );
+  };
+  let currentIndex = -1;
+  for (const line of text.split("\n")) {
+    const specIndex = findSpecIndex(line);
+    if (specIndex !== -1) {
+      currentIndex = specIndex;
+      buckets[specIndex].push(line);
+      continue;
+    }
+    if (currentIndex !== -1) {
+      buckets[currentIndex].push(line);
+    }
+  }
+  return specs
+    .map((spec, idx) => ({
+      id: spec.id,
+      text: buckets[idx].join("\n").trim(),
+    }))
+    .filter((section) => section.text.length > 0);
+}
+
+app.get("/api/chat/stream", async (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+  try {
+    const message = String(req.query.message || "");
+    const conversationId = String(req.query.conversationId || "");
+    const location = req.query.location ? JSON.parse(String(req.query.location)) : null;
+    const clientMeta = req.query.clientMeta ? JSON.parse(String(req.query.clientMeta)) : null;
+    const convId = conversationId || `conv_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    const state = getOrInitConversationState(convId);
+    if (message) {
+      applySpontaneousSlotFill(state, message);
+    }
+    const triage = judgeDecision(state);
+    writeSseEvent(res, "triage", {
+      judgement: triage.level || "🟡",
+      confidence: triage.confidence ?? 0,
+      ratio: Number.isFinite(triage.ratio) ? Number(triage.ratio.toFixed(2)) : 0,
+      shouldJudge: triage.shouldJudge === true,
+    });
+
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+    const internal = await fetch(`${baseUrl}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message,
+        conversationId: convId,
+        location,
+        clientMeta,
+      }),
+    });
+    const payload = await internal.json();
+    const fullText = payload?.message || payload?.response || "";
+    const shouldJudge = payload?.judgeMeta?.shouldJudge === true;
+    writeSseEvent(res, "triage", {
+      judgement: payload?.judgeMeta?.judgement || triage.level || "🟡",
+      confidence: payload?.judgeMeta?.confidence ?? triage.confidence ?? 0,
+      ratio:
+        Number.isFinite(payload?.judgeMeta?.ratio)
+          ? Number(Number(payload.judgeMeta.ratio).toFixed(2))
+          : Number.isFinite(triage.ratio)
+            ? Number(triage.ratio.toFixed(2))
+            : 0,
+      shouldJudge,
+    });
+    if (shouldJudge) {
+      const specs = getSummarySectionSpecsByJudgement(
+        payload?.judgeMeta?.judgement || triage.level || "🟢"
+      );
+      const sectionsBySpec = extractSectionsBySpecs(fullText, specs);
+      if (sectionsBySpec.length > 0) {
+        let merged = "";
+        for (const section of sectionsBySpec) {
+          for (const ch of section.text) {
+            merged += ch;
+            writeSseEvent(res, "section", { id: section.id, text: merged });
+            await sleep(4);
+          }
+          if (!merged.endsWith("\n\n")) {
+            merged += "\n\n";
+            writeSseEvent(res, "section", { id: section.id, text: merged });
+          }
+        }
+      } else {
+        const sections = splitSummarySections(fullText);
+        if (sections.length === 0) {
+          for (const ch of fullText) {
+            writeSseEvent(res, "message_chunk", ch);
+            await sleep(6);
+          }
+        } else {
+          let fallbackMerged = "";
+          for (let i = 0; i < sections.length; i += 1) {
+            const section = sections[i];
+            for (const ch of section) {
+              fallbackMerged += ch;
+              writeSseEvent(res, "section", { id: i + 1, text: fallbackMerged });
+              await sleep(4);
+            }
+            if (i < sections.length - 1) {
+              fallbackMerged += "\n\n";
+              writeSseEvent(res, "section", { id: i + 1, text: fallbackMerged });
+            }
+          }
+        }
+      }
+    } else {
+      for (const ch of fullText) {
+        writeSseEvent(res, "message_chunk", ch);
+        await sleep(5);
+      }
+    }
+    writeSseEvent(res, "final", payload);
+    writeSseEvent(res, "done", { ok: true });
+    res.end();
+  } catch (error) {
+    console.error("stream error:", error);
+    writeSseEvent(res, "message_chunk", "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。");
+    writeSseEvent(res, "final", {
+      message: "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。",
+      response: "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。",
+      judgeMeta: { judgement: "🟡", shouldJudge: false, confidence: 0, ratio: 0 },
+    });
+    writeSseEvent(res, "done", { ok: true });
+    res.end();
+  }
+});
+
 // Clear conversation history
 app.post("/api/clear", (req, res) => {
   const { conversationId } = req.body;

@@ -872,6 +872,33 @@ async function callOpenAI(message) {
   };
 }
 
+function buildStreamUrl(message) {
+  const conversationId = getConversationId();
+  const params = new URLSearchParams();
+  params.set("message", message);
+  params.set("conversationId", conversationId);
+  params.set("location", JSON.stringify(getLocationPayload() || null));
+  params.set(
+    "clientMeta",
+    JSON.stringify({
+      lang: navigator.language || "",
+      tz: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+      locationPromptShown: sessionStorage.getItem(LOCATION_PROMPT_KEY) === "true",
+      locationSnapshot: getLocationSnapshot(),
+    })
+  );
+  return `/api/chat/stream?${params.toString()}`;
+}
+
+function createStreamingMessageNode() {
+  const messagesContainer = document.getElementById("chatMessages");
+  const messageDiv = document.createElement("div");
+  messageDiv.className = "message ai";
+  messageDiv.textContent = "";
+  messagesContainer.appendChild(messageDiv);
+  return messageDiv;
+}
+
 // Handle user input
 async function handleUserInput() {
   const requestId =
@@ -895,57 +922,90 @@ async function handleUserInput() {
   input.value = "";
 
     try {
-      // Call OpenAI API
-      const data = await callOpenAI(userText);
-      if (requestId !== currentRequestId) {
-        console.warn("Old response ignored");
-        return;
-      }
-      console.log("[DEBUG] full aiResponse", data);
-      const aiResponse = data;
-      if (aiResponse.conversationId) {
-        localStorage.setItem(CONVERSATION_ID_KEY, aiResponse.conversationId);
-      }
-      const aiMessage = aiResponse.questionPayload
-        ? renderQuestionPayload(aiResponse.questionPayload)
-        : aiResponse.message;
+      const streamNode = createStreamingMessageNode();
+      let streamedText = "";
+      let finalPayload = null;
+      const es = new EventSource(buildStreamUrl(userText));
 
-      // 先に判定カードを即時表示（本文生成より先に表示して体感待機を短縮）
-      console.log("[DEBUG] judgeMeta", aiResponse.judgeMeta);
-      if (aiResponse.judgeMeta && aiResponse.judgeMeta.shouldJudge === true && appState.userHasSubmitted) {
-        const judgement = aiResponse.judgeMeta.judgement;
-        appState.riskLevel = judgement === "🔴" ? "RED" : judgement === "🟡" ? "YELLOW" : "GREEN";
-        renderSummary();
-      } else if (appState.riskLevel === null) {
-        hideSummaryCard();
-      }
-
-      // Show AI response immediately
-      if (FEATURE_SHOW_LOCATION_EXPLANATION === true && aiResponse.locationPromptMessage) {
-        addMessage(aiResponse.locationPromptMessage);
-      }
-      if (FEATURE_SHOW_LOCATION_EXPLANATION === true && aiResponse.locationRePromptMessage) {
-        addMessage(aiResponse.locationRePromptMessage);
-      }
-      addMessage(aiMessage);
-      if (aiResponse.followUpMessage) {
-        addMessage(aiResponse.followUpMessage);
-      }
-      if (aiResponse.followUpQuestion) {
-        addMessage(aiResponse.followUpQuestion);
-      }
-
-      if (aiResponse.locationState) {
-        if (aiResponse.locationState?.lat != null && aiResponse.locationState?.lng != null) {
-          const snapshot = { lat: aiResponse.locationState.lat, lng: aiResponse.locationState.lng, ts: Date.now() };
-          setLocationSnapshot(snapshot);
-          storeLocation(snapshot);
-          updateLocationStatusIndicator("usable");
-        } else {
-          updateLocationStatusIndicator("failed");
+      const finalizeStream = () => {
+        es.close();
+        if (requestId !== currentRequestId) return;
+        if (streamNode && streamNode.parentNode) {
+          streamNode.remove();
         }
-      }
-      } catch (error) {
+        const aiResponse = finalPayload || {
+          message:
+            streamedText || "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。",
+          judgeMeta: { judgement: "🟡", shouldJudge: false },
+        };
+        if (aiResponse.conversationId) {
+          localStorage.setItem(CONVERSATION_ID_KEY, aiResponse.conversationId);
+        }
+        const aiMessage = aiResponse.questionPayload
+          ? renderQuestionPayload(aiResponse.questionPayload)
+          : (streamedText || aiResponse.message);
+        addMessage(aiMessage);
+        if (aiResponse.followUpMessage) {
+          addMessage(aiResponse.followUpMessage);
+        }
+        if (aiResponse.followUpQuestion) {
+          addMessage(aiResponse.followUpQuestion);
+        }
+        if (aiResponse.judgeMeta && aiResponse.judgeMeta.shouldJudge === true && appState.userHasSubmitted) {
+          const judgement = aiResponse.judgeMeta.judgement;
+          appState.riskLevel = judgement === "🔴" ? "RED" : judgement === "🟡" ? "YELLOW" : "GREEN";
+          renderSummary();
+        } else if (appState.riskLevel === null) {
+          hideSummaryCard();
+        }
+      };
+
+      es.addEventListener("triage", (e) => {
+        try {
+          const triage = JSON.parse(e.data || "{}");
+          if (triage?.shouldJudge === true && triage?.judgement && appState.userHasSubmitted) {
+            appState.riskLevel = triage.judgement === "🔴" ? "RED" : triage.judgement === "🟡" ? "YELLOW" : "GREEN";
+            renderSummary();
+          }
+        } catch (parseError) {
+          console.error("triage parse error:", parseError);
+        }
+      });
+
+      es.addEventListener("message_chunk", (e) => {
+        streamedText += e.data || "";
+        streamNode.textContent = streamedText;
+      });
+
+      es.addEventListener("section", (e) => {
+        try {
+          const payload = JSON.parse(e.data || "{}");
+          streamedText = payload.text || streamedText;
+          streamNode.textContent = streamedText;
+        } catch (parseError) {
+          console.error("section parse error:", parseError);
+        }
+      });
+
+      es.addEventListener("final", (e) => {
+        try {
+          finalPayload = JSON.parse(e.data || "{}");
+        } catch (parseError) {
+          console.error("final parse error:", parseError);
+        }
+      });
+
+      await new Promise((resolve) => {
+        es.addEventListener("done", () => {
+          finalizeStream();
+          resolve();
+        });
+        es.onerror = () => {
+          finalizeStream();
+          resolve();
+        };
+      });
+    } catch (error) {
         // Show fallback message and keep conversation moving
         const errorMessage = "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね";
         
