@@ -4288,6 +4288,72 @@ app.post("/api/chat", async (req, res) => {
       decisionAllowed &&
       !(conversationState[conversationId].causeDetailPending && !conversationState[conversationId].causeDetailAnswered);
     const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled);
+    if (!shouldJudgeNow) {
+      const isFirstQuestion =
+        conversationState[conversationId].questionCount === 0 &&
+        conversationState[conversationId].lastPainScore === null;
+      const nextSlot = isFirstQuestion ? "pain_score" : missingSlots[0];
+      if (nextSlot) {
+        const useFinalPrefix =
+          currentQuestionCount >= minQuestions && missingSlots.length === 1;
+        const fixed = buildFixedQuestion(nextSlot, useFinalPrefix);
+        const historyText = conversationHistory[conversationId]
+          .filter((msg) => msg.role === "user")
+          .map((msg) => msg.content)
+          .join("\n");
+        const category = detectSymptomCategory(historyText);
+        if (nextSlot === "associated_symptoms") {
+          const options = buildAssociatedSymptomsOptions(category);
+          fixed.options = options;
+          fixed.question = `${useFinalPrefix ? "最後に、" : ""}${FIXED_QUESTIONS.associated_symptoms.q}\n・${options.join("\n・")}`;
+        }
+        if (nextSlot === "worsening") {
+          const options = buildPainQualityOptions(category);
+          fixed.options = options;
+          fixed.question = `${useFinalPrefix ? "最後に、" : ""}${FIXED_QUESTIONS.worsening.q}\n・${options.join("\n・")}`;
+        }
+        const introTemplateIds = buildIntroTemplateIds(
+          conversationState[conversationId],
+          conversationState[conversationId].questionCount,
+          nextSlot
+        );
+        const questionPayload = {
+          introTemplateIds,
+          question: fixed.question,
+        };
+        const aiResponse = fixed.question;
+        conversationState[conversationId].lastOptions = fixed.options;
+        conversationState[conversationId].lastQuestionType = fixed.type;
+        conversationState[conversationId].expectsPainScore = fixed.type === "pain_score";
+        conversationState[conversationId].askedSlots[nextSlot] = true;
+        conversationHistory[conversationId].push({
+          role: "assistant",
+          content: aiResponse,
+        });
+        const judgeMeta = {
+          judgement: level,
+          confidence,
+          ratio: Number(ratio.toFixed(2)),
+          shouldJudge: false,
+          slotsFilledCount,
+          decisionAllowed,
+          questionCount: conversationState[conversationId].questionCount,
+          summaryLine: null,
+          questionType: fixed.type,
+          rawScore: conversationState[conversationId].lastPainScore,
+          painScoreRatio: conversationState[conversationId].lastPainWeight,
+        };
+        return res.json({
+          message: aiResponse,
+          response: aiResponse,
+          judgeMeta,
+          questionPayload,
+          normalizedAnswer: conversationState[conversationId].lastNormalizedAnswer || null,
+          locationSnapshot: conversationState[conversationId].locationSnapshot,
+          conversationId,
+        });
+      }
+    }
     const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n判断スロット埋まり数: ${slotsFilledCount}/6\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n緊急度判定は「危険フラグ優先モデル」を使用する（Phase1: 即時RED条件 / Phase2: 重症指数）。\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が7以上、または判断スロットが6つ埋まった時点で必ず判定・まとめへ移行する。\n※内部計算はユーザーに表示しないこと。最終判断はまとめ直前の1回のみ実行すること。`;
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini", // Cost-effective model

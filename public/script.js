@@ -12,6 +12,7 @@ const FEATURE_SHOW_LOCATION_EXPLANATION = false;
 
 const appState = {
   riskLevel: null,
+  userHasSubmitted: false,
   painScore: null,
   slots: {},
 };
@@ -753,6 +754,11 @@ function renderSafeFallback() {
 }
 
 function renderSummary() {
+  // 最終防御: ユーザー送信前は判定UIを絶対に描画しない
+  if (!appState.userHasSubmitted) {
+    hideSummaryCard();
+    return;
+  }
   console.log("Rendering summary:", appState.riskLevel);
   console.assert(
     ["RED", "YELLOW", "GREEN"].includes(appState.riskLevel),
@@ -785,6 +791,7 @@ function showInitialMessage() {
 function hideSummaryCard() {
   const summaryCard = document.getElementById("summaryCard");
   if (summaryCard) {
+    summaryCard.style.display = "none";
     summaryCard.style.opacity = "0";
     summaryCard.style.visibility = "hidden";
   }
@@ -877,6 +884,7 @@ async function handleUserInput() {
   const userText = input.value.trim();
 
   if (!userText) return;
+  appState.userHasSubmitted = true;
 
   // Disable input
   input.disabled = true;
@@ -885,15 +893,6 @@ async function handleUserInput() {
   // Show user message
   addMessage(userText, true);
   input.value = "";
-
-    // Show loading message
-    const loadingId = "loading-" + Date.now();
-    const loadingDiv = document.createElement("div");
-    loadingDiv.id = loadingId;
-    loadingDiv.className = "message ai loading";
-    loadingDiv.textContent = "考え中...";
-    const messagesContainer = document.getElementById("chatMessages");
-    messagesContainer.appendChild(loadingDiv);
 
     try {
       // Call OpenAI API
@@ -911,10 +910,14 @@ async function handleUserInput() {
         ? renderQuestionPayload(aiResponse.questionPayload)
         : aiResponse.message;
 
-      // Remove loading message
-      const loadingMsg = document.getElementById(loadingId);
-      if (loadingMsg) {
-        loadingMsg.remove();
+      // 先に判定カードを即時表示（本文生成より先に表示して体感待機を短縮）
+      console.log("[DEBUG] judgeMeta", aiResponse.judgeMeta);
+      if (aiResponse.judgeMeta && aiResponse.judgeMeta.shouldJudge === true && appState.userHasSubmitted) {
+        const judgement = aiResponse.judgeMeta.judgement;
+        appState.riskLevel = judgement === "🔴" ? "RED" : judgement === "🟡" ? "YELLOW" : "GREEN";
+        renderSummary();
+      } else if (appState.riskLevel === null) {
+        hideSummaryCard();
       }
 
       // Show AI response immediately
@@ -932,14 +935,6 @@ async function handleUserInput() {
         addMessage(aiResponse.followUpQuestion);
       }
 
-      console.log("[DEBUG] judgeMeta", aiResponse.judgeMeta);
-      if (aiResponse.judgeMeta && aiResponse.judgeMeta.shouldJudge === true) {
-        const judgement = aiResponse.judgeMeta.judgement;
-        appState.riskLevel = judgement === "🔴" ? "RED" : judgement === "🟡" ? "YELLOW" : "GREEN";
-        renderSummary();
-      } else if (appState.riskLevel === null) {
-        hideSummaryCard();
-      }
       if (aiResponse.locationState) {
         if (aiResponse.locationState?.lat != null && aiResponse.locationState?.lng != null) {
           const snapshot = { lat: aiResponse.locationState.lat, lng: aiResponse.locationState.lng, ts: Date.now() };
@@ -951,12 +946,6 @@ async function handleUserInput() {
         }
       }
       } catch (error) {
-        // Remove loading message
-        const loadingMsg = document.getElementById(loadingId);
-        if (loadingMsg) {
-          loadingMsg.remove();
-        }
-
         // Show fallback message and keep conversation moving
         const errorMessage = "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね";
         
@@ -979,7 +968,10 @@ async function handleUserInput() {
 // Initialize
 function init() {
   // Start fresh without re-rendering history
+  appState.riskLevel = null;
+  appState.userHasSubmitted = false;
   hideSummaryCard();
+  clearSummaryContainer();
   showInitialMessage();
   const snapshot = getLocationSnapshot();
   updateLocationStatusIndicator(snapshot ? "usable" : "failed");
