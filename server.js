@@ -976,6 +976,72 @@ function hasAllSummaryBlocks(text) {
   return required.every((header) => text.includes(header));
 }
 
+function getRequiredSummaryHeadersByLevel(level) {
+  if (level === "🔴") {
+    return [
+      "📝 いまの状態を整理します（メモ）",
+      "⚠️ Kairoが気になっているポイント",
+      "🏥 Kairoの判断",
+      "💬 最後に",
+    ];
+  }
+  if (level === "🟡") {
+    return [
+      "🟢 ここまでの情報を整理します",
+      "🤝 今の状態について",
+      "✅ 今すぐやること（これだけでOK）",
+      "💊 一般的な市販薬",
+      "⏳ 今後の見通し",
+      "🌱 最後に",
+    ];
+  }
+  return [
+    "🟢 ここまでの情報を整理します",
+    "🤝 今の状態について",
+    "✅ 今すぐやること（これだけでOK）",
+    "⏳ 今後の見通し",
+    "🌱 最後に",
+  ];
+}
+
+function splitByKnownHeaders(text, headers) {
+  const lines = String(text || "").split("\n");
+  const headerSet = new Set(headers);
+  const blocks = new Map();
+  let currentHeader = null;
+  let currentLines = [];
+  const flush = () => {
+    if (!currentHeader) return;
+    blocks.set(currentHeader, [currentHeader, ...currentLines].join("\n").trim());
+  };
+  for (const line of lines) {
+    const matched = headers.find((h) => line.trim().startsWith(h));
+    if (matched) {
+      flush();
+      currentHeader = matched;
+      currentLines = [];
+      continue;
+    }
+    if (currentHeader) {
+      currentLines.push(line);
+    }
+  }
+  flush();
+  return blocks;
+}
+
+function enforceSummaryStructureStrict(text, level, history, state) {
+  const headers = getRequiredSummaryHeadersByLevel(level);
+  const blocks = splitByKnownHeaders(text, headers);
+  const hasAll = headers.every((h) => blocks.has(h));
+  const hasEmergencyBlock = String(text || "").includes("🚨");
+  if (!hasAll || hasEmergencyBlock) {
+    return buildLocalSummaryFallback(level, history, state);
+  }
+  // 強制的に仕様順へ再構成（順序ゆらぎを排除）
+  return headers.map((h) => blocks.get(h)).join("\n\n").trim();
+}
+
 function extractSummaryLine(text) {
   const lines = (text || "").split("\n").map((line) => line.trim()).filter(Boolean);
   for (let i = 0; i < lines.length; i += 1) {
@@ -3222,18 +3288,39 @@ function pickEmpathyTemplateId(isFirstQuestion) {
 
 function pickUniqueTemplateId(pool, usedSet) {
   const available = pool.filter((id) => !usedSet.has(id));
-  const pickedFrom = available.length > 0 ? available : pool;
-  return pickedFrom[Math.floor(Math.random() * pickedFrom.length)];
+  if (available.length === 0) {
+    return null;
+  }
+  return available[Math.floor(Math.random() * available.length)];
+}
+
+function getIntroRoleFromTemplateId(id) {
+  if (!id) return null;
+  if (id.startsWith("PROGRESS_")) return "PROGRESS";
+  if (id.startsWith("FOCUS_")) return "FOCUS";
+  if (id.startsWith("TEMPLATE_EMPATHY_") || id.startsWith("EMPATHY_NEXT_")) return "EMPATHY";
+  return null;
+}
+
+function getAllowedIntroRolesBySlot(slotKey) {
+  if (slotKey === "pain_score") return new Set(["EMPATHY"]);
+  if (slotKey === "duration" || slotKey === "worsening") return new Set(["FOCUS"]);
+  if (slotKey === "daily_impact") return new Set(["PROGRESS", "FOCUS"]);
+  if (slotKey === "associated_symptoms") return new Set(["FOCUS"]);
+  if (slotKey === "cause_category") return new Set(["PROGRESS", "FOCUS"]);
+  return new Set(["FOCUS"]);
 }
 
 function buildIntroTemplateIds(state, questionIndex, slotKey) {
   const used = new Set(state.introTemplateUsedIds || []);
-  const introIds = [];
+  let introIds = [];
 
   if (questionIndex === 0 || slotKey === "pain_score") {
     const empathyId = pickUniqueTemplateId(EMPATHY_OPEN_IDS, used);
-    introIds.push(empathyId);
-    used.add(empathyId);
+    if (empathyId) {
+      introIds.push(empathyId);
+      used.add(empathyId);
+    }
   } else {
     let roles = [];
     const progressUsed = (state.introRoleUsage?.PROGRESS || 0) > 0;
@@ -3255,18 +3342,45 @@ function buildIntroTemplateIds(state, questionIndex, slotKey) {
           ? PROGRESS_IDS
           : FOCUS_IDS;
       const picked = pickUniqueTemplateId(pool, used);
-      introIds.push(picked);
-      used.add(picked);
+      if (picked) {
+        introIds.push(picked);
+        used.add(picked);
+      }
     }
 
     state.lastIntroRoles = roles;
-    state.introRoleUsage = state.introRoleUsage || {};
-    for (const role of roles) {
-      state.introRoleUsage[role] = (state.introRoleUsage[role] || 0) + 1;
-    }
   }
 
+  const allowedRoles = getAllowedIntroRolesBySlot(slotKey);
+  // 仕様強制: 禁止ロールを除外、同一ID除外、最大2文
+  const filtered = [];
+  const seenLocal = new Set();
+  for (const id of introIds) {
+    if (!id || seenLocal.has(id)) continue;
+    const role = getIntroRoleFromTemplateId(id);
+    if (!role || !allowedRoles.has(role)) continue;
+    filtered.push(id);
+    seenLocal.add(id);
+    if (filtered.length >= 2) break;
+  }
+  // pain_score はEMPATHY必須
+  if (slotKey === "pain_score" && !filtered.some((id) => getIntroRoleFromTemplateId(id) === "EMPATHY")) {
+    const empathyId = pickUniqueTemplateId(EMPATHY_OPEN_IDS, used);
+    if (empathyId) {
+      filtered.unshift(empathyId);
+    }
+  }
+  introIds = filtered.slice(0, 2);
+  introIds.forEach((id) => used.add(id));
   state.introTemplateUsedIds = Array.from(used);
+
+  // 使用実績は最終IDから再計算（過剰カウント防止）
+  state.introRoleUsage = state.introRoleUsage || {};
+  for (const id of introIds) {
+    const role = getIntroRoleFromTemplateId(id);
+    if (!role) continue;
+    state.introRoleUsage[role] = (state.introRoleUsage[role] || 0) + 1;
+  }
   return introIds;
 }
 
@@ -4573,6 +4687,12 @@ app.post("/api/chat", async (req, res) => {
       aiResponse = sanitizeGeneralPhrases(aiResponse);
       aiResponse = sanitizeSummaryQuestions(aiResponse);
       aiResponse = enforceSummaryIntroTemplate(aiResponse);
+      aiResponse = enforceSummaryStructureStrict(
+        aiResponse,
+        level,
+        conversationHistory[conversationId],
+        conversationState[conversationId]
+      );
       const decisionType =
         level === "🔴"
           ? "A_HOSPITAL"

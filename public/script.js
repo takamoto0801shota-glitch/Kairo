@@ -936,114 +936,36 @@ async function handleUserInput() {
   input.value = "";
 
     try {
-      const streamNode = createStreamingMessageNode();
-      let streamedText = "";
-      let finalPayload = null;
-      let sectionMode = false;
-      let receivedAnyStreamData = false;
-      const es = new EventSource(buildStreamUrl(userText));
+      // 質問フェーズは従来どおり通常APIで即時応答
+      const data = await callOpenAI(userText);
+      if (requestId !== currentRequestId) {
+        console.warn("Old response ignored");
+        return;
+      }
+      console.log("[DEBUG] full aiResponse", data);
+      const aiResponse = data;
+      if (aiResponse.conversationId) {
+        localStorage.setItem(CONVERSATION_ID_KEY, aiResponse.conversationId);
+      }
+      const aiMessage = aiResponse.questionPayload
+        ? renderQuestionPayload(aiResponse.questionPayload)
+        : aiResponse.message;
 
-      const finalizeStream = ({ suppressMessage = false } = {}) => {
-        es.close();
-        if (requestId !== currentRequestId) return;
-        if (streamNode && streamNode.parentNode && sectionMode) {
-          streamNode.remove();
-        }
-        const aiResponse = finalPayload || {
-          message:
-            streamedText || "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。",
-          judgeMeta: { judgement: "🟡", shouldJudge: false },
-        };
-        if (aiResponse.conversationId) {
-          localStorage.setItem(CONVERSATION_ID_KEY, aiResponse.conversationId);
-        }
-        const aiMessage = aiResponse.questionPayload
-          ? renderQuestionPayload(aiResponse.questionPayload)
-          : (streamedText || aiResponse.message);
-        if (!sectionMode && !suppressMessage) {
-          addMessage(aiMessage);
-        }
-        if (aiResponse.followUpMessage) {
-          addMessage(aiResponse.followUpMessage);
-        }
-        if (aiResponse.followUpQuestion) {
-          addMessage(aiResponse.followUpQuestion);
-        }
-        if (aiResponse.judgeMeta && aiResponse.judgeMeta.shouldJudge === true && appState.userHasSubmitted) {
-          const judgement = aiResponse.judgeMeta.judgement;
-          appState.riskLevel = judgement === "🔴" ? "RED" : judgement === "🟡" ? "YELLOW" : "GREEN";
-          renderSummary();
-        } else if (appState.riskLevel === null) {
-          hideSummaryCard();
-        }
-      };
+      console.log("[DEBUG] judgeMeta", aiResponse.judgeMeta);
+      if (aiResponse.judgeMeta && aiResponse.judgeMeta.shouldJudge === true && appState.userHasSubmitted) {
+        const judgement = aiResponse.judgeMeta.judgement;
+        appState.riskLevel = judgement === "🔴" ? "RED" : judgement === "🟡" ? "YELLOW" : "GREEN";
+        renderSummary();
+      } else if (appState.riskLevel === null) {
+        hideSummaryCard();
+      }
 
-      es.addEventListener("triage", (e) => {
-        try {
-          const triage = JSON.parse(e.data || "{}");
-          receivedAnyStreamData = true;
-          if (triage?.shouldJudge === true && triage?.judgement && appState.userHasSubmitted) {
-            appState.riskLevel = triage.judgement === "🔴" ? "RED" : triage.judgement === "🟡" ? "YELLOW" : "GREEN";
-            renderSummary();
-          }
-        } catch (parseError) {
-          console.error("triage parse error:", parseError);
-        }
-      });
-
-      es.addEventListener("message_chunk", (e) => {
-        if (sectionMode) return;
-        receivedAnyStreamData = true;
-        streamedText += e.data || "";
-        streamNode.textContent = streamedText;
-      });
-
-      es.addEventListener("section", (e) => {
-        try {
-          const payload = JSON.parse(e.data || "{}");
-          sectionMode = true;
-          receivedAnyStreamData = true;
-          if (streamNode && streamNode.parentNode) {
-            streamNode.remove();
-          }
-          renderOrUpdateSection(payload.id, payload.text || "", requestId);
-        } catch (parseError) {
-          console.error("section parse error:", parseError);
-        }
-      });
-
-      es.addEventListener("final", (e) => {
-        try {
-          receivedAnyStreamData = true;
-          finalPayload = JSON.parse(e.data || "{}");
-        } catch (parseError) {
-          console.error("final parse error:", parseError);
-        }
-      });
-
-      const streamResult = await new Promise((resolve) => {
-        es.addEventListener("done", () => {
-          finalizeStream();
-          resolve({ errored: false });
-        });
-        es.onerror = () => {
-          const noData = receivedAnyStreamData === false;
-          finalizeStream({ suppressMessage: noData });
-          resolve({ errored: true, receivedAnyStreamData });
-        };
-      });
-      if (streamResult?.errored === true && streamResult?.receivedAnyStreamData === false) {
-        // SSE接続そのものが失敗した場合は通常APIにフォールバックして会話継続を保証する
-        const data = await callOpenAI(userText);
-        if (requestId !== currentRequestId) return;
-        const aiResponse = data || {};
-        if (aiResponse.conversationId) {
-          localStorage.setItem(CONVERSATION_ID_KEY, aiResponse.conversationId);
-        }
-        const aiMessage = aiResponse.questionPayload
-          ? renderQuestionPayload(aiResponse.questionPayload)
-          : aiResponse.message;
-        addMessage(aiMessage || "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。");
+      addMessage(aiMessage);
+      if (aiResponse.followUpMessage) {
+        addMessage(aiResponse.followUpMessage);
+      }
+      if (aiResponse.followUpQuestion) {
+        addMessage(aiResponse.followUpQuestion);
       }
     } catch (error) {
         // Show fallback message and keep conversation moving
