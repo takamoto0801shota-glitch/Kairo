@@ -899,6 +899,20 @@ function createStreamingMessageNode() {
   return messageDiv;
 }
 
+function renderOrUpdateSection(sectionId, text, requestId) {
+  const messagesContainer = document.getElementById("chatMessages");
+  const selector = `.message.ai[data-stream-request="${requestId}"][data-section-id="${sectionId}"]`;
+  let node = messagesContainer.querySelector(selector);
+  if (!node) {
+    node = document.createElement("div");
+    node.className = "message ai";
+    node.dataset.streamRequest = String(requestId);
+    node.dataset.sectionId = String(sectionId);
+    messagesContainer.appendChild(node);
+  }
+  node.textContent = text || "";
+}
+
 // Handle user input
 async function handleUserInput() {
   const requestId =
@@ -925,12 +939,13 @@ async function handleUserInput() {
       const streamNode = createStreamingMessageNode();
       let streamedText = "";
       let finalPayload = null;
+      let sectionMode = false;
       const es = new EventSource(buildStreamUrl(userText));
 
       const finalizeStream = () => {
         es.close();
         if (requestId !== currentRequestId) return;
-        if (streamNode && streamNode.parentNode) {
+        if (streamNode && streamNode.parentNode && sectionMode) {
           streamNode.remove();
         }
         const aiResponse = finalPayload || {
@@ -944,7 +959,9 @@ async function handleUserInput() {
         const aiMessage = aiResponse.questionPayload
           ? renderQuestionPayload(aiResponse.questionPayload)
           : (streamedText || aiResponse.message);
-        addMessage(aiMessage);
+        if (!sectionMode) {
+          addMessage(aiMessage);
+        }
         if (aiResponse.followUpMessage) {
           addMessage(aiResponse.followUpMessage);
         }
@@ -973,6 +990,7 @@ async function handleUserInput() {
       });
 
       es.addEventListener("message_chunk", (e) => {
+        if (sectionMode) return;
         streamedText += e.data || "";
         streamNode.textContent = streamedText;
       });
@@ -980,8 +998,11 @@ async function handleUserInput() {
       es.addEventListener("section", (e) => {
         try {
           const payload = JSON.parse(e.data || "{}");
-          streamedText = payload.text || streamedText;
-          streamNode.textContent = streamedText;
+          sectionMode = true;
+          if (streamNode && streamNode.parentNode) {
+            streamNode.remove();
+          }
+          renderOrUpdateSection(payload.id, payload.text || "", requestId);
         } catch (parseError) {
           console.error("section parse error:", parseError);
         }

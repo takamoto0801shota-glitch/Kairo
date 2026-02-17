@@ -3939,7 +3939,7 @@ function getOrInitConversationState(conversationId) {
 // Chat API endpoint
 app.post("/api/chat", async (req, res) => {
   try {
-  const { message, conversationId: rawConversationId, location, clientMeta } = req.body;
+  const { message, conversationId: rawConversationId, location, clientMeta, streamMode } = req.body;
   const conversationId =
     rawConversationId || `conv_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
   let followUpQuestion = null;
@@ -4355,17 +4355,19 @@ app.post("/api/chat", async (req, res) => {
       }
     }
     const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n判断スロット埋まり数: ${slotsFilledCount}/6\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n緊急度判定は「危険フラグ優先モデル」を使用する（Phase1: 即時RED条件 / Phase2: 重症指数）。\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が7以上、または判断スロットが6つ埋まった時点で必ず判定・まとめへ移行する。\n※内部計算はユーザーに表示しないこと。最終判断はまとめ直前の1回のみ実行すること。`;
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini", // Cost-effective model
-      messages: [
-        ...conversationHistory[conversationId],
-        { role: "system", content: scoreContext },
-      ],
-      temperature: 0.7,
-      max_tokens: 1000,
-    });
-
-    let aiResponse = completion.choices[0].message.content;
+    let aiResponse = "";
+    if (!(streamMode === true && shouldJudgeNow)) {
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini", // Cost-effective model
+        messages: [
+          ...conversationHistory[conversationId],
+          { role: "system", content: scoreContext },
+        ],
+        temperature: 0.7,
+        max_tokens: 1000,
+      });
+      aiResponse = completion.choices[0].message.content;
+    }
 
     // 判定確定トリガー発動時は、まとめを強制生成（初回のみ）
     if (shouldJudgeNow && !conversationState[conversationId].summaryShown) {
@@ -4439,43 +4441,51 @@ app.post("/api/chat", async (req, res) => {
         ? `\n薬局名は「${pharmacyRec.name}」を優先してください。\n薬名は例示で2〜3件、一般名＋商品名で示し、末尾に「最終判断は薬剤師に相談してください。これは一般的に現地で使われる選択肢です。」を入れてください。\n`
         : "\n薬局名は国・都市レベルで具体名を1件提示し、薬名は例示で2〜3件、一般名＋商品名で示してください。\n末尾に「最終判断は薬剤師に相談してください。これは一般的に現地で使われる選択肢です。」を入れてください。\n";
       locationRePromptBeforeSummary = null;
-      const summaryOnlyMessages = [
-        { role: "system", content: buildRepairPrompt(level) },
-        { role: "system", content: clinicHint },
-        { role: "system", content: pharmacyHint },
-        ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
-      ];
-      const forced = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: summaryOnlyMessages,
-        temperature: 0.7,
-        max_tokens: 1000,
-      });
-      aiResponse = forced.choices[0].message.content;
-      if (!hasAllSummaryBlocks(aiResponse)) {
-        const strictMessages = [
-          { role: "system", content: buildRepairPrompt(level) + "\n\n不足ブロックがある場合は必ず補完して、全ブロックを完成させてください。" },
+      if (streamMode === true) {
+        aiResponse = buildLocalSummaryFallback(
+          level,
+          conversationHistory[conversationId],
+          conversationState[conversationId]
+        );
+      } else {
+        const summaryOnlyMessages = [
+          { role: "system", content: buildRepairPrompt(level) },
+          { role: "system", content: clinicHint },
+          { role: "system", content: pharmacyHint },
           ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
         ];
-        const strict = await openai.chat.completions.create({
+        const forced = await openai.chat.completions.create({
           model: "gpt-4o-mini",
-          messages: strictMessages,
+          messages: summaryOnlyMessages,
           temperature: 0.7,
           max_tokens: 1000,
         });
-        aiResponse = strict.choices[0].message.content;
-      }
-      if (level !== "🔴" && isHospitalFlow(aiResponse)) {
-        const repairForLevel = await openai.chat.completions.create({
-          model: "gpt-4o-mini",
-          messages: [
-            { role: "system", content: buildRepairPrompt(level) },
+        aiResponse = forced.choices[0].message.content;
+        if (!hasAllSummaryBlocks(aiResponse)) {
+          const strictMessages = [
+            { role: "system", content: buildRepairPrompt(level) + "\n\n不足ブロックがある場合は必ず補完して、全ブロックを完成させてください。" },
             ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
-          ],
-          temperature: 0.7,
-          max_tokens: 1000,
-        });
-        aiResponse = repairForLevel.choices[0].message.content;
+          ];
+          const strict = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: strictMessages,
+            temperature: 0.7,
+            max_tokens: 1000,
+          });
+          aiResponse = strict.choices[0].message.content;
+        }
+        if (level !== "🔴" && isHospitalFlow(aiResponse)) {
+          const repairForLevel = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [
+              { role: "system", content: buildRepairPrompt(level) },
+              ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
+            ],
+            temperature: 0.7,
+            max_tokens: 1000,
+          });
+          aiResponse = repairForLevel.choices[0].message.content;
+        }
       }
       aiResponse = normalizeSummaryLevel(aiResponse, level);
       aiResponse = ensureYellowOtcBlock(
@@ -4833,6 +4843,14 @@ app.post("/api/chat", async (req, res) => {
       questionPayload,
       normalizedAnswer,
     });
+    const summaryStreamPlan =
+      streamMode === true && shouldJudgeNow
+        ? {
+            judgement: finalRisk,
+            seedText: aiResponse,
+            blocks: getSummaryBlockPlanByJudgement(finalRisk),
+          }
+        : null;
     res.json({
       message: aiResponse,
       response: aiResponse,
@@ -4844,6 +4862,7 @@ app.post("/api/chat", async (req, res) => {
       locationPromptMessage,
       locationRePromptMessage: locationRePromptBeforeSummary,
       locationSnapshot: conversationState[conversationId].locationSnapshot,
+      summaryStreamPlan,
       conversationId,
     });
   } catch (error) {
@@ -4906,6 +4925,34 @@ function splitSummarySections(text) {
 function writeSseEvent(res, eventName, payload) {
   res.write(`event: ${eventName}\n`);
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function getSummaryBlockPlanByJudgement(judgement) {
+  if (judgement === "🔴") {
+    return [
+      { id: 1, title: "📝 いまの状態を整理します（メモ）" },
+      { id: 2, title: "⚠️ Kairoが気になっているポイント" },
+      { id: 3, title: "🏥 Kairoの判断" },
+      { id: 4, title: "💬 最後に" },
+    ];
+  }
+  if (judgement === "🟡") {
+    return [
+      { id: 1, title: "🟢 ここまでの情報を整理します" },
+      { id: 2, title: "🤝 今の状態について" },
+      { id: 3, title: "✅ 今すぐやること（これだけでOK）" },
+      { id: 4, title: "💊 一般的な市販薬" },
+      { id: 5, title: "⏳ 今後の見通し" },
+      { id: 6, title: "🌱 最後に" },
+    ];
+  }
+  return [
+    { id: 1, title: "🟢 ここまでの情報を整理します" },
+    { id: 2, title: "🤝 今の状態について" },
+    { id: 3, title: "✅ 今すぐやること（これだけでOK）" },
+    { id: 4, title: "⏳ 今後の見通し" },
+    { id: 5, title: "🌱 最後に" },
+  ];
 }
 
 function getSummarySectionSpecsByJudgement(judgement) {
@@ -4997,6 +5044,7 @@ app.get("/api/chat/stream", async (req, res) => {
         conversationId: convId,
         location,
         clientMeta,
+        streamMode: true,
       }),
     });
     const payload = await internal.json();
@@ -5014,43 +5062,63 @@ app.get("/api/chat/stream", async (req, res) => {
       shouldJudge,
     });
     if (shouldJudge) {
-      const specs = getSummarySectionSpecsByJudgement(
-        payload?.judgeMeta?.judgement || triage.level || "🟢"
-      );
-      const sectionsBySpec = extractSectionsBySpecs(fullText, specs);
-      if (sectionsBySpec.length > 0) {
-        let merged = "";
-        for (const section of sectionsBySpec) {
-          for (const ch of section.text) {
-            merged += ch;
-            writeSseEvent(res, "section", { id: section.id, text: merged });
-            await sleep(4);
-          }
-          if (!merged.endsWith("\n\n")) {
-            merged += "\n\n";
-            writeSseEvent(res, "section", { id: section.id, text: merged });
+      const plan =
+        payload?.summaryStreamPlan?.blocks ||
+        getSummaryBlockPlanByJudgement(payload?.judgeMeta?.judgement || triage.level || "🟢");
+      const seedText = payload?.summaryStreamPlan?.seedText || fullText;
+      const generateSection = async (sectionId, prompt) => {
+        const completion = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: [{ role: "user", content: prompt }],
+          stream: true,
+          temperature: 0.25,
+          max_tokens: 360,
+        });
+        let text = "";
+        for await (const chunk of completion) {
+          const token = chunk.choices?.[0]?.delta?.content;
+          if (token) {
+            text += token;
+            writeSseEvent(res, "section", { id: sectionId, text });
           }
         }
-      } else {
-        const sections = splitSummarySections(fullText);
-        if (sections.length === 0) {
-          for (const ch of fullText) {
-            writeSseEvent(res, "message_chunk", ch);
-            await sleep(6);
-          }
-        } else {
-          let fallbackMerged = "";
-          for (let i = 0; i < sections.length; i += 1) {
-            const section = sections[i];
-            for (const ch of section) {
-              fallbackMerged += ch;
-              writeSseEvent(res, "section", { id: i + 1, text: fallbackMerged });
+      };
+      let streamSucceeded = false;
+      try {
+        for (const block of plan) {
+          const prompt = [
+            "あなたはKairoです。次の元テキストを元に、指定された1ブロックのみを出力してください。",
+            "他ブロックは一切出力しないこと。",
+            `見出しは必ず「${block.title}」から開始すること。`,
+            "KAIRO_SPEC.mdに沿った語調・構造を維持すること。",
+            "",
+            "【元テキスト】",
+            seedText,
+          ].join("\n");
+          await generateSection(block.id, prompt);
+        }
+        streamSucceeded = true;
+      } catch (sectionError) {
+        console.error("section generation failed:", sectionError);
+      }
+      if (!streamSucceeded) {
+        const specs = getSummarySectionSpecsByJudgement(
+          payload?.judgeMeta?.judgement || triage.level || "🟢"
+        );
+        const sectionsBySpec = extractSectionsBySpecs(seedText, specs);
+        if (sectionsBySpec.length > 0) {
+          for (const section of sectionsBySpec) {
+            let text = "";
+            for (const ch of section.text) {
+              text += ch;
+              writeSseEvent(res, "section", { id: section.id, text });
               await sleep(4);
             }
-            if (i < sections.length - 1) {
-              fallbackMerged += "\n\n";
-              writeSseEvent(res, "section", { id: i + 1, text: fallbackMerged });
-            }
+          }
+        } else {
+          for (const ch of seedText) {
+            writeSseEvent(res, "message_chunk", ch);
+            await sleep(6);
           }
         }
       }
