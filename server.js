@@ -3,8 +3,6 @@ const express = require("express");
 const cors = require("cors");
 const OpenAI = require("openai");
 const path = require("path");
-const http = require("http");
-const https = require("https");
 require("dotenv").config();
 
 const app = express();
@@ -2036,6 +2034,19 @@ function buildHospitalConcernPoint(historyText) {
   return `今の症状の出方を整理すると、薬で様子を見るより、一度${destination.label}で確認した方が安心できる状態です。`;
 }
 
+function ensureHospitalMemoBlock(text, state) {
+  if (!text) return text;
+  const memoLines = [
+    "📝 いまの状態を整理します（メモ）",
+    ...buildStateFactsBullets(state),
+  ];
+  return replaceSummaryBlock(
+    text,
+    "📝 いまの状態を整理します",
+    memoLines.join("\n")
+  );
+}
+
 function ensureHospitalConcernBlock(text, historyText) {
   if (!text) return text;
   return replaceSummaryBlock(
@@ -2846,22 +2857,53 @@ function extractSeverityFromText(text) {
 
 function extractWorseningFromText(text) {
   const normalized = normalizeUserText(text);
+  const rawText = String(text || "").trim();
   let trend = null;
   if (/だんだん.*悪|悪化|ひどく|強くな|増えて/.test(normalized)) trend = "worsening";
   else if (/良くな|まし|和らい|軽くな/.test(normalized)) trend = "improving";
   else if (/変わらない|同じ|横ばい/.test(normalized)) trend = "stable";
   else if (/波がある|波があ|上がったり下がったり|ムラ/.test(normalized)) trend = "fluctuating";
 
-  const qualityWords = ["ズキズキ", "キリキリ", "チクチク", "ジンジン", "ピリピリ", "締め付け", "鈍い", "重い"];
+  const qualityWords = [
+    "ズキズキ",
+    "キリキリ",
+    "チクチク",
+    "ジンジン",
+    "ピリピリ",
+    "ヒリヒリ",
+    "ズキッ",
+    "しみる",
+    "張る感じ",
+    "締め付けられる感じ",
+    "締め付け",
+    "鈍い",
+    "重い",
+  ];
   const quality = qualityWords.find((w) => normalized.includes(w)) || null;
   if (!trend && !quality) return null;
 
-  const selectedIndex =
-    trend === "worsening" ? 2 : trend === "improving" ? 0 : 1;
-  const raw = [trend ? `変化:${trend}` : "", quality ? `痛み方:${quality}` : ""]
-    .filter(Boolean)
-    .join(" / ");
-  return { trend, quality, raw, selectedIndex };
+  // ユーザー原文を優先。必要最小限の整形のみ行う。
+  const raw = quality
+    ? quality
+    : rawText.length > 0
+      ? rawText
+      : [trend ? `変化:${trend}` : "", quality ? `痛み方:${quality}` : ""]
+          .filter(Boolean)
+          .join(" / ");
+  return { trend, quality, raw, selectedIndex: null };
+}
+
+function mapWorseningToOptionIndex(worsening, category) {
+  if (!worsening) return 1;
+  const options = buildPainQualityOptions(category || "other");
+  const quality = String(worsening.quality || "").trim();
+  if (quality) {
+    const exact = options.findIndex((opt) => opt.includes(quality) || quality.includes(opt));
+    if (exact >= 0) return exact;
+  }
+  if (worsening.trend === "worsening") return 2;
+  if (worsening.trend === "improving") return 0;
+  return 1;
 }
 
 function extractDurationFromText(text) {
@@ -2879,7 +2921,7 @@ function extractDurationFromText(text) {
   const d = normalized.match(/(\d+)\s*日前/);
   if (d) return { raw_text: `${d[1]}日前`, normalized: `${d[1]}d_ago`, selectedIndex: 2 };
   if (/(昨日|一日前|数日|ずっと|前から|一昨日)/.test(normalized)) {
-    const raw = (normalized.match(/(昨日|一日前|数日|ずっと|前から|一昨日)/) || [])[0] || "昨日";
+    const raw = (normalized.match(/(昨日|一日前|数日|ずっと|前から|一昨日)/) || [])[0] || "一日以上前";
     return { raw_text: raw, normalized: "day_or_more", selectedIndex: 2 };
   }
   return null;
@@ -3002,9 +3044,10 @@ function applySpontaneousSlotFill(state, message) {
   }
 
   const worsening = extractWorseningFromText(text);
+  const worseningIndex = mapWorseningToOptionIndex(worsening, symptomType);
   if (worsening && setSlotFromSpontaneous(state, "worsening", {
     rawAnswer: worsening.raw,
-    selectedIndex: worsening.selectedIndex,
+    selectedIndex: worseningIndex,
     allowOverwrite: correction,
   })) {
     state.worseningMeta = {
@@ -3152,8 +3195,8 @@ const FIXED_QUESTIONS = {
     options: [],
   },
   duration: {
-    q: "いつから始まりましたか\n・さっき\n・数時間前\n・一日前",
-    options: ["さっき", "数時間前", "一日前"],
+    q: "いつから始まりましたか\n・さっき\n・数時間前\n・一日以上前",
+    options: ["さっき", "数時間前", "一日以上前"],
   },
   daily_impact: {
     q: "今の動ける感じはどれに近いですか？\n・普通に動ける\n・少しつらいが動ける\n・動けないほどつらい",
@@ -3263,6 +3306,103 @@ function buildPainQualityOptions(category) {
   return ["ズキズキする", "チクチクする", "重だるい感じ"];
 }
 
+function detectQuestionCategory4(text) {
+  const normalized = (text || "").replace(/\s+/g, "");
+  if (/(腹痛|お腹|下痢|吐き気|胃|嘔吐|便)/.test(normalized)) return "GI";
+  if (/(熱|発熱|だるい|咳|せき|喉|のど|寒気|風邪)/.test(normalized)) return "INFECTION";
+  if (/(ヒリヒリ|かゆい|赤い|発疹|唇|水ぶくれ|乾燥|口)/.test(normalized)) return "SKIN";
+  if (/(頭痛|傷)/.test(normalized)) return "PAIN";
+  return "PAIN";
+}
+
+function getCategoryQuestionOverride(category, slotKey) {
+  if (category === "PAIN") return null;
+  if (category === "SKIN") {
+    if (slotKey === "daily_impact") {
+      return {
+        question: "見た目の変化はありますか？",
+        options: ["赤みや乾燥だけ", "見た目はほとんど変わらない", "水ぶくれ・ただれ・できもの"],
+      };
+    }
+    if (slotKey === "associated_symptoms") {
+      return {
+        question: "思い当たるきっかけはありますか？",
+        options: ["特に思い当たらない", "紫外線や乾燥が強かった", "新しい製品や刺激物を使った"],
+      };
+    }
+    if (slotKey === "cause_category") {
+      return {
+        question: "症状の状況はどうですか？",
+        options: ["触っても痛くない", "触ると痛い", "触ると激痛が走る"],
+      };
+    }
+  }
+  if (category === "INFECTION") {
+    if (slotKey === "daily_impact") {
+      return {
+        question: "体温はどのくらいですか？",
+        options: ["平熱に近い", "37度台", "38度以上"],
+      };
+    }
+    if (slotKey === "associated_symptoms") {
+      return {
+        question: "今一番つらい症状はどれに近いですか？",
+        options: ["喉の違和感や鼻水", "強い全身のだるさ", "咳が強い／胸が苦しい"],
+      };
+    }
+    if (slotKey === "cause_category") {
+      return {
+        question: "何かきっかけで思い当たることはありますか？",
+        options: ["思い当たらない", "周りが咳をしていた", "ストレスや疲労"],
+      };
+    }
+  }
+  if (category === "GI") {
+    if (slotKey === "daily_impact") {
+      return {
+        question: "お腹のどのあたりが痛みますか？",
+        options: ["わからない", "全体的", "みぞおち付近"],
+      };
+    }
+    if (slotKey === "associated_symptoms") {
+      return {
+        question: "便や吐き気はどうですか？",
+        options: ["特に変化はない", "下痢がある", "吐き気・嘔吐がある"],
+      };
+    }
+    if (slotKey === "cause_category") {
+      return {
+        question: "始まり方はどれに近いですか？",
+        options: ["徐々に始まった", "食後に悪化する", "突然強くなった"],
+      };
+    }
+  }
+  return null;
+}
+
+function applyCategoryQuestionOverride(fixed, slotKey, category, useFinalPrefix) {
+  if (!fixed || !slotKey) return fixed;
+  if (slotKey === "worsening") {
+    const baseCategory = detectSymptomCategory(category === "GI" ? "腹痛" : category === "INFECTION" ? "喉" : category === "SKIN" ? "ヒリヒリ" : "頭痛");
+    const options = buildPainQualityOptions(baseCategory);
+    fixed.options = options;
+    fixed.question = `${useFinalPrefix ? "最後に、" : ""}${FIXED_QUESTIONS.worsening.q}\n・${options.join("\n・")}`;
+    return fixed;
+  }
+  const override = getCategoryQuestionOverride(category, slotKey);
+  if (!override) {
+    if (slotKey === "associated_symptoms") {
+      const options = buildAssociatedSymptomsOptions("other");
+      fixed.options = options;
+      fixed.question = `${useFinalPrefix ? "最後に、" : ""}${FIXED_QUESTIONS.associated_symptoms.q}\n・${options.join("\n・")}`;
+    }
+    return fixed;
+  }
+  fixed.options = override.options;
+  fixed.question = `${useFinalPrefix ? "最後に、" : ""}${override.question}\n・${override.options.join("\n・")}`;
+  return fixed;
+}
+
 function pickTemplateId(state, isFirstQuestion) {
   const used = new Set(state.usedTemplateIds || []);
   let group = "EMPATHY_PURPOSE";
@@ -3314,6 +3454,7 @@ function getAllowedIntroRolesBySlot(slotKey) {
 function buildIntroTemplateIds(state, questionIndex, slotKey) {
   const used = new Set(state.introTemplateUsedIds || []);
   let introIds = [];
+  const progressUsedBefore = (state?.introRoleUsage?.PROGRESS || 0) > 0;
 
   if (questionIndex === 0 || slotKey === "pain_score") {
     const empathyId = pickUniqueTemplateId(EMPATHY_OPEN_IDS, used);
@@ -3362,6 +3503,21 @@ function buildIntroTemplateIds(state, questionIndex, slotKey) {
     filtered.push(id);
     seenLocal.add(id);
     if (filtered.length >= 2) break;
+  }
+  // 仕様強制: PROGRESS はセッション中最大1回（カテゴリ差し替え有無に関係なく固定）
+  if (progressUsedBefore) {
+    const withoutProgress = filtered.filter((id) => getIntroRoleFromTemplateId(id) !== "PROGRESS");
+    filtered.length = 0;
+    withoutProgress.forEach((id) => filtered.push(id));
+    // 2文上限の範囲でFOCUSを補完
+    while (filtered.length < 2) {
+      const focusId = pickUniqueTemplateId(FOCUS_IDS, used);
+      if (!focusId) break;
+      if (!filtered.includes(focusId)) {
+        filtered.push(focusId);
+      }
+      used.add(focusId);
+    }
   }
   // pain_score はEMPATHY必須
   if (slotKey === "pain_score" && !filtered.some((id) => getIntroRoleFromTemplateId(id) === "EMPATHY")) {
@@ -3419,33 +3575,64 @@ function extractQuestionPhrases(text) {
   }
   return normalizeQuestionText(phraseLines.join(" "));
 }
+
+function normalizeFreeTextForSummary(text) {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .replace(/[。]+$/g, "")
+    .trim();
+}
+
+function getSlotStatusValue(state, statusKey, fallback = "") {
+  const raw = state?.slotStatus?.[statusKey]?.value;
+  const picked = raw !== null && raw !== undefined && String(raw).trim() !== ""
+    ? raw
+    : fallback;
+  return normalizeFreeTextForSummary(picked);
+}
+
 function buildFactsFromSlotAnswers(state) {
   const answers = state?.slotAnswers || {};
   const facts = [];
+  const severityRaw = getSlotStatusValue(state, "severity", answers.pain_score);
+  const worseningRaw = getSlotStatusValue(state, "worsening", answers.worsening);
+  const durationRaw = getSlotStatusValue(state, "duration", answers.duration);
+  const impactRaw = getSlotStatusValue(state, "impact", answers.daily_impact);
+  const associatedRaw = getSlotStatusValue(state, "associated", answers.associated_symptoms);
+  const causeRaw = getSlotStatusValue(
+    state,
+    "cause_category",
+    state?.causeDetailText || answers.cause_category
+  );
+
   if (state?.lastPainScore !== null) {
-    facts.push(`痛みは「${state.lastPainScore} / 10」くらい`);
-  }
-  if (answers.daily_impact) {
-    facts.push(`日常の動きは「${answers.daily_impact}」に近い`);
-  }
-  if (answers.worsening) {
-    facts.push(`変化は「${answers.worsening}」に近い`);
-  }
-  if (answers.duration) {
-    facts.push(`始まりは「${answers.duration}」に近い`);
-  }
-  if (answers.associated_symptoms) {
-    if (answers.associated_symptoms.includes("ない")) {
-      facts.push("これ以外の症状は特にない");
+    if (severityRaw && severityRaw !== String(state.lastPainScore)) {
+      facts.push(`痛みは「${severityRaw}」`);
     } else {
-      facts.push(`これ以外の症状は「${answers.associated_symptoms}」に近い`);
+      facts.push(`痛みは「${state.lastPainScore} / 10」くらい`);
     }
   }
-  if (answers.cause_category) {
-    if (answers.cause_category.includes("思い当たらない")) {
+  if (impactRaw) {
+    facts.push(`日常の動きは「${impactRaw}」`);
+  }
+  if (worseningRaw) {
+    facts.push(`変化は「${worseningRaw}」`);
+  }
+  if (durationRaw) {
+    facts.push(`始まりは「${durationRaw}」`);
+  }
+  if (associatedRaw) {
+    if (associatedRaw.includes("ない")) {
+      facts.push("これ以外の症状は特にない");
+    } else {
+      facts.push(`これ以外の症状は「${associatedRaw}」`);
+    }
+  }
+  if (causeRaw) {
+    if (causeRaw.includes("思い当たらない")) {
       facts.push("きっかけは特に思い当たらない");
     } else {
-      facts.push(`きっかけは「${answers.cause_category}」に近い`);
+      facts.push(`きっかけは「${causeRaw}」`);
     }
   }
   if (state?.causeDetailText) {
@@ -3502,42 +3689,59 @@ function buildStateFactsBullets(state) {
   const slotStatus = state?.slotStatus || {};
   const bullets = [];
   const val = (statusKey, fallback = "") =>
-    String(slotStatus?.[statusKey]?.value || fallback || "").trim();
+    getSlotStatusValue(state, statusKey, fallback);
 
-  // 優先度順（6スロット定義順）に、filled済みスロットのみを出す（質問有無は不問）
-  if (filled.pain_score) {
-    const v =
-      val("severity", answers.pain_score) ||
-      (Number.isFinite(state?.lastPainScore) ? `${state.lastPainScore}/10` : "");
-    if (v) bullets.push(`・痛みの強さ: ${v}`);
-  }
-  if (filled.worsening) {
-    const v = val("worsening", answers.worsening);
-    if (v) bullets.push(`・悪化傾向: ${v}`);
-  }
-  if (filled.duration) {
-    const v = val("duration", answers.duration);
-    if (v) bullets.push(`・経過時間: ${v}`);
-  }
+  // 1) 危険兆候の有無
+  const associated = val("associated", answers.associated_symptoms);
+  const hasDanger =
+    state?.slotNormalized?.associated_symptoms?.riskLevel === RISK_LEVELS.HIGH ||
+    /(しびれ|視界|意識|失神|息苦しさ|胸痛)/.test(associated);
+  bullets.push(hasDanger ? "・危険兆候がみられる" : "・危険兆候は今のところはっきりしない");
+
+  // 2) 日常生活への影響（daily_impact）
   if (filled.daily_impact) {
-    const v = val("impact", answers.daily_impact);
-    if (v) bullets.push(`・日常生活への影響: ${v}`);
-  }
-  if (filled.associated_symptoms) {
-    const v = val("associated", answers.associated_symptoms);
-    if (v) bullets.push(`・付随症状: ${v}`);
-  }
-  if (filled.cause_category) {
-    const v = val("cause_category", state?.causeDetailText || answers.cause_category);
-    if (v) bullets.push(`・きっかけ: ${v}`);
+    const impact = val("impact", answers.daily_impact);
+    if (impact) bullets.push(`・日常生活への影響: ${impact}`);
   }
 
+  // 3) 痛みスコア（5以上なら重要）
+  const painScore = Number.isFinite(state?.lastPainScore)
+    ? state.lastPainScore
+    : (() => {
+        const m = String(val("severity", answers.pain_score)).match(/(\d{1,2})/);
+        return m ? Number(m[1]) : null;
+      })();
+  if (Number.isFinite(painScore) && painScore >= 5) {
+    bullets.push(`・痛みは${painScore}/10程度`);
+  }
+
+  // 4) 経過時間（数時間以上なら重要）
+  if (filled.duration) {
+    const duration = val("duration", answers.duration);
+    if (duration && /(数時間|時間|昨日|日|一日以上前|前から|ずっと)/.test(duration)) {
+      bullets.push(`・経過時間: ${duration}`);
+    }
+  }
+
+  // 5) 付随症状（ある場合のみ）
+  if (filled.associated_symptoms && associated && !/(特にない|なし|これ以外は特にない)/.test(associated)) {
+    bullets.push(`・付随症状: ${associated}`);
+  }
+
+  // 6) きっかけ（医学的に意味がある場合のみ）
+  if (filled.cause_category) {
+    const cause = val("cause_category", state?.causeDetailText || answers.cause_category);
+    if (cause && !/(思い当たらない|分からない|わからない|不明)/.test(cause)) {
+      bullets.push(`・きっかけ: ${cause}`);
+    }
+  }
   const uniq = [];
   for (const line of bullets) {
     if (!line || uniq.includes(line)) continue;
     uniq.push(line);
   }
-  return uniq.length > 0 ? uniq : ["・今の症状について相談されている"];
+  const limited = uniq.slice(0, 4);
+  return limited.length > 0 ? limited : ["・危険兆候は今のところはっきりしない"];
 }
 
 function buildStateAboutLine(state, level) {
@@ -3668,7 +3872,7 @@ function buildLocalSummaryFallback(level, history, state) {
     const hospitalBlock = buildHospitalBlock(state, historyText, hospitalRec);
     return sanitizeSummaryBullets([
       "📝 いまの状態を整理します（メモ）",
-      facts.join("\n") || "・現在の症状について相談されています",
+      buildStateFactsBullets(state).join("\n"),
       "⚠️ Kairoが気になっているポイント",
       buildHospitalConcernPoint(historyText),
       "🏥 Kairoの判断",
@@ -3798,6 +4002,69 @@ function mapFreeTextToOptionIndex(answer, options, type) {
   if (!answer || !Array.isArray(options) || options.length === 0) return null;
   const text = (answer || "").trim();
   if (!text) return null;
+  const normalizedText = normalizeAnswerText(text);
+
+  const indexOf = (needle) =>
+    options.findIndex((opt) => normalizeAnswerText(opt).includes(normalizeAnswerText(needle)));
+
+  // カテゴリ差し替え3択（slot4/5/6）の意味マッピング
+  if (options.length === 3) {
+    // SKIN: 見た目
+    if (indexOf("水ぶくれ・ただれ・できもの") >= 0) {
+      if (/水ぶくれ|ただれ|できもの/.test(text)) return 2;
+      if (/赤み|乾燥/.test(text)) return 0;
+      if (/変わらない|ほとんど変わらない/.test(text)) return 1;
+    }
+    // SKIN: きっかけ
+    if (indexOf("紫外線や乾燥が強かった") >= 0) {
+      if (/思い当たらない|特にない|わからない|不明/.test(text)) return 0;
+      if (/紫外線|乾燥|日差し/.test(text)) return 1;
+      if (/新しい|製品|刺激物|化粧|洗剤|石けん|石鹸/.test(text)) return 2;
+    }
+    // SKIN: 状況
+    if (indexOf("触ると激痛が走る") >= 0) {
+      if (/激痛|触ると激痛/.test(text)) return 2;
+      if (/触ると痛|押すと痛/.test(text)) return 1;
+      if (/触っても痛くない|痛くない/.test(text)) return 0;
+    }
+    // INFECTION: 体温
+    if (indexOf("38度以上") >= 0) {
+      if (/(38|39|40)(\.|,)?\d*|高熱/.test(text)) return 2;
+      if (/37/.test(text)) return 1;
+      if (/平熱|36/.test(text)) return 0;
+    }
+    // INFECTION: 主症状
+    if (indexOf("咳が強い／胸が苦しい") >= 0) {
+      if (/咳.*強|胸が苦しい|息苦/.test(text)) return 2;
+      if (/だるい|倦怠|全身/.test(text)) return 1;
+      if (/喉|のど|鼻水|鼻づまり/.test(text)) return 0;
+    }
+    // INFECTION: きっかけ
+    if (indexOf("周りが咳をしていた") >= 0) {
+      if (/思い当たらない|特にない|不明|わからない/.test(text)) return 0;
+      if (/周り|咳をしていた|感染/.test(text)) return 1;
+      if (/ストレス|疲労|寝不足|過労/.test(text)) return 2;
+    }
+    // GI: 部位
+    if (indexOf("みぞおち付近") >= 0) {
+      if (/みぞおち|上腹部/.test(text)) return 2;
+      if (/全体|お腹全体|全体的/.test(text)) return 1;
+      if (/わからない|不明/.test(text)) return 0;
+    }
+    // GI: 便・吐き気
+    if (indexOf("吐き気・嘔吐がある") >= 0) {
+      if (/吐き気|嘔吐/.test(text)) return 2;
+      if (/下痢|軟便/.test(text)) return 1;
+      if (/変化ない|特にない|なし/.test(text)) return 0;
+    }
+    // GI: 発症
+    if (indexOf("突然強くなった") >= 0) {
+      if (/突然|急に|いきなり|急激/.test(text)) return 2;
+      if (/食後|食べた後/.test(text)) return 1;
+      if (/徐々に|じわじわ|少しずつ/.test(text)) return 0;
+    }
+  }
+
   const severe = /強い|激しい|ひどい|高熱|息苦|意識|吐き|ぐったり|動けない|我慢でき|失神/;
   const mild = /少し|軽い|ちょっと|わずか|違和感|気になる/;
   const none = /ない|特にない|なし|思い当たらない/;
@@ -4055,7 +4322,7 @@ function getOrInitConversationState(conversationId) {
 // Chat API endpoint
 app.post("/api/chat", async (req, res) => {
   try {
-  const { message, conversationId: rawConversationId, location, clientMeta, streamMode } = req.body;
+  const { message, conversationId: rawConversationId, location, clientMeta } = req.body;
   const conversationId =
     rawConversationId || `conv_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
   let followUpQuestion = null;
@@ -4194,7 +4461,7 @@ app.post("/api/chat", async (req, res) => {
           conversationState[conversationId],
           type,
           "question_response",
-          rawScore !== null ? String(rawScore) : message
+          message
         );
         conversationState[conversationId].confidence = computeConfidenceFromSlots(
           conversationState[conversationId].slotFilled
@@ -4417,17 +4684,8 @@ app.post("/api/chat", async (req, res) => {
           .filter((msg) => msg.role === "user")
           .map((msg) => msg.content)
           .join("\n");
-        const category = detectSymptomCategory(historyText);
-        if (nextSlot === "associated_symptoms") {
-          const options = buildAssociatedSymptomsOptions(category);
-          fixed.options = options;
-          fixed.question = `${useFinalPrefix ? "最後に、" : ""}${FIXED_QUESTIONS.associated_symptoms.q}\n・${options.join("\n・")}`;
-        }
-        if (nextSlot === "worsening") {
-          const options = buildPainQualityOptions(category);
-          fixed.options = options;
-          fixed.question = `${useFinalPrefix ? "最後に、" : ""}${FIXED_QUESTIONS.worsening.q}\n・${options.join("\n・")}`;
-        }
+        const category = detectQuestionCategory4(historyText);
+        applyCategoryQuestionOverride(fixed, nextSlot, category, useFinalPrefix);
         const introTemplateIds = buildIntroTemplateIds(
           conversationState[conversationId],
           conversationState[conversationId].questionCount,
@@ -4471,19 +4729,16 @@ app.post("/api/chat", async (req, res) => {
       }
     }
     const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n判断スロット埋まり数: ${slotsFilledCount}/6\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n緊急度判定は「危険フラグ優先モデル」を使用する（Phase1: 即時RED条件 / Phase2: 重症指数）。\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が7以上、または判断スロットが6つ埋まった時点で必ず判定・まとめへ移行する。\n※内部計算はユーザーに表示しないこと。最終判断はまとめ直前の1回のみ実行すること。`;
-    let aiResponse = "";
-    if (!(streamMode === true && shouldJudgeNow)) {
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini", // Cost-effective model
-        messages: [
-          ...conversationHistory[conversationId],
-          { role: "system", content: scoreContext },
-        ],
-        temperature: 0.7,
-        max_tokens: 1000,
-      });
-      aiResponse = completion.choices[0].message.content;
-    }
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini", // Cost-effective model
+      messages: [
+        ...conversationHistory[conversationId],
+        { role: "system", content: scoreContext },
+      ],
+      temperature: 0.7,
+      max_tokens: 1000,
+    });
+    let aiResponse = completion.choices[0].message.content;
 
     // 判定確定トリガー発動時は、まとめを強制生成（初回のみ）
     if (shouldJudgeNow && !conversationState[conversationId].summaryShown) {
@@ -4557,51 +4812,43 @@ app.post("/api/chat", async (req, res) => {
         ? `\n薬局名は「${pharmacyRec.name}」を優先してください。\n薬名は例示で2〜3件、一般名＋商品名で示し、末尾に「最終判断は薬剤師に相談してください。これは一般的に現地で使われる選択肢です。」を入れてください。\n`
         : "\n薬局名は国・都市レベルで具体名を1件提示し、薬名は例示で2〜3件、一般名＋商品名で示してください。\n末尾に「最終判断は薬剤師に相談してください。これは一般的に現地で使われる選択肢です。」を入れてください。\n";
       locationRePromptBeforeSummary = null;
-      if (streamMode === true) {
-        aiResponse = buildLocalSummaryFallback(
-          level,
-          conversationHistory[conversationId],
-          conversationState[conversationId]
-        );
-      } else {
-        const summaryOnlyMessages = [
-          { role: "system", content: buildRepairPrompt(level) },
-          { role: "system", content: clinicHint },
-          { role: "system", content: pharmacyHint },
+      const summaryOnlyMessages = [
+        { role: "system", content: buildRepairPrompt(level) },
+        { role: "system", content: clinicHint },
+        { role: "system", content: pharmacyHint },
+        ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
+      ];
+      const forced = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: summaryOnlyMessages,
+        temperature: 0.7,
+        max_tokens: 1000,
+      });
+      aiResponse = forced.choices[0].message.content;
+      if (!hasAllSummaryBlocks(aiResponse)) {
+        const strictMessages = [
+          { role: "system", content: buildRepairPrompt(level) + "\n\n不足ブロックがある場合は必ず補完して、全ブロックを完成させてください。" },
           ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
         ];
-        const forced = await openai.chat.completions.create({
+        const strict = await openai.chat.completions.create({
           model: "gpt-4o-mini",
-          messages: summaryOnlyMessages,
+          messages: strictMessages,
           temperature: 0.7,
           max_tokens: 1000,
         });
-        aiResponse = forced.choices[0].message.content;
-        if (!hasAllSummaryBlocks(aiResponse)) {
-          const strictMessages = [
-            { role: "system", content: buildRepairPrompt(level) + "\n\n不足ブロックがある場合は必ず補完して、全ブロックを完成させてください。" },
+        aiResponse = strict.choices[0].message.content;
+      }
+      if (level !== "🔴" && isHospitalFlow(aiResponse)) {
+        const repairForLevel = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: [
+            { role: "system", content: buildRepairPrompt(level) },
             ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
-          ];
-          const strict = await openai.chat.completions.create({
-            model: "gpt-4o-mini",
-            messages: strictMessages,
-            temperature: 0.7,
-            max_tokens: 1000,
-          });
-          aiResponse = strict.choices[0].message.content;
-        }
-        if (level !== "🔴" && isHospitalFlow(aiResponse)) {
-          const repairForLevel = await openai.chat.completions.create({
-            model: "gpt-4o-mini",
-            messages: [
-              { role: "system", content: buildRepairPrompt(level) },
-              ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
-            ],
-            temperature: 0.7,
-            max_tokens: 1000,
-          });
-          aiResponse = repairForLevel.choices[0].message.content;
-        }
+          ],
+          temperature: 0.7,
+          max_tokens: 1000,
+        });
+        aiResponse = repairForLevel.choices[0].message.content;
       }
       aiResponse = normalizeSummaryLevel(aiResponse, level);
       aiResponse = ensureYellowOtcBlock(
@@ -4628,6 +4875,7 @@ app.post("/api/chat", async (req, res) => {
       }
       aiResponse = ensureOutlookBlock(aiResponse, conversationState[conversationId]);
       if (level === "🔴") {
+        aiResponse = ensureHospitalMemoBlock(aiResponse, conversationState[conversationId]);
         aiResponse = ensureHospitalConcernBlock(aiResponse, historyTextForOtc);
         aiResponse = ensureHospitalBlock(
           aiResponse,
@@ -4789,17 +5037,8 @@ app.post("/api/chat", async (req, res) => {
           .filter((msg) => msg.role === "user")
           .map((msg) => msg.content)
           .join("\n");
-        const category = detectSymptomCategory(historyText);
-        if (nextSlot === "associated_symptoms") {
-          const options = buildAssociatedSymptomsOptions(category);
-          fixed.options = options;
-          fixed.question = `${useFinalPrefix ? "最後に、" : ""}${FIXED_QUESTIONS.associated_symptoms.q}\n・${options.join("\n・")}`;
-        }
-        if (nextSlot === "worsening") {
-          const options = buildPainQualityOptions(category);
-          fixed.options = options;
-          fixed.question = `${useFinalPrefix ? "最後に、" : ""}${FIXED_QUESTIONS.worsening.q}\n・${options.join("\n・")}`;
-        }
+        const category = detectQuestionCategory4(historyText);
+        applyCategoryQuestionOverride(fixed, nextSlot, category, useFinalPrefix);
         const introTemplateIds = buildIntroTemplateIds(
           conversationState[conversationId],
           conversationState[conversationId].questionCount,
@@ -4965,18 +5204,25 @@ app.post("/api/chat", async (req, res) => {
       questionPayload,
       normalizedAnswer,
     });
-    const summaryStreamPlan =
-      streamMode === true && shouldJudgeNow
-        ? {
-            judgement: finalRisk,
-            seedText: aiResponse,
-            blocks: getSummaryBlockPlanByJudgement(finalRisk),
-          }
-        : null;
+    const triage = {
+      judgement: finalRisk,
+      confidence,
+      ratio: conversationState[conversationId].decisionRatio ?? Number(ratio.toFixed(2)),
+      shouldJudge: shouldJudgeNow,
+    };
+    const sections =
+      shouldJudgeNow
+        ? extractSectionsBySpecs(
+            aiResponse,
+            getSummarySectionSpecsByJudgement(finalRisk)
+          ).map((entry) => entry.text)
+        : [];
     res.json({
       message: aiResponse,
       response: aiResponse,
       judgeMeta,
+      triage,
+      sections,
       questionPayload,
       normalizedAnswer,
       followUpQuestion,
@@ -4984,7 +5230,6 @@ app.post("/api/chat", async (req, res) => {
       locationPromptMessage,
       locationRePromptMessage: locationRePromptBeforeSummary,
       locationSnapshot: conversationState[conversationId].locationSnapshot,
-      summaryStreamPlan,
       conversationId,
     });
   } catch (error) {
@@ -5018,106 +5263,6 @@ app.post("/api/chat", async (req, res) => {
     });
   }
 });
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function splitSummarySections(text) {
-  if (!text || typeof text !== "string") return [];
-  const lines = text.split("\n");
-  const sections = [];
-  let current = [];
-  const isHeader = (line) =>
-    /^🟢|^🟡|^🔴|^📝|^⚠️|^🤝|^✅|^💊|^⏳|^🏥|^🌱|^💬/.test((line || "").trim());
-  for (const line of lines) {
-    if (isHeader(line) && current.length > 0) {
-      sections.push(current.join("\n").trim());
-      current = [line];
-    } else {
-      current.push(line);
-    }
-  }
-  if (current.length > 0) {
-    sections.push(current.join("\n").trim());
-  }
-  return sections.filter(Boolean);
-}
-
-function writeSseEvent(res, eventName, payload) {
-  res.write(`event: ${eventName}\n`);
-  res.write(`data: ${JSON.stringify(payload)}\n\n`);
-}
-
-function postJsonInternal(baseUrl, routePath, payload) {
-  return new Promise((resolve, reject) => {
-    try {
-      const target = new URL(routePath, baseUrl);
-      const body = JSON.stringify(payload || {});
-      const isHttps = target.protocol === "https:";
-      const client = isHttps ? https : http;
-      const req = client.request(
-        {
-          protocol: target.protocol,
-          hostname: target.hostname,
-          port: target.port || (isHttps ? 443 : 80),
-          path: `${target.pathname}${target.search || ""}`,
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Content-Length": Buffer.byteLength(body),
-          },
-        },
-        (res) => {
-          let data = "";
-          res.on("data", (chunk) => {
-            data += chunk;
-          });
-          res.on("end", () => {
-            try {
-              resolve(JSON.parse(data || "{}"));
-            } catch (parseError) {
-              reject(parseError);
-            }
-          });
-        }
-      );
-      req.on("error", reject);
-      req.write(body);
-      req.end();
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
-function getSummaryBlockPlanByJudgement(judgement) {
-  if (judgement === "🔴") {
-    return [
-      { id: 1, title: "📝 いまの状態を整理します（メモ）" },
-      { id: 2, title: "⚠️ Kairoが気になっているポイント" },
-      { id: 3, title: "🏥 Kairoの判断" },
-      { id: 4, title: "💬 最後に" },
-    ];
-  }
-  if (judgement === "🟡") {
-    return [
-      { id: 1, title: "🟢 ここまでの情報を整理します" },
-      { id: 2, title: "🤝 今の状態について" },
-      { id: 3, title: "✅ 今すぐやること（これだけでOK）" },
-      { id: 4, title: "💊 一般的な市販薬" },
-      { id: 5, title: "⏳ 今後の見通し" },
-      { id: 6, title: "🌱 最後に" },
-    ];
-  }
-  return [
-    { id: 1, title: "🟢 ここまでの情報を整理します" },
-    { id: 2, title: "🤝 今の状態について" },
-    { id: 3, title: "✅ 今すぐやること（これだけでOK）" },
-    { id: 4, title: "⏳ 今後の見通し" },
-    { id: 5, title: "🌱 最後に" },
-  ];
-}
 
 function getSummarySectionSpecsByJudgement(judgement) {
   if (judgement === "🔴") {
@@ -5175,133 +5320,6 @@ function extractSectionsBySpecs(text, specs) {
     }))
     .filter((section) => section.text.length > 0);
 }
-
-app.get("/api/chat/stream", async (req, res) => {
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders();
-  try {
-    const message = String(req.query.message || "");
-    const conversationId = String(req.query.conversationId || "");
-    const location = req.query.location ? JSON.parse(String(req.query.location)) : null;
-    const clientMeta = req.query.clientMeta ? JSON.parse(String(req.query.clientMeta)) : null;
-    const convId = conversationId || `conv_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-    const state = getOrInitConversationState(convId);
-    if (message) {
-      applySpontaneousSlotFill(state, message);
-    }
-    const triage = judgeDecision(state);
-    writeSseEvent(res, "triage", {
-      judgement: triage.level || "🟡",
-      confidence: triage.confidence ?? 0,
-      ratio: Number.isFinite(triage.ratio) ? Number(triage.ratio.toFixed(2)) : 0,
-      shouldJudge: triage.shouldJudge === true,
-    });
-
-    const baseUrl = `${req.protocol}://${req.get("host")}`;
-    const payload = await postJsonInternal(baseUrl, "/api/chat", {
-      message,
-      conversationId: convId,
-      location,
-      clientMeta,
-      streamMode: true,
-    });
-    const fullText = payload?.message || payload?.response || "";
-    const shouldJudge = payload?.judgeMeta?.shouldJudge === true;
-    writeSseEvent(res, "triage", {
-      judgement: payload?.judgeMeta?.judgement || triage.level || "🟡",
-      confidence: payload?.judgeMeta?.confidence ?? triage.confidence ?? 0,
-      ratio:
-        Number.isFinite(payload?.judgeMeta?.ratio)
-          ? Number(Number(payload.judgeMeta.ratio).toFixed(2))
-          : Number.isFinite(triage.ratio)
-            ? Number(triage.ratio.toFixed(2))
-            : 0,
-      shouldJudge,
-    });
-    if (shouldJudge) {
-      const plan =
-        payload?.summaryStreamPlan?.blocks ||
-        getSummaryBlockPlanByJudgement(payload?.judgeMeta?.judgement || triage.level || "🟢");
-      const seedText = payload?.summaryStreamPlan?.seedText || fullText;
-      const generateSection = async (sectionId, prompt) => {
-        const completion = await openai.chat.completions.create({
-          model: "gpt-4o-mini",
-          messages: [{ role: "user", content: prompt }],
-          stream: true,
-          temperature: 0.25,
-          max_tokens: 360,
-        });
-        let text = "";
-        for await (const chunk of completion) {
-          const token = chunk.choices?.[0]?.delta?.content;
-          if (token) {
-            text += token;
-            writeSseEvent(res, "section", { id: sectionId, text });
-          }
-        }
-      };
-      let streamSucceeded = false;
-      try {
-        for (const block of plan) {
-          const prompt = [
-            "あなたはKairoです。次の元テキストを元に、指定された1ブロックのみを出力してください。",
-            "他ブロックは一切出力しないこと。",
-            `見出しは必ず「${block.title}」から開始すること。`,
-            "KAIRO_SPEC.mdに沿った語調・構造を維持すること。",
-            "",
-            "【元テキスト】",
-            seedText,
-          ].join("\n");
-          await generateSection(block.id, prompt);
-        }
-        streamSucceeded = true;
-      } catch (sectionError) {
-        console.error("section generation failed:", sectionError);
-      }
-      if (!streamSucceeded) {
-        const specs = getSummarySectionSpecsByJudgement(
-          payload?.judgeMeta?.judgement || triage.level || "🟢"
-        );
-        const sectionsBySpec = extractSectionsBySpecs(seedText, specs);
-        if (sectionsBySpec.length > 0) {
-          for (const section of sectionsBySpec) {
-            let text = "";
-            for (const ch of section.text) {
-              text += ch;
-              writeSseEvent(res, "section", { id: section.id, text });
-              await sleep(4);
-            }
-          }
-        } else {
-          for (const ch of seedText) {
-            writeSseEvent(res, "message_chunk", ch);
-            await sleep(6);
-          }
-        }
-      }
-    } else {
-      for (const ch of fullText) {
-        writeSseEvent(res, "message_chunk", ch);
-        await sleep(5);
-      }
-    }
-    writeSseEvent(res, "final", payload);
-    writeSseEvent(res, "done", { ok: true });
-    res.end();
-  } catch (error) {
-    console.error("stream error:", error);
-    writeSseEvent(res, "message_chunk", "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。");
-    writeSseEvent(res, "final", {
-      message: "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。",
-      response: "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。",
-      judgeMeta: { judgement: "🟡", shouldJudge: false, confidence: 0, ratio: 0 },
-    });
-    writeSseEvent(res, "done", { ok: true });
-    res.end();
-  }
-});
 
 // Clear conversation history
 app.post("/api/clear", (req, res) => {

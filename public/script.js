@@ -15,9 +15,8 @@ const appState = {
   userHasSubmitted: false,
   painScore: null,
   slots: {},
+  sectionTimers: [],
 };
-
-let currentRequestId = 0;
 
 const INTRO_TEMPLATE_TEXTS = {
   TEMPLATE_EMPATHY_1: "それはつらいですよね。体の不調があると、どうしても気になりますよね。",
@@ -872,54 +871,18 @@ async function callOpenAI(message) {
   };
 }
 
-function buildStreamUrl(message) {
-  const conversationId = getConversationId();
-  const params = new URLSearchParams();
-  params.set("message", message);
-  params.set("conversationId", conversationId);
-  params.set("location", JSON.stringify(getLocationPayload() || null));
-  params.set(
-    "clientMeta",
-    JSON.stringify({
-      lang: navigator.language || "",
-      tz: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
-      locationPromptShown: sessionStorage.getItem(LOCATION_PROMPT_KEY) === "true",
-      locationSnapshot: getLocationSnapshot(),
-    })
-  );
-  return `/api/chat/stream?${params.toString()}`;
+function clearSectionTimers() {
+  (appState.sectionTimers || []).forEach((timerId) => clearTimeout(timerId));
+  appState.sectionTimers = [];
 }
 
-function createStreamingMessageNode() {
-  const messagesContainer = document.getElementById("chatMessages");
-  const messageDiv = document.createElement("div");
-  messageDiv.className = "message ai";
-  messageDiv.textContent = "";
-  messagesContainer.appendChild(messageDiv);
-  return messageDiv;
-}
-
-function renderOrUpdateSection(sectionId, text, requestId) {
-  const messagesContainer = document.getElementById("chatMessages");
-  const selector = `.message.ai[data-stream-request="${requestId}"][data-section-id="${sectionId}"]`;
-  let node = messagesContainer.querySelector(selector);
-  if (!node) {
-    node = document.createElement("div");
-    node.className = "message ai";
-    node.dataset.streamRequest = String(requestId);
-    node.dataset.sectionId = String(sectionId);
-    messagesContainer.appendChild(node);
-  }
-  node.textContent = text || "";
+function renderSection(sectionText) {
+  if (!sectionText) return;
+  addMessage(sectionText);
 }
 
 // Handle user input
 async function handleUserInput() {
-  const requestId =
-    (window.crypto && crypto.randomUUID)
-      ? crypto.randomUUID()
-      : Date.now().toString();
-  currentRequestId = requestId;
   const input = document.getElementById("userInput");
   const sendButton = document.getElementById("sendButton");
   const userText = input.value.trim();
@@ -934,14 +897,11 @@ async function handleUserInput() {
   // Show user message
   addMessage(userText, true);
   input.value = "";
+  clearSectionTimers();
 
     try {
       // 質問フェーズは従来どおり通常APIで即時応答
       const data = await callOpenAI(userText);
-      if (requestId !== currentRequestId) {
-        console.warn("Old response ignored");
-        return;
-      }
       console.log("[DEBUG] full aiResponse", data);
       const aiResponse = data;
       if (aiResponse.conversationId) {
@@ -960,12 +920,35 @@ async function handleUserInput() {
         hideSummaryCard();
       }
 
-      addMessage(aiMessage);
-      if (aiResponse.followUpMessage) {
-        addMessage(aiResponse.followUpMessage);
-      }
-      if (aiResponse.followUpQuestion) {
-        addMessage(aiResponse.followUpQuestion);
+      const sections = Array.isArray(aiResponse.sections) ? aiResponse.sections.filter(Boolean) : [];
+      const shouldShowSections =
+        aiResponse.judgeMeta && aiResponse.judgeMeta.shouldJudge === true && sections.length > 0;
+      if (shouldShowSections) {
+        const firstDelay = 600;
+        const interval = 800;
+        sections.forEach((sectionText, idx) => {
+          const timerId = setTimeout(() => {
+            renderSection(sectionText);
+          }, firstDelay + idx * interval);
+          appState.sectionTimers.push(timerId);
+        });
+        const tailDelay = firstDelay + sections.length * interval;
+        if (aiResponse.followUpMessage) {
+          const timerId = setTimeout(() => addMessage(aiResponse.followUpMessage), tailDelay);
+          appState.sectionTimers.push(timerId);
+        }
+        if (aiResponse.followUpQuestion) {
+          const timerId = setTimeout(() => addMessage(aiResponse.followUpQuestion), tailDelay + 300);
+          appState.sectionTimers.push(timerId);
+        }
+      } else {
+        addMessage(aiMessage);
+        if (aiResponse.followUpMessage) {
+          addMessage(aiResponse.followUpMessage);
+        }
+        if (aiResponse.followUpQuestion) {
+          addMessage(aiResponse.followUpQuestion);
+        }
       }
     } catch (error) {
         // Show fallback message and keep conversation moving
@@ -990,6 +973,7 @@ async function handleUserInput() {
 // Initialize
 function init() {
   // Start fresh without re-rendering history
+  clearSectionTimers();
   appState.riskLevel = null;
   appState.userHasSubmitted = false;
   hideSummaryCard();
