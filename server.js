@@ -879,20 +879,6 @@ function buildRepairPrompt(requiredLevel) {
 - ❗見出しは必ず以下を全て含める（順番厳守）：
   - 🟢 ここまでの情報を整理します / 🤝 今の状態について / ✅ 今すぐやること（これだけでOK） / ⏳ 今後の見通し / 🌱 最後に
   - または 📝 いまの状態を整理します（メモ） / ⚠️ Kairoが気になっているポイント / 🏥 Kairoの判断 / 💬 最後に
-- 🟡の場合は「⏳ 今後の見通し」と「🌱 最後に」の間に
-  💊 一般的な市販薬 のブロックを必ず追加する（順番厳守）
-- 💊ブロックは診断・病名の断定禁止
-- 商品名は「例示」として2〜3件提示（断定禁止）
-- 一般名＋商品名で示す
-- 薬局名は具体名を1件提示する
-- 「一般的に」は免責目的として末尾にのみ使用する
-- ✅今すぐやることと内容が被らないようにする
-- 💊ブロックは診断・病名の断定禁止
-- 商品名は「例示」として2〜3件提示（断定禁止）
-- 一般名＋商品名で示す
-- 薬局名は具体名を1件提示する
-- 「一般的に」は免責目的として末尾にのみ使用する
-- ✅今すぐやることと内容が被らないようにする
 - 📝 いまの状態を整理します（メモ）は事実のみ・具体的に書く
   - 「ない」「不明」「特になし」だけの記述は禁止
   - 症状・経過・生活影響など具体語を含める
@@ -902,7 +888,6 @@ function buildRepairPrompt(requiredLevel) {
 - 🔴の場合、🏥 Kairoの判断で受診先のカテゴリを具体的に示す
   - 例：歯の痛み→歯医者／耳の痛み→耳鼻科／腹痛・頭痛→病院
 - 🏥 Kairoの判断は「近くで行きやすい場所を案内します」を入れ、候補は最大3件・1件目はおすすめ、地図リンクを付ける
-- 💊ブロックも候補は最大3件・1件目はおすすめ、地図リンクを付ける
 - 🤝 今の状態については一般論の説明を禁止し、感覚の翻訳にする
   - 「今のあなたの状態なら、こう考えて大丈夫です」
   - 「だから今日はこれでいいですよ」
@@ -965,7 +950,7 @@ function hasAnySummaryBlocks(text) {
 function hasAllSummaryBlocks(text) {
   const hospitalHeaders = ["📝 いまの状態を整理します", "⚠️ Kairoが気になっているポイント", "🏥 Kairoの判断", "💬 最後に"];
   const normalHeaders = ["🟢 ここまでの情報を整理します", "🤝 今の状態について", "✅ 今すぐやること", "⏳ 今後の見通し", "🌱 最後に"];
-  const yellowHeaders = ["🟡 ここまでの情報を整理します", "🤝 今の状態について", "✅ 今すぐやること", "⏳ 今後の見通し", "💊 一般的な市販薬", "🌱 最後に"];
+  const yellowHeaders = ["🟡 ここまでの情報を整理します", "🤝 今の状態について", "✅ 今すぐやること", "⏳ 今後の見通し", "🌱 最後に"];
   const required = isHospitalFlow(text)
     ? hospitalHeaders
     : text.includes("🟡")
@@ -988,7 +973,6 @@ function getRequiredSummaryHeadersByLevel(level) {
       "🟢 ここまでの情報を整理します",
       "🤝 今の状態について",
       "✅ 今すぐやること（これだけでOK）",
-      "💊 一般的な市販薬",
       "⏳ 今後の見通し",
       "🌱 最後に",
     ];
@@ -1103,7 +1087,7 @@ function normalizeSummaryLevel(text, requiredLevel) {
     .replace("🟢 ここまでの情報を整理します", `${headingLevel} ここまでの情報を整理します`)
     .replace("🟡 ここまでの情報を整理します", `${headingLevel} ここまでの情報を整理します`);
 
-  if ((requiredLevel === "🟢" || requiredLevel === "🔴") && updated.includes("💊 一般的な市販薬")) {
+  if (updated.includes("💊 一般的な市販薬")) {
     const lines = updated.split("\n");
     const start = lines.findIndex((line) => line.includes("💊 一般的な市販薬"));
     if (start >= 0) {
@@ -1871,51 +1855,11 @@ function ensureYellowOtcBlock(
   otcExamples,
   locationPreface
 ) {
-  if (!text || requiredLevel !== "🟡") return text;
-  const otcBlock = buildYellowOtcBlock(
-    category,
-    warningIndex,
-    pharmacyRec,
-    otcExamples,
-    locationPreface
-  );
-  const replaced = replaceSummaryBlock(text, "💊 一般的な市販薬", otcBlock);
-  if (replaced !== text) return replaced;
-  const lines = text.split("\n");
-  // 仕様：✅ 今すぐやること と ⏳ 今後の見通し の「間」に必ず入れる
-  const outlookIndex = lines.findIndex((line) => line.startsWith("⏳ 今後の見通し"));
-  if (outlookIndex >= 0) {
-    return [
-      ...lines.slice(0, outlookIndex),
-      otcBlock,
-      ...lines.slice(outlookIndex),
-    ].join("\n");
-  }
-  return `${text}\n${otcBlock}`;
+  return text;
 }
 
 function enforceYellowOtcPositionStrict(text, requiredLevel) {
-  if (!text || requiredLevel !== "🟡") return text;
-  const lines = text.split("\n");
-  const headerRegex = /^(🟢|🟡|🤝|✅|⏳|💊|🌱|📝|⚠️|🏥|💬)\s/;
-  const otcStart = lines.findIndex((line) => line.startsWith("💊 一般的な市販薬"));
-  const outlookStart = lines.findIndex((line) => line.startsWith("⏳ 今後の見通し"));
-  if (otcStart === -1 || outlookStart === -1) return text;
-
-  const otcEnd = lines.findIndex((line, idx) => idx > otcStart && headerRegex.test(line));
-  const sliceEnd = otcEnd === -1 ? lines.length : otcEnd;
-  const otcLines = lines.slice(otcStart, sliceEnd);
-  if (otcLines.length === 0) return text;
-
-  const withoutOtc = [...lines.slice(0, otcStart), ...lines.slice(sliceEnd)];
-  const newOutlookStart = withoutOtc.findIndex((line) => line.startsWith("⏳ 今後の見通し"));
-  if (newOutlookStart === -1) return `${withoutOtc.join("\n")}\n${otcLines.join("\n")}`;
-  const reordered = [
-    ...withoutOtc.slice(0, newOutlookStart),
-    ...otcLines,
-    ...withoutOtc.slice(newOutlookStart),
-  ];
-  return reordered.join("\n");
+  return text;
 }
 
 function enforceBulletSymbol(text) {
@@ -3885,19 +3829,73 @@ function extractBulletLinesFromText(text) {
     .slice(0, 4);
 }
 
-function buildStatePatternSearchQuery(mainSymptom, facts, associated) {
-  const parts = [];
-  if (mainSymptom) parts.push(mainSymptom);
-  for (const fact of (facts || []).slice(0, 2)) {
-    const clean = toBulletText(fact).replace(/^(痛みは|日常生活への影響:|経過時間:|付随症状:|きっかけ:)\s*/, "");
-    if (clean) parts.push(clean);
+function normalizeCauseCandidate(text) {
+  const raw = String(text || "")
+    .replace(/^きっかけ[:：]\s*/, "")
+    .trim();
+  if (!raw) return null;
+  if (/(特に思い当たらない|思い当たらない|はっきりとは分からない|分からない|わからない|不明)/.test(raw)) {
+    return null;
   }
+  if (/^何か思い当たるかも$/.test(raw)) return null;
+  return raw;
+}
+
+function pickCauseTextForConcreteMode(state, facts = []) {
+  const fromDetail = normalizeCauseCandidate(state?.causeDetailText || "");
+  if (fromDetail) return fromDetail;
+  const fromSlot = normalizeCauseCandidate(
+    getSlotStatusValue(state, "cause_category", state?.slotAnswers?.cause_category || "")
+  );
+  if (fromSlot) return fromSlot;
+  const fromFacts = (facts || [])
+    .map((fact) => String(fact || ""))
+    .find((fact) => /きっかけ|原因|あとに/.test(fact));
+  return normalizeCauseCandidate(fromFacts || "");
+}
+
+function buildStatePatternSearchQuery(mainSymptom, features) {
+  const {
+    causeText = "",
+    symptomFeature = "",
+    strengthText = "",
+    durationText = "",
+    associated = "",
+  } = features || {};
+  const parts = [];
+  // 優先順位: 1)きっかけ 2)症状特徴 3)強さ 4)経過時間 5)随伴症状
+  if (causeText) parts.push(causeText);
+  if (mainSymptom) parts.push(mainSymptom);
+  if (symptomFeature) parts.push(symptomFeature);
+  if (strengthText) parts.push(strengthText);
+  if (durationText) parts.push(durationText);
   const assoc = String(associated || "");
   if (assoc && !/(特にない|なし|これ以外は特にない)/.test(assoc)) {
     parts.push(assoc);
   }
   parts.push("よくある", "原因");
   return parts.filter(Boolean).join(" ");
+}
+
+function buildCauseDrivenPattern(causeText, mainSymptom, symptomFeature, strengthText, durationText, associated) {
+  const symptom = mainSymptom || "不調";
+  const quality = symptomFeature || "症状の出方";
+  const strength = strengthText || "体感の強さ";
+  const duration = durationText || "経過";
+  const assoc =
+    associated && !/(特にない|なし|これ以外は特にない)/.test(associated)
+      ? associated
+      : "強い付随症状が目立たない";
+  return {
+    title: `${causeText}が関係する状態変化のパターン`,
+    // きっかけがある場合は必ず1パターンのみ、最低4文で記載
+    body: [
+      `このような症状では、${causeText}というきっかけがある場合に${symptom}が出ることがあります。`,
+      `このような症状では、${quality}のように症状の質が一定でないまま推移することがあります。`,
+      `このような症状では、${strength}や${duration}を一緒に見ると変化の方向を整理しやすくなります。`,
+      `このような症状では、${assoc}という情報も、今後の見極めに役立つ材料になります。`,
+    ].join("\n"),
+  };
 }
 
 function getPatternTemplatesByCategory(category) {
@@ -4027,9 +4025,23 @@ function buildConcreteStatePatternMessage(state, summaryFacts = [], summarySecti
   const extraFacts = extractBulletLinesFromText(summarySection);
   const facts = Array.from(new Set([...stateFacts, ...extraFacts])).filter(Boolean).slice(0, 4);
   const associated = getSlotStatusValue(state, "associated", state?.slotAnswers?.associated_symptoms || "");
-  const query = buildStatePatternSearchQuery(mainSymptom, facts, associated);
+  const causeText = pickCauseTextForConcreteMode(state, facts);
+  const symptomFeature = getSlotStatusValue(state, "worsening", state?.slotAnswers?.worsening || "");
+  const strengthText = Number.isFinite(state?.lastPainScore)
+    ? `痛みは${state.lastPainScore}/10程度`
+    : getSlotStatusValue(state, "severity", state?.slotAnswers?.pain_score || "");
+  const durationText = getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "");
+  const query = buildStatePatternSearchQuery(mainSymptom, {
+    causeText,
+    symptomFeature,
+    strengthText,
+    durationText,
+    associated,
+  });
   const category = detectQuestionCategory4([mainSymptom, ...facts].join(" "));
-  const templates = getPatternTemplatesByCategory(category).slice(0, 2);
+  const templates = causeText
+    ? [buildCauseDrivenPattern(causeText, mainSymptom, symptomFeature, strengthText, durationText, associated)]
+    : getPatternTemplatesByCategory(category).slice(0, 2);
   const reassurance = buildReassuranceBulletsForPatterns(state);
   const consultChanges = buildConsultChangeBulletsForPatterns(category);
   const level = state?.decisionLevel || finalizeRiskLevel(state);
@@ -4119,17 +4131,6 @@ function buildLocalSummaryFallback(level, history, state) {
     buildImmediateActionsBlock(level, state, historyText),
     `⏳ 今後の見通し\nこのタイプの症状は、時間の経過で変化することがあります。\n・もし明日の朝も同じ痛みが続いていたら\n・もし痛みが7以上に強くなったら\nそのタイミングで、もう一度Kairoに聞いてください。`,
   ];
-  const pharmacyRec =
-    state?.pharmacyRecommendation ||
-    buildPharmacyRecommendation(state, locationContext, state?.pharmacyCandidates || []);
-  const otcExamples = state?.otcExamples || buildOtcExamples(category, locationContext.country);
-  const otcBlock = buildYellowOtcBlock(
-    category,
-    0,
-    pharmacyRec,
-    otcExamples,
-    pharmacyRec?.preface
-  );
   const closing = `🌱 最後に\nまた不安になったら、いつでもここで聞いてください。`;
 
   if (level === "🟡") {
@@ -4138,7 +4139,6 @@ function buildLocalSummaryFallback(level, history, state) {
         baseBlocks[0],
         baseBlocks[1],
         baseBlocks[2],
-        otcBlock,
         baseBlocks[3],
         closing,
       ].join("\n"),
@@ -5168,21 +5168,6 @@ app.post("/api/chat", async (req, res) => {
         );
       }
       conversationState[conversationId].summaryText = aiResponse;
-      if (level === "🟡") {
-        const pharmacyName = conversationState[conversationId].pharmacyRecommendation?.name;
-        const otcExamples = conversationState[conversationId].otcExamples || [];
-        const hasPharmacy = pharmacyName ? aiResponse.includes(pharmacyName) : false;
-        const hasPharmacyLabel = aiResponse.includes("薬局名：");
-        const hasDrug = otcExamples.some((item) => aiResponse.includes(item.brand));
-        const hasDrugLabel = aiResponse.includes("薬名（例）") || aiResponse.includes("薬名：");
-        if (!hasPharmacy || !hasPharmacyLabel || !hasDrug || !hasDrugLabel) {
-          aiResponse = buildLocalSummaryFallback(
-            level,
-            conversationHistory[conversationId],
-            conversationState[conversationId]
-          );
-        }
-      }
       if (level === "🔴") {
         const hospitalName = conversationState[conversationId].hospitalRecommendation?.name;
         const hasType = aiResponse.includes("タイプ：");
@@ -5598,9 +5583,8 @@ function getSummarySectionSpecsByJudgement(judgement) {
       { id: 1, title: "🟢 ここまでの情報を整理します", patterns: [/^🟢\s*ここまでの情報を整理します/] },
       { id: 2, title: "🤝 今の状態について", patterns: [/^🤝\s*今の状態について/] },
       { id: 3, title: "✅ 今すぐやること（これだけでOK）", patterns: [/^✅\s*今すぐやること（これだけでOK）/, /^✅\s*今すぐやること/] },
-      { id: 4, title: "💊 一般的な市販薬", patterns: [/^💊\s*一般的な市販薬/, /^💊\s*市販薬の候補/] },
-      { id: 5, title: "⏳ 今後の見通し", patterns: [/^⏳\s*今後の見通し/, /^⏳\s*この先の見通し/] },
-      { id: 6, title: "🌱 最後に", patterns: [/^🌱\s*最後に/] },
+      { id: 4, title: "⏳ 今後の見通し", patterns: [/^⏳\s*今後の見通し/, /^⏳\s*この先の見通し/] },
+      { id: 5, title: "🌱 最後に", patterns: [/^🌱\s*最後に/] },
     ];
   }
   return [
