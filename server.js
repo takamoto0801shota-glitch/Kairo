@@ -485,12 +485,12 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 - Phase2（重症指数）：
   - 低=0 / 中=1 / 高=3
   - pain_score ×1.4
-  - daily_impact ×1.4
-  - associated_symptoms ×1.3
+  - daily_impact ×1.0
+  - associated_symptoms ×1.0
   - onset（発症タイミング）×1.0
   - quality（痛みの質）×1.0
   - cause（原因カテゴリ）×0.8
-  - severityIndex = weightedTotal / 20.7
+  - severityIndex = weightedTotal / 18.6
 - 判定基準：
   - 0.65以上 → 🔴
   - 0.4〜0.64 → 🟡
@@ -1028,11 +1028,48 @@ function splitByKnownHeaders(text, headers) {
   return blocks;
 }
 
+const ALL_SUMMARY_HEADERS = [
+  "🟢 ここまでの情報を整理します",
+  "🤝 今の状態について",
+  "✅ 今すぐやること（これだけでOK）",
+  "⏳ 今後の見通し",
+  "🌱 最後に",
+  "📝 いまの状態を整理します（メモ）",
+  "⚠️ Kairoが気になっているポイント",
+  "🏥 Kairoの判断",
+  "💬 最後に",
+  "💊 一般的な市販薬",
+];
+
+function removeForbiddenSummaryBlocks(text, allowedHeaders) {
+  const lines = String(text || "").split("\n");
+  const allowed = new Set(allowedHeaders);
+  const allHeaders = ALL_SUMMARY_HEADERS;
+  const isHeader = (line) => allHeaders.find((h) => line.trim().startsWith(h)) || null;
+  const output = [];
+  let skipping = false;
+  for (const line of lines) {
+    const header = isHeader(line);
+    if (header) {
+      skipping = !allowed.has(header);
+      if (!skipping) {
+        output.push(header);
+      }
+      continue;
+    }
+    if (!skipping) {
+      output.push(line);
+    }
+  }
+  return output.join("\n");
+}
+
 function enforceSummaryStructureStrict(text, level, history, state) {
   const headers = getRequiredSummaryHeadersByLevel(level);
-  const blocks = splitByKnownHeaders(text, headers);
+  const cleaned = removeForbiddenSummaryBlocks(text, headers);
+  const blocks = splitByKnownHeaders(cleaned, headers);
   const hasAll = headers.every((h) => blocks.has(h));
-  const hasEmergencyBlock = String(text || "").includes("🚨");
+  const hasEmergencyBlock = String(cleaned || "").includes("🚨");
   if (!hasAll || hasEmergencyBlock) {
     return buildLocalSummaryFallback(level, history, state);
   }
@@ -1855,6 +1892,30 @@ function ensureYellowOtcBlock(
     ].join("\n");
   }
   return `${text}\n${otcBlock}`;
+}
+
+function enforceYellowOtcPositionStrict(text, requiredLevel) {
+  if (!text || requiredLevel !== "🟡") return text;
+  const lines = text.split("\n");
+  const headerRegex = /^(🟢|🟡|🤝|✅|⏳|💊|🌱|📝|⚠️|🏥|💬)\s/;
+  const otcStart = lines.findIndex((line) => line.startsWith("💊 一般的な市販薬"));
+  const outlookStart = lines.findIndex((line) => line.startsWith("⏳ 今後の見通し"));
+  if (otcStart === -1 || outlookStart === -1) return text;
+
+  const otcEnd = lines.findIndex((line, idx) => idx > otcStart && headerRegex.test(line));
+  const sliceEnd = otcEnd === -1 ? lines.length : otcEnd;
+  const otcLines = lines.slice(otcStart, sliceEnd);
+  if (otcLines.length === 0) return text;
+
+  const withoutOtc = [...lines.slice(0, otcStart), ...lines.slice(sliceEnd)];
+  const newOutlookStart = withoutOtc.findIndex((line) => line.startsWith("⏳ 今後の見通し"));
+  if (newOutlookStart === -1) return `${withoutOtc.join("\n")}\n${otcLines.join("\n")}`;
+  const reordered = [
+    ...withoutOtc.slice(0, newOutlookStart),
+    ...otcLines,
+    ...withoutOtc.slice(newOutlookStart),
+  ];
+  return reordered.join("\n");
 }
 
 function enforceBulletSymbol(text) {
@@ -3686,62 +3747,101 @@ function validateSummaryAgainstNormalized(text, state) {
 function buildStateFactsBullets(state) {
   const answers = state?.slotAnswers || {};
   const filled = state?.slotFilled || {};
-  const slotStatus = state?.slotStatus || {};
-  const bullets = [];
   const val = (statusKey, fallback = "") =>
     getSlotStatusValue(state, statusKey, fallback);
+  const toRiskRank = (slotKey) => {
+    const level = state?.slotNormalized?.[slotKey]?.riskLevel;
+    if (level === RISK_LEVELS.HIGH) return 3;
+    if (level === RISK_LEVELS.MEDIUM) return 2;
+    if (level === RISK_LEVELS.LOW) return 1;
+    return 0;
+  };
+  const ranked = [];
 
-  // 1) 危険兆候の有無
-  const associated = val("associated", answers.associated_symptoms);
-  const hasDanger =
-    state?.slotNormalized?.associated_symptoms?.riskLevel === RISK_LEVELS.HIGH ||
-    /(しびれ|視界|意識|失神|息苦しさ|胸痛)/.test(associated);
-  bullets.push(hasDanger ? "・危険兆候がみられる" : "・危険兆候は今のところはっきりしない");
-
-  // 2) 日常生活への影響（daily_impact）
-  if (filled.daily_impact) {
-    const impact = val("impact", answers.daily_impact);
-    if (impact) bullets.push(`・日常生活への影響: ${impact}`);
-  }
-
-  // 3) 痛みスコア（5以上なら重要）
+  // 1) 痛みスコア（必ず先頭）
   const painScore = Number.isFinite(state?.lastPainScore)
     ? state.lastPainScore
     : (() => {
         const m = String(val("severity", answers.pain_score)).match(/(\d{1,2})/);
         return m ? Number(m[1]) : null;
       })();
-  if (Number.isFinite(painScore) && painScore >= 5) {
-    bullets.push(`・痛みは${painScore}/10程度`);
+  let painLine = "";
+  if (Number.isFinite(painScore)) {
+    painLine = `・痛みは${painScore}/10程度`;
+  } else {
+    const rawSeverity = val("severity", answers.pain_score);
+    painLine = rawSeverity ? `・痛みの強さ: ${rawSeverity}` : "・痛みの強さは未確認";
   }
 
-  // 4) 経過時間（数時間以上なら重要）
+  // 2) 以降は緊急度が高い順
+  // 危険兆候の有無
+  const associated = val("associated", answers.associated_symptoms);
+  const hasDanger =
+    state?.slotNormalized?.associated_symptoms?.riskLevel === RISK_LEVELS.HIGH ||
+    /(しびれ|視界|意識|失神|息苦しさ|胸痛)/.test(associated);
+  ranked.push({
+    line: hasDanger ? "・危険兆候がみられる" : "・危険兆候は今のところはっきりしない",
+    score: hasDanger ? 3 : 0,
+    tie: 0,
+  });
+
+  // 日常生活への影響（daily_impact）
+  if (filled.daily_impact) {
+    const impact = val("impact", answers.daily_impact);
+    if (impact) {
+      ranked.push({
+        line: `・日常生活への影響: ${impact}`,
+        score: toRiskRank("daily_impact"),
+        tie: 1,
+      });
+    }
+  }
+
+  // 経過時間（数時間以上なら重要）
   if (filled.duration) {
     const duration = val("duration", answers.duration);
     if (duration && /(数時間|時間|昨日|日|一日以上前|前から|ずっと)/.test(duration)) {
-      bullets.push(`・経過時間: ${duration}`);
+      ranked.push({
+        line: `・経過時間: ${duration}`,
+        score: toRiskRank("duration"),
+        tie: 3,
+      });
     }
   }
 
-  // 5) 付随症状（ある場合のみ）
+  // 付随症状（ある場合のみ）
   if (filled.associated_symptoms && associated && !/(特にない|なし|これ以外は特にない)/.test(associated)) {
-    bullets.push(`・付随症状: ${associated}`);
+    ranked.push({
+      line: `・付随症状: ${associated}`,
+      score: toRiskRank("associated_symptoms"),
+      tie: 2,
+    });
   }
 
-  // 6) きっかけ（医学的に意味がある場合のみ）
+  // きっかけ（医学的に意味がある場合のみ）
   if (filled.cause_category) {
     const cause = val("cause_category", state?.causeDetailText || answers.cause_category);
     if (cause && !/(思い当たらない|分からない|わからない|不明)/.test(cause)) {
-      bullets.push(`・きっかけ: ${cause}`);
+      ranked.push({
+        line: `・きっかけ: ${cause}`,
+        score: toRiskRank("cause_category"),
+        tie: 4,
+      });
     }
   }
-  const uniq = [];
-  for (const line of bullets) {
-    if (!line || uniq.includes(line)) continue;
-    uniq.push(line);
+
+  ranked.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return a.tie - b.tie;
+  });
+
+  const uniq = [painLine];
+  for (const item of ranked) {
+    if (!item?.line || uniq.includes(item.line)) continue;
+    uniq.push(item.line);
   }
   const limited = uniq.slice(0, 4);
-  return limited.length > 0 ? limited : ["・危険兆候は今のところはっきりしない"];
+  return limited.length > 0 ? limited : [painLine];
 }
 
 function buildStateAboutLine(state, level) {
@@ -3767,6 +3867,189 @@ function buildStateAboutLine(state, level) {
     ? "他の症状は少ない"
     : "他の症状は多くない";
   return `今の情報を見る限り、${painText}で${symptomsText}ため、急ぐ状況ではなさそうです。`;
+}
+
+function toBulletText(line) {
+  return String(line || "")
+    .replace(/^・\s*/, "")
+    .trim();
+}
+
+function extractBulletLinesFromText(text) {
+  return String(text || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => /^・/.test(line))
+    .map((line) => toBulletText(line))
+    .filter(Boolean)
+    .slice(0, 4);
+}
+
+function buildStatePatternSearchQuery(mainSymptom, facts, associated) {
+  const parts = [];
+  if (mainSymptom) parts.push(mainSymptom);
+  for (const fact of (facts || []).slice(0, 2)) {
+    const clean = toBulletText(fact).replace(/^(痛みは|日常生活への影響:|経過時間:|付随症状:|きっかけ:)\s*/, "");
+    if (clean) parts.push(clean);
+  }
+  const assoc = String(associated || "");
+  if (assoc && !/(特にない|なし|これ以外は特にない)/.test(assoc)) {
+    parts.push(assoc);
+  }
+  parts.push("よくある", "原因");
+  return parts.filter(Boolean).join(" ");
+}
+
+function getPatternTemplatesByCategory(category) {
+  if (category === "GI") {
+    return [
+      {
+        title: "一時的な腸の刺激や張りのパターン",
+        body:
+          "このような症状では、食事内容や腸の動き、疲労の影響で一時的な腹部不快感が出ることがあります。\nこのような症状では、動ける程度の痛みで推移するケースも少なくありません。",
+      },
+      {
+        title: "軽い消化機能のゆらぎのパターン",
+        body:
+          "このような症状では、ストレスや生活リズムの乱れにより、胃腸の働きが一時的に不安定になることがあります。\nこのような症状では、強い付随症状がなければ急を要しないこともあります。",
+      },
+    ];
+  }
+  if (category === "INFECTION") {
+    return [
+      {
+        title: "上気道の刺激による体調変化のパターン",
+        body:
+          "このような症状では、のどや鼻の炎症反応が先行して、だるさや咳が段階的に出ることがあります。\nこのような症状では、初期はセルフケアで経過を見る場面もあります。",
+      },
+      {
+        title: "軽い全身反応のパターン",
+        body:
+          "このような症状では、睡眠不足や環境変化が重なって体調が揺れやすくなることがあります。\nこのような症状では、強い悪化サインがないかを時間経過で確認することが大切です。",
+      },
+    ];
+  }
+  if (category === "SKIN") {
+    return [
+      {
+        title: "皮膚バリアの一時的な低下パターン",
+        body:
+          "このような症状では、乾燥や刺激物への接触で赤みやヒリつきが出ることがあります。\nこのような症状では、刺激回避で落ち着くケースもみられます。",
+      },
+      {
+        title: "接触刺激に関連する反応パターン",
+        body:
+          "このような症状では、新しい製品や摩擦が引き金となって局所症状が強まることがあります。\nこのような症状では、範囲拡大や痛み増悪の有無が確認ポイントになります。",
+      },
+    ];
+  }
+  return [
+    {
+      title: "一時的な緊張・負荷による痛みのパターン",
+      body:
+        "このような症状では、疲労や姿勢、睡眠不足などが重なって痛みが出ることがあります。\nこのような症状では、短時間で強弱が変わるケースもあります。",
+    },
+    {
+      title: "軽い炎症や刺激に伴う不調パターン",
+      body:
+        "このような症状では、局所の刺激や生活リズムの乱れが不調を長引かせることがあります。\nこのような症状では、強い危険兆候がないかを併せて確認します。",
+    },
+  ];
+}
+
+function buildReassuranceBulletsForPatterns(state) {
+  const bullets = [];
+  const impact = getSlotStatusValue(state, "impact", state?.slotAnswers?.daily_impact || "");
+  if (impact && /(普通に動ける|少しつらいが動ける)/.test(impact)) {
+    bullets.push("・日常生活の動きが一定程度保たれている");
+  }
+  const associated = getSlotStatusValue(
+    state,
+    "associated",
+    state?.slotAnswers?.associated_symptoms || ""
+  );
+  if (!associated || /(特にない|なし|これ以外は特にない)/.test(associated)) {
+    bullets.push("・強い付随症状は今のところ目立たない");
+  }
+  const painScore = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
+  if (Number.isFinite(painScore) && painScore <= 7) {
+    bullets.push("・痛みスコアが極端な高値ではない");
+  }
+  const duration = getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "");
+  if (duration && /(さっき|数時間)/.test(duration)) {
+    bullets.push("・経過が比較的短時間で、変化を追いやすい");
+  }
+  if (bullets.length === 0) {
+    bullets.push("・現時点で把握できる範囲では、強い危険兆候ははっきりしない");
+  }
+  return bullets.slice(0, 3);
+}
+
+function buildConsultChangeBulletsForPatterns(category) {
+  if (category === "GI") {
+    return [
+      "・痛みが急に強くなる",
+      "・歩行や姿勢維持がつらくなる",
+      "・発熱や繰り返す嘔吐が加わる",
+    ];
+  }
+  if (category === "INFECTION") {
+    return [
+      "・息苦しさや胸の痛みが出る",
+      "・高熱が続く",
+      "・水分が取りづらくなる",
+    ];
+  }
+  if (category === "SKIN") {
+    return [
+      "・赤みや腫れが急に広がる",
+      "・強い痛みや熱感が目立ってくる",
+      "・発熱を伴う",
+    ];
+  }
+  return [
+    "・痛みが急に強くなる",
+    "・しびれや視界の違和感が新たに出る",
+    "・日常動作が急に難しくなる",
+  ];
+}
+
+function buildConcreteStatePatternMessage(state, summaryFacts = [], summarySection = "") {
+  const snapshot = state?.judgmentSnapshot || {};
+  const mainSymptom =
+    snapshot.main_symptom ||
+    state?.primarySymptom ||
+    getSlotStatusValue(state, "associated", "") ||
+    "現在の症状";
+  const stateFacts = Array.isArray(summaryFacts) && summaryFacts.length > 0
+    ? summaryFacts.map((line) => toBulletText(line))
+    : buildStateFactsBullets(state).map((line) => toBulletText(line));
+  const extraFacts = extractBulletLinesFromText(summarySection);
+  const facts = Array.from(new Set([...stateFacts, ...extraFacts])).filter(Boolean).slice(0, 4);
+  const associated = getSlotStatusValue(state, "associated", state?.slotAnswers?.associated_symptoms || "");
+  const query = buildStatePatternSearchQuery(mainSymptom, facts, associated);
+  const category = detectQuestionCategory4([mainSymptom, ...facts].join(" "));
+  const templates = getPatternTemplatesByCategory(category).slice(0, 2);
+  const reassurance = buildReassuranceBulletsForPatterns(state);
+  const consultChanges = buildConsultChangeBulletsForPatterns(category);
+  const level = state?.decisionLevel || finalizeRiskLevel(state);
+  const isGreenOrYellow = level === "🟢" || level === "🟡";
+
+  const lines = ["あなたの状態の理解を深める", "", "今の状態は、次のようなパターンと似ています。", ""];
+  for (const pattern of templates) {
+    lines.push(`■ ${pattern.title}`);
+    lines.push(pattern.body);
+    lines.push("");
+  }
+  if (isGreenOrYellow) {
+    lines.push("現時点の安心材料");
+    reassurance.forEach((line) => lines.push(line));
+    lines.push("このような症状では、強い緊急サインは今のところはっきりしていません。");
+    lines.push("");
+    lines.push("こんな変化があれば受診を検討");
+    consultChanges.slice(0, 3).forEach((line) => lines.push(line));
+  }
+  return { message: lines.join("\n").trim(), query };
 }
 
 function buildStateDecisionLine(state, level) {
@@ -4229,12 +4512,12 @@ function calculateRiskFromState(state) {
 
   const weightedTotal =
     scores.pain * 1.4 +
-    scores.impact * 1.4 +
-    scores.symptoms * 1.3 +
+    scores.impact * 1.0 +
+    scores.symptoms * 1.0 +
     scores.onset * 1.0 +
     scores.quality * 1.0 +
     scores.cause * 0.8;
-  const maxWeighted = 20.7;
+  const maxWeighted = 18.6;
   const rawIndex = weightedTotal / maxWeighted;
   const severityIndex = Math.max(0, Math.min(1, rawIndex));
 
@@ -4874,6 +5157,7 @@ app.post("/api/chat", async (req, res) => {
         );
       }
       aiResponse = ensureOutlookBlock(aiResponse, conversationState[conversationId]);
+      aiResponse = enforceYellowOtcPositionStrict(aiResponse, level);
       if (level === "🔴") {
         aiResponse = ensureHospitalMemoBlock(aiResponse, conversationState[conversationId]);
         aiResponse = ensureHospitalConcernBlock(aiResponse, historyTextForOtc);
@@ -5260,6 +5544,42 @@ app.post("/api/chat", async (req, res) => {
       },
       questionPayload: null,
       normalizedAnswer: null,
+    });
+  }
+});
+
+app.post("/api/state-patterns", (req, res) => {
+  try {
+    const { conversationId, summaryFacts, summarySection } = req.body || {};
+    const state = conversationId ? getOrInitConversationState(conversationId) : initConversationState();
+    const { message, query } = buildConcreteStatePatternMessage(
+      state,
+      Array.isArray(summaryFacts) ? summaryFacts : [],
+      summarySection || ""
+    );
+    return res.status(200).json({
+      message,
+      query,
+      sourcePolicy: [
+        "公的機関",
+        "大学病院",
+        "国際医療機関",
+        "大手医療情報サイト",
+      ],
+    });
+  } catch (error) {
+    console.error("state-patterns error:", error);
+    return res.status(200).json({
+      message: [
+        "あなたの状態の理解を深める",
+        "",
+        "今の状態は、次のようなパターンと似ています。",
+        "",
+        "■ 一時的な体調変化のパターン",
+        "このような症状では、生活リズムや負荷の影響で症状がゆらぐことがあります。",
+      ].join("\n"),
+      query: "",
+      sourcePolicy: [],
     });
   }
 });

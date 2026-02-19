@@ -1,6 +1,7 @@
 // API endpoint
 const API_URL = "/api/chat";
 const CLEAR_URL = "/api/clear";
+const STATE_PATTERNS_URL = "/api/state-patterns";
 
 // Conversation history keys
 const HISTORY_KEY = "kairo_chat_history";
@@ -16,6 +17,7 @@ const appState = {
   painScore: null,
   slots: {},
   sectionTimers: [],
+  concreteModalBusy: false,
 };
 
 const INTRO_TEMPLATE_TEXTS = {
@@ -204,7 +206,8 @@ function saveHistory() {
           const header = block.querySelector('.block-header');
           const content = block.querySelector('.block-content');
           if (header) {
-            fullText += header.textContent + '\n\n';
+            const headerText = header.dataset.headerText || header.textContent;
+            fullText += headerText + '\n\n';
           }
           if (content) {
             fullText += content.textContent + '\n\n⸻\n\n';
@@ -341,6 +344,115 @@ function parseAIMessage(text) {
   }
 
   return blocks;
+}
+
+function extractStateFactsFromBlock(content) {
+  return String(content || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => /^・/.test(line))
+    .map((line) => line.replace(/^・\s*/, ""))
+    .slice(0, 4);
+}
+
+function ensureConcreteModal() {
+  let overlay = document.getElementById("concreteModalOverlay");
+  if (overlay) return overlay;
+  overlay = document.createElement("div");
+  overlay.id = "concreteModalOverlay";
+  overlay.className = "concrete-modal-overlay";
+  overlay.innerHTML = `
+    <div class="concrete-modal-card" role="dialog" aria-modal="true" aria-labelledby="concreteModalTitle">
+      <div class="concrete-modal-header">
+        <div id="concreteModalTitle" class="concrete-modal-title">あなたの状態の理解を深める</div>
+        <button id="concreteModalClose" class="concrete-modal-close" type="button" aria-label="閉じる">✕</button>
+      </div>
+      <div id="concreteModalBody" class="concrete-modal-body">整理中です…</div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  const closeButton = overlay.querySelector("#concreteModalClose");
+  if (closeButton) {
+    closeButton.addEventListener("click", () => closeConcreteModal());
+  }
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) closeConcreteModal();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeConcreteModal();
+  });
+  return overlay;
+}
+
+function openConcreteModal() {
+  const overlay = ensureConcreteModal();
+  overlay.classList.add("is-open");
+}
+
+function closeConcreteModal() {
+  const overlay = document.getElementById("concreteModalOverlay");
+  if (!overlay) return;
+  overlay.classList.remove("is-open");
+}
+
+function setConcreteModalBody(text) {
+  const body = document.getElementById("concreteModalBody");
+  if (!body) return;
+  body.textContent = text || "";
+}
+
+async function fetchStatePatterns(blockContent) {
+  const conversationId = getConversationId();
+  const summaryFacts = extractStateFactsFromBlock(blockContent);
+  const response = await fetch(STATE_PATTERNS_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      conversationId,
+      summaryFacts,
+      summarySection: String(blockContent || ""),
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`state-patterns status=${response.status}`);
+  }
+  const data = await response.json();
+  return data?.message || "このような症状では、情報を追加で整理すると判断の見通しが立てやすくなります。";
+}
+
+async function showConcreteStateDetails(blockContent) {
+  if (appState.concreteModalBusy) return;
+  appState.concreteModalBusy = true;
+  openConcreteModal();
+  setConcreteModalBody("いまの状態を、断定せずに具体化しています…");
+  try {
+    const detailText = await fetchStatePatterns(blockContent);
+    setConcreteModalBody(detailText);
+  } catch (error) {
+    console.error("具体化モーダル生成エラー:", error);
+    setConcreteModalBody(
+      [
+        "あなたの状態の理解を深める",
+        "",
+        "今の状態は、次のようなパターンと似ています。",
+        "",
+        "■ 一時的な体調変化のパターン",
+        "このような症状では、日内の負荷や睡眠、食事などで一時的に不調が強まることがあります。",
+        "",
+        "現時点の安心材料",
+        "・今わかっている範囲では、強い緊急サインははっきりしていません",
+        "",
+        "こんな変化があれば受診を検討",
+        "・痛みやつらさが急に強くなる",
+        "・動きづらさがはっきり増える",
+        "・新しい強い症状が加わる",
+      ].join("\n")
+    );
+  } finally {
+    appState.concreteModalBusy = false;
+  }
 }
 
 // Check if decision is completed (判断が完了しているかチェック)
@@ -648,16 +760,37 @@ function addMessage(text, isUser = false, save = true) {
       blockDiv.appendChild(contentDiv);
       
       const headerText = block.header ? (block.header.icon + " " + block.header.name) : "";
+      headerDiv.dataset.headerText = headerText;
+      const isStateBlock =
+        block?.header?.icon === "🤝" && /今の状態について/.test(block?.header?.name || "");
+      let detailButton = null;
+      let headerTitleEl = headerDiv;
+      if (isStateBlock) {
+        headerTitleEl = document.createElement("span");
+        headerTitleEl.className = "block-header-title";
+        headerDiv.appendChild(headerTitleEl);
+        detailButton = document.createElement("button");
+        detailButton.type = "button";
+        detailButton.className = "block-header-action";
+        detailButton.textContent = "具体的に";
+        detailButton.disabled = true;
+        detailButton.addEventListener("click", () => {
+          showConcreteStateDetails(block.content || "");
+        });
+        headerDiv.appendChild(detailButton);
+      }
       
       if (headerText) {
-        appendLinesSequentially(headerDiv, headerText, () => {
+        appendLinesSequentially(headerTitleEl, headerText, () => {
           appendLinesSequentially(contentDiv, block.content || "", () => {
+            if (detailButton) detailButton.disabled = false;
             blockIndex += 1;
             appendNextBlock();
           });
         });
       } else {
         appendLinesSequentially(contentDiv, block.content || "", () => {
+          if (detailButton) detailButton.disabled = false;
           blockIndex += 1;
           appendNextBlock();
         });

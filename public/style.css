@@ -390,6 +390,88 @@ body {
     border-bottom: 2px solid #e8e8e8;
 }
 
+.message.ai .block-header-title {
+    display: inline-block;
+}
+
+.message.ai .block-header-action {
+    margin-left: auto;
+    border: none;
+    background: transparent;
+    color: #4a9b8e;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    opacity: 0.9;
+}
+
+.message.ai .block-header-action:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+.concrete-modal-overlay {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(74, 155, 142, 0.26);
+    z-index: 3000;
+    padding: 20px;
+}
+
+.concrete-modal-overlay.is-open {
+    display: flex;
+}
+
+.concrete-modal-card {
+    width: min(560px, 96vw);
+    max-height: 88vh;
+    background: #fff;
+    border-radius: 14px;
+    border: 1px solid #dfe9e7;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.16);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.concrete-modal-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    justify-content: space-between;
+    padding: 14px 16px;
+    border-bottom: 1px solid #edf2f1;
+}
+
+.concrete-modal-title {
+    color: #1f3e38;
+    font-size: 16px;
+    font-weight: 700;
+}
+
+.concrete-modal-close {
+    border: none;
+    background: transparent;
+    color: #6a8f88;
+    font-size: 18px;
+    cursor: pointer;
+    line-height: 1;
+}
+
+.concrete-modal-body {
+    padding: 16px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    color: #233935;
+    font-size: 14px;
+    line-height: 1.8;
+}
+
 .message.ai .block-content {
     color: #333;
     font-size: 15px;
