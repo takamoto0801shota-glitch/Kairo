@@ -548,7 +548,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 
 必ず以下の構造で提示すること（区切り線の前後には必ず改行を2回以上入れる）：
 
-📝 いまの状態を整理します（メモ）
+📝 今の状態について
 
 [ユーザーの発言から事実のみを箇条書きで列挙]
 （例：・ 夜中に突然頭が痛くなった
@@ -740,7 +740,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 - **様子見/市販薬の場合のみ、（B）の形式を使用すること**
 - 各ブロックは必ず改行と余白を入れる（改行は2回以上）
 - ノートを読む感覚で、視線が上から下に流れるUIを想定する
-- 病院をおすすめする場合、「📝 いまの状態を整理します（メモ）」から始めて、結論（病院をおすすめする）は必ず最後（🏥 Kairoの判断）に出す
+- 病院をおすすめする場合、「📝 今の状態について」から始めて、結論（病院をおすすめする）は必ず最後（🏥 Kairoの判断）に出す
 - **最後のまとめセクション（💬 最後に または 🌱 最後に）は、どんな場合でも必ず毎回表示すること（絶対に省略しない）**
 - **判断を提示した後は、必ず最後にまとめセクションを追加すること**
 - **病院をおすすめする場合は、必ず（A）の形式を使用すること（📝→⚠️→🏥→💬の順番を厳守）**
@@ -878,8 +878,8 @@ function buildRepairPrompt(requiredLevel) {
 - ❗どのブロックも欠けてはいけない（1ブロックのみの出力は禁止）
 - ❗見出しは必ず以下を全て含める（順番厳守）：
   - 🟢 ここまでの情報を整理します / 🤝 今の状態について / ✅ 今すぐやること（これだけでOK） / ⏳ 今後の見通し / 🌱 最後に
-  - または 📝 いまの状態を整理します（メモ） / ⚠️ Kairoが気になっているポイント / 🏥 Kairoの判断 / 💬 最後に
-- 📝 いまの状態を整理します（メモ）は事実のみ・具体的に書く
+  - または 📝 今の状態について / ⚠️ Kairoが気になっているポイント / 🏥 Kairoの判断 / 💬 最後に
+- 📝 今の状態について は事実のみ・具体的に書く
   - 「ない」「不明」「特になし」だけの記述は禁止
   - 症状・経過・生活影響など具体語を含める
 - 「ない／特にない／該当しない」は不安材料として扱わず、安心材料として書く
@@ -887,7 +887,7 @@ function buildRepairPrompt(requiredLevel) {
 - 判断や安心コメントには、直前までの情報のうち少なくとも1つを根拠として明示的に反映する
 - 🔴の場合、🏥 Kairoの判断で受診先のカテゴリを具体的に示す
   - 例：歯の痛み→歯医者／耳の痛み→耳鼻科／腹痛・頭痛→病院
-- 🏥 Kairoの判断は「近くで行きやすい場所を案内します」を入れ、候補は最大3件・1件目はおすすめ、地図リンクを付ける
+- 🏥 Kairoの判断は「近くで行きやすい場所を案内します」を入れ、候補は最大2件までにする
 - 🤝 今の状態については一般論の説明を禁止し、感覚の翻訳にする
   - 「今のあなたの状態なら、こう考えて大丈夫です」
   - 「だから今日はこれでいいですよ」
@@ -932,37 +932,43 @@ function isHospitalFlow(text) {
   );
 }
 
+function normalizeHospitalMemoHeaderText(text) {
+  return String(text || "").replace(/📝\s*いまの状態を整理します（メモ）?/g, "📝 今の状態について");
+}
+
 function hasAnySummaryBlocks(text) {
+  const normalized = normalizeHospitalMemoHeaderText(text);
   return (
-    text.includes("🟢 ここまでの情報を整理します") ||
-    text.includes("🤝 今の状態について") ||
-    text.includes("✅ 今すぐやること") ||
-    text.includes("⏳ 今後の見通し") ||
-    text.includes("💊 一般的な市販薬") ||
-    text.includes("🌱 最後に") ||
-    text.includes("📝 いまの状態を整理します") ||
-    text.includes("⚠️ Kairoが気になっているポイント") ||
-    text.includes("🏥 Kairoの判断") ||
-    text.includes("💬 最後に")
+    normalized.includes("🟢 ここまでの情報を整理します") ||
+    normalized.includes("🤝 今の状態について") ||
+    normalized.includes("✅ 今すぐやること") ||
+    normalized.includes("⏳ 今後の見通し") ||
+    normalized.includes("💊 一般的な市販薬") ||
+    normalized.includes("🌱 最後に") ||
+    normalized.includes("📝 今の状態について") ||
+    normalized.includes("⚠️ Kairoが気になっているポイント") ||
+    normalized.includes("🏥 Kairoの判断") ||
+    normalized.includes("💬 最後に")
   );
 }
 
 function hasAllSummaryBlocks(text) {
-  const hospitalHeaders = ["📝 いまの状態を整理します", "⚠️ Kairoが気になっているポイント", "🏥 Kairoの判断", "💬 最後に"];
+  const normalized = normalizeHospitalMemoHeaderText(text);
+  const hospitalHeaders = ["📝 今の状態について", "⚠️ Kairoが気になっているポイント", "🏥 Kairoの判断", "💬 最後に"];
   const normalHeaders = ["🟢 ここまでの情報を整理します", "🤝 今の状態について", "✅ 今すぐやること", "⏳ 今後の見通し", "🌱 最後に"];
   const yellowHeaders = ["🟡 ここまでの情報を整理します", "🤝 今の状態について", "✅ 今すぐやること", "⏳ 今後の見通し", "🌱 最後に"];
-  const required = isHospitalFlow(text)
+  const required = isHospitalFlow(normalized)
     ? hospitalHeaders
-    : text.includes("🟡")
+    : normalized.includes("🟡")
       ? yellowHeaders
       : normalHeaders;
-  return required.every((header) => text.includes(header));
+  return required.every((header) => normalized.includes(header));
 }
 
 function getRequiredSummaryHeadersByLevel(level) {
   if (level === "🔴") {
     return [
-      "📝 いまの状態を整理します（メモ）",
+      "📝 今の状態について",
       "⚠️ Kairoが気になっているポイント",
       "🏥 Kairoの判断",
       "💬 最後に",
@@ -1018,6 +1024,7 @@ const ALL_SUMMARY_HEADERS = [
   "✅ 今すぐやること（これだけでOK）",
   "⏳ 今後の見通し",
   "🌱 最後に",
+  "📝 今の状態について",
   "📝 いまの状態を整理します（メモ）",
   "⚠️ Kairoが気になっているポイント",
   "🏥 Kairoの判断",
@@ -1049,8 +1056,9 @@ function removeForbiddenSummaryBlocks(text, allowedHeaders) {
 }
 
 function enforceSummaryStructureStrict(text, level, history, state) {
+  const normalizedText = normalizeHospitalMemoHeaderText(text);
   const headers = getRequiredSummaryHeadersByLevel(level);
-  const cleaned = removeForbiddenSummaryBlocks(text, headers);
+  const cleaned = removeForbiddenSummaryBlocks(normalizedText, headers);
   const blocks = splitByKnownHeaders(cleaned, headers);
   const hasAll = headers.every((h) => blocks.has(h));
   const hasEmergencyBlock = String(cleaned || "").includes("🚨");
@@ -1230,7 +1238,11 @@ function normalizePlaces(results, origin) {
           : null;
       const placeId = item?.place_id || "";
       const rating = typeof item?.rating === "number" ? item.rating : null;
-      const base = { name, placeId, distanceM, lat, lng, rating };
+      const userRatingsTotal =
+        typeof item?.user_ratings_total === "number" ? item.user_ratings_total : null;
+      const types = Array.isArray(item?.types) ? item.types : [];
+      const vicinity = typeof item?.vicinity === "string" ? item.vicinity : "";
+      const base = { name, placeId, distanceM, lat, lng, rating, userRatingsTotal, types, vicinity };
       return { ...base, mapsUrl: buildMapsUrl(base, origin) };
     })
     .filter(Boolean);
@@ -1269,6 +1281,34 @@ async function fetchNearbyPlaces(location, { keyword, type, radius = 1000, rankB
   return normalizePlaces(data.results || [], location);
 }
 
+async function fetchPlaceDetails(placeId) {
+  if (!process.env.GOOGLE_PLACES_API_KEY) return null;
+  if (!placeId) return null;
+  const params = new URLSearchParams({
+    place_id: placeId,
+    key: process.env.GOOGLE_PLACES_API_KEY,
+    language: "en",
+    fields: "place_id,name,rating,reviews,types,url,user_ratings_total,editorial_summary",
+  });
+  const url = `https://maps.googleapis.com/maps/api/place/details/json?${params.toString()}`;
+  const res = await fetch(url);
+  if (!res.ok) return null;
+  const data = await res.json();
+  const result = data?.result;
+  if (!result) return null;
+  return {
+    rating: typeof result?.rating === "number" ? result.rating : null,
+    userRatingsTotal:
+      typeof result?.user_ratings_total === "number" ? result.user_ratings_total : null,
+    types: Array.isArray(result?.types) ? result.types : [],
+    mapUrl: typeof result?.url === "string" ? result.url : "",
+    editorialSummary: result?.editorial_summary?.overview || "",
+    reviewTexts: Array.isArray(result?.reviews)
+      ? result.reviews.map((r) => String(r?.text || "").trim()).filter(Boolean)
+      : [],
+  };
+}
+
 function sortPlacesByRatingThenDistance(list) {
   return (list || []).sort((a, b) => {
     const aHasRating = a?.rating !== null && a?.rating !== undefined;
@@ -1280,6 +1320,127 @@ function sortPlacesByRatingThenDistance(list) {
     if (!aHasRating && bHasRating) return 1;
     return (a?.distanceM ?? 0) - (b?.distanceM ?? 0);
   });
+}
+
+function detectCareMainSymptomText(state, historyText = "") {
+  const source = [
+    state?.primarySymptom || "",
+    state?.slotAnswers?.worsening || "",
+    state?.slotAnswers?.associated_symptoms || "",
+    state?.slotAnswers?.cause_category || "",
+    historyText || "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const matched = source.match(/[^\n。]{0,24}(腹痛|お腹|胃痛|下痢|便秘|吐き気|発熱|咳|喉|頭痛|皮膚|かゆみ)[^\n。]{0,24}/);
+  return matched ? matched[0] : (state?.primarySymptom || "現在の症状");
+}
+
+function buildCareSearchQueries(mainSymptomText = "", destination) {
+  const s = String(mainSymptomText || "");
+  if (/腹|お腹|胃|下痢|便秘|吐き気/.test(s)) {
+    return {
+      searchKeywords: ["abdominal pain", "gastro", "digestive", "GP", "family medicine"],
+      includeTerms: ["gastro", "digestive", "gp", "family", "general practitioner", "clinic"],
+      excludeTerms: ["orthopedic", "orthopaedic", "dermatology", "skin", "美容", "整形", "皮膚"],
+      symptomLabel: "腹痛・消化器症状",
+    };
+  }
+  return {
+    searchKeywords: destination?.places?.keywords || ["clinic", "general practitioner", "medical clinic"],
+    includeTerms: [],
+    excludeTerms: [],
+    symptomLabel: detectCareMainSymptomText({ primarySymptom: mainSymptomText }),
+  };
+}
+
+function containsAny(text, terms) {
+  const normalized = String(text || "").toLowerCase();
+  return (terms || []).some((t) => normalized.includes(String(t || "").toLowerCase()));
+}
+
+function applySymptomFitFilter(candidates, plan) {
+  const list = Array.isArray(candidates) ? candidates : [];
+  if (!plan?.includeTerms?.length && !plan?.excludeTerms?.length) return list;
+  const filtered = list.filter((item) => {
+    const hay = [item?.name || "", item?.vicinity || "", ...(item?.types || [])].join(" ").toLowerCase();
+    if (plan?.excludeTerms?.length && containsAny(hay, plan.excludeTerms)) return false;
+    if (!plan?.includeTerms?.length) return true;
+    return containsAny(hay, plan.includeTerms);
+  });
+  return filtered.length > 0 ? filtered : list;
+}
+
+function scoreSingaporePreference(candidate) {
+  const text = [candidate?.name || "", candidate?.vicinity || "", ...(candidate?.types || [])].join(" ");
+  const hasJapanese = /(japanese|日本語|日系|nihon)/i.test(text);
+  const hasGp = /(gp|general practitioner|family|clinic)/i.test(text);
+  const hasLargeHospital = /(hospital|medical centre|medical center)/i.test(text);
+  if (hasJapanese) return 4;
+  if (hasGp) return 2;
+  if (hasLargeHospital) return 1;
+  return 0;
+}
+
+function prioritizeCareCandidates(candidates, state) {
+  const list = Array.isArray(candidates) ? [...candidates] : [];
+  const country = String(state?.locationContext?.country || "").toLowerCase();
+  if (country.includes("singapore")) {
+    return list.sort((a, b) => {
+      const p = scoreSingaporePreference(b) - scoreSingaporePreference(a);
+      if (p !== 0) return p;
+      return sortPlacesByRatingThenDistance([a, b])[0] === a ? -1 : 1;
+    });
+  }
+  return sortPlacesByRatingThenDistance(list);
+}
+
+function formatDistanceForCare(distanceM) {
+  if (!Number.isFinite(distanceM)) return "不明";
+  if (distanceM < 1000) return `約${distanceM}m`;
+  return `約${(distanceM / 1000).toFixed(1)}km`;
+}
+
+function buildHospitalRecommendationReasons(candidate, plan) {
+  const reasons = [];
+  const infoText = [candidate?.name || "", candidate?.vicinity || "", ...(candidate?.types || [])].join(" ");
+  if (plan?.symptomLabel) {
+    reasons.push(`・${plan.symptomLabel}の初期相談に対応しやすい施設タイプです`);
+  }
+  if (/(japanese|日本語|日系)/i.test(infoText)) {
+    reasons.push("・日本語対応に関する記載があり、相談時の負担を下げやすい候補です");
+  }
+  if (Number.isFinite(candidate?.rating)) {
+    const count = Number.isFinite(candidate?.userRatingsTotal) ? `（${candidate.userRatingsTotal}件）` : "";
+    reasons.push(`・Google評価は ${candidate.rating.toFixed(1)} ${count} で、利用者評価が確認できます`);
+  }
+  if (Number.isFinite(candidate?.distanceM)) {
+    reasons.push(`・現在地から${formatDistanceForCare(candidate.distanceM)}で、受診ハードルが比較的低い距離です`);
+  }
+  return reasons.slice(0, 3);
+}
+
+function buildCareReviewSummary(candidate, plan) {
+  const details = candidate?.details;
+  const snippets = Array.isArray(details?.reviewTexts) ? details.reviewTexts.slice(0, 8) : [];
+  if (snippets.length === 0) {
+    return `${plan?.symptomLabel || "現在の症状"}の相談先として、場所・評価・距離のバランスで選定しています。`;
+  }
+  const joined = snippets.join(" ").toLowerCase();
+  const points = [];
+  if (/(explain|説明|丁寧|わかりやすい|careful)/.test(joined)) {
+    points.push("説明が丁寧で相談しやすいという声");
+  }
+  if (/(wait|待ち|quick|fast|smooth)/.test(joined)) {
+    points.push("待ち時間や案内が比較的スムーズという声");
+  }
+  if (/(friendly|親切|kind|staff)/.test(joined)) {
+    points.push("スタッフ対応が親切という声");
+  }
+  if (points.length === 0) {
+    points.push("初期相談で利用しやすいという声");
+  }
+  return `${plan?.symptomLabel || "現在の症状"}に関して、${points.slice(0, 2).join("、")}が見られます。`;
 }
 
 async function reverseGeocodeLocation(location) {
@@ -1517,15 +1678,23 @@ function isWhereToGoQuestion(message) {
 }
 
 function buildHospitalRecommendationDetail(state, locationContext, clinicCandidates, hospitalCandidates) {
-  const useHospital = hospitalCandidates?.length > 0;
-  const candidates = (useHospital ? hospitalCandidates : clinicCandidates) || [];
+  const historyText = state?.historyTextForCare || "";
+  const destination = detectCareDestinationFromHistory(historyText);
+  const mainSymptomText = detectCareMainSymptomText(state, historyText);
+  const plan = buildCareSearchQueries(mainSymptomText, destination);
+  const merged = mergePlaces(
+    Array.isArray(clinicCandidates) ? clinicCandidates : [],
+    Array.isArray(hospitalCandidates) ? hospitalCandidates : []
+  );
+  const candidates = prioritizeCareCandidates(applySymptomFitFilter(merged, plan), state).slice(0, 2);
+  const useHospital = (hospitalCandidates?.length || 0) > 0;
   if (canRecommendSpecificPlaceFinal(state) && candidates.length) {
     return {
       name: candidates[0].name,
       mapsUrl: candidates[0].mapsUrl,
       candidates,
       type: useHospital ? "Hospital" : "Clinic",
-      reason: "近くで行きやすい場所を案内します。",
+      reason: `${plan?.symptomLabel || "現在の症状"}に合う候補を、位置情報ベースで整理しています。`,
       preface: "近くで行きやすい場所を案内します。",
     };
   }
@@ -1955,26 +2124,48 @@ function detectCareDestinationFromHistory(historyText) {
 async function resolveCareCandidates(state, destination) {
   if (!canRecommendSpecificPlaceFinal(state)) return [];
   if (!state?.locationSnapshot?.lat || !state?.locationSnapshot?.lng) return [];
-  const type = destination?.places?.type || "doctor";
-  const keywords = destination?.places?.keywords || ["clinic"];
+  const historyText = state?.historyTextForCare || "";
+  const mainSymptomText = detectCareMainSymptomText(state, historyText);
+  const plan = buildCareSearchQueries(mainSymptomText, destination);
+  const types = ["doctor", "hospital"];
+  const keywords = plan.searchKeywords || destination?.places?.keywords || ["clinic"];
   const results = [];
-  for (const keyword of keywords) {
-    const places = await fetchNearbyPlaces(state.locationSnapshot, {
-      keyword,
-      type,
-      rankByDistance: true,
-    });
-    results.push(...places);
+  for (const type of types) {
+    for (const keyword of keywords) {
+      const places = await fetchNearbyPlaces(state.locationSnapshot, {
+        keyword,
+        type,
+        radius: 3000,
+      });
+      results.push(...places);
+    }
   }
   if (results.length === 0) {
-    const fallback = await fetchNearbyPlaces(state.locationSnapshot, {
-      type,
-      rankByDistance: true,
-    });
-    results.push(...fallback);
+    for (const type of types) {
+      const fallback = await fetchNearbyPlaces(state.locationSnapshot, {
+        type,
+        radius: 3000,
+      });
+      results.push(...fallback);
+    }
   }
-  const merged = sortPlacesByRatingThenDistance(mergePlaces(results)).slice(0, 2);
-  if (merged.length > 0) return merged;
+  const mergedBase = mergePlaces(results);
+  const symptomFitted = applySymptomFitFilter(mergedBase, plan);
+  const merged = prioritizeCareCandidates(symptomFitted, state).slice(0, 6);
+  const enriched = [];
+  for (const item of merged) {
+    const details = await fetchPlaceDetails(item.placeId);
+    enriched.push({
+      ...item,
+      details,
+      rating: details?.rating ?? item.rating,
+      userRatingsTotal: details?.userRatingsTotal ?? item.userRatingsTotal,
+      types: details?.types?.length ? details.types : item.types,
+      mapsUrl: details?.mapUrl || item.mapsUrl,
+    });
+  }
+  const finalList = enriched.length ? enriched.slice(0, 2) : merged.slice(0, 2);
+  if (finalList.length > 0) return finalList;
   const names = destination?.fallbackNames;
   if (Array.isArray(names) && names.length > 0) {
     return buildFallbackPlaces(names, state?.locationSnapshot);
@@ -1985,8 +2176,10 @@ async function resolveCareCandidates(state, destination) {
 
 function buildHospitalBlock(state, historyText, hospitalRec) {
   const destination = detectCareDestinationFromHistory(historyText || "");
-  const specialty = destination.label;
+  const category = resolveQuestionCategoryFromState(state);
   const candidates = hospitalRec?.candidates || [];
+  const mainSymptomText = detectCareMainSymptomText(state, historyText || "");
+  const plan = buildCareSearchQueries(mainSymptomText, destination);
   // 🔴のみ：夜間（20:00〜5:59）のときだけ、無理をさせない一文を追加
   const hour = (() => {
     const tz = state?.clientMeta?.tz;
@@ -2019,18 +2212,36 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
     "",
     destination.header,
   ].filter(Boolean);
-  const top = candidates[0];
-  if (top?.name) {
-    lines.push(top.name);
-    lines.push("・予約なしでも行きやすい");
-    lines.push("・英語が苦手でも対応に慣れている");
-    lines.push("・必要があれば検査や紹介につなげやすい");
+
+  const list = Array.isArray(candidates) ? candidates.slice(0, 2) : [];
+  if (list.length > 0) {
+    list.forEach((c, idx) => {
+      const rank = idx === 0 ? "🏥" : "🏥";
+      lines.push("");
+      lines.push(`${rank} ${c.name}`);
+      lines.push(`${plan?.symptomLabel || "現在の症状"}の初期診療に対応可能な候補です。`);
+      lines.push(buildCareReviewSummary(c, plan));
+      lines.push("");
+      lines.push("この場所をおすすめする理由：");
+      const reasons = buildHospitalRecommendationReasons(c, plan);
+      if (reasons.length > 0) {
+        reasons.forEach((r) => lines.push(r));
+      } else {
+        lines.push("・現在地から行きやすく、初期相談先として使いやすい候補です");
+      }
+      lines.push(`📍現在地から${formatDistanceForCare(c.distanceM)}`);
+    });
+  } else {
+    lines.push("近くで受診しやすい医療機関を優先して案内します。");
   }
   lines.push("");
-  lines.push("もし、外出がつらい場合は、オンライン診療という方法もあります。");
-  lines.push("今の症状であればオンラインでの初期相談は可能です。");
-  lines.push("Doctor Anywhere / WhiteCoat");
-  lines.push("オンラインでもMCは発行されます。");
+  // 仕様: INFECTION ではオンライン診療案内を表示しない（強制）
+  if (category !== "INFECTION") {
+    lines.push("もし、外出がつらい場合は、オンライン診療という方法もあります。");
+    lines.push("今の症状であればオンラインでの初期相談は可能です。");
+    lines.push("Doctor Anywhere / WhiteCoat");
+    lines.push("オンラインでもMCは発行されます。");
+  }
   return lines.join("\n");
 }
 
@@ -2042,12 +2253,17 @@ function buildHospitalConcernPoint(historyText) {
 function ensureHospitalMemoBlock(text, state) {
   if (!text) return text;
   const memoLines = [
-    "📝 いまの状態を整理します（メモ）",
+    "📝 今の状態について",
     ...buildStateFactsBullets(state),
   ];
-  return replaceSummaryBlock(
-    text,
+  const replacedOld = replaceSummaryBlock(
+    normalizeHospitalMemoHeaderText(text),
     "📝 いまの状態を整理します",
+    memoLines.join("\n")
+  );
+  return replaceSummaryBlock(
+    replacedOld,
+    "📝 今の状態について",
     memoLines.join("\n")
   );
 }
@@ -2075,7 +2291,41 @@ function ensureHospitalBlock(text, state, historyText) {
       state?.clinicCandidates || [],
       state?.hospitalCandidates || []
     );
-  return replaceSummaryBlock(text, "🏥 Kairoの判断", buildHospitalBlock(state, historyText, hospitalRec));
+  const replaced = replaceSummaryBlock(text, "🏥 Kairoの判断", buildHospitalBlock(state, historyText, hospitalRec));
+  const withoutInfectionOnline = stripInfectionOnlineClinicGuidance(replaced, state);
+  return stripHospitalMapLinks(withoutInfectionOnline);
+}
+
+function stripInfectionOnlineClinicGuidance(text, state) {
+  if (!text) return text;
+  if (resolveQuestionCategoryFromState(state) !== "INFECTION") return text;
+  const forbidden = new Set([
+    "もし、外出がつらい場合は、オンライン診療という方法もあります。",
+    "今の症状であればオンラインでの初期相談は可能です。",
+    "Doctor Anywhere / WhiteCoat",
+    "オンラインでもMCは発行されます。",
+  ]);
+  const filtered = text
+    .split("\n")
+    .filter((line) => !forbidden.has(String(line || "").trim()))
+    .join("\n");
+  return filtered.replace(/\n{3,}/g, "\n\n");
+}
+
+function stripHospitalMapLinks(text) {
+  if (!text) return text;
+  const filtered = text
+    .split("\n")
+    .filter((line) => {
+      const s = String(line || "").trim();
+      if (!s) return true;
+      if (/^🗺\s*Google Map:/i.test(s)) return false;
+      if (/（地図：https?:\/\/[^\s)]+/i.test(s)) return false;
+      if (/https?:\/\/(www\.)?google\.[^/\s]+\/maps/i.test(s)) return false;
+      return true;
+    })
+    .join("\n");
+  return filtered.replace(/\n{3,}/g, "\n\n");
 }
 
 function replaceSummaryBlock(text, header, block) {
@@ -4184,7 +4434,7 @@ function buildLocalSummaryFallback(level, history, state) {
     );
     const hospitalBlock = buildHospitalBlock(state, historyText, hospitalRec);
     return sanitizeSummaryBullets([
-      "📝 いまの状態を整理します（メモ）",
+      "📝 今の状態について",
       buildStateFactsBullets(state).join("\n"),
       "⚠️ Kairoが気になっているポイント",
       buildHospitalConcernPoint(historyText),
@@ -5062,6 +5312,7 @@ app.post("/api/chat", async (req, res) => {
         .join("\n");
       const careDestination = detectCareDestinationFromHistory(historyTextForCare);
       conversationState[conversationId].careDestination = careDestination;
+      conversationState[conversationId].historyTextForCare = historyTextForCare;
       const historyTextForOtc = conversationHistory[conversationId]
         .filter((msg) => msg.role === "user")
         .map((msg) => msg.content)
@@ -5240,6 +5491,11 @@ app.post("/api/chat", async (req, res) => {
         conversationHistory[conversationId],
         conversationState[conversationId]
       );
+      aiResponse = stripInfectionOnlineClinicGuidance(
+        aiResponse,
+        conversationState[conversationId]
+      );
+      aiResponse = stripHospitalMapLinks(aiResponse);
       const decisionType =
         level === "🔴"
           ? "A_HOSPITAL"
@@ -5602,7 +5858,7 @@ app.post("/api/state-patterns", (req, res) => {
 function getSummarySectionSpecsByJudgement(judgement) {
   if (judgement === "🔴") {
     return [
-      { id: 1, title: "📝 いまの状態を整理します（メモ）", patterns: [/^📝\s*いまの状態を整理します（メモ）/, /^📝\s*いまの状態を整理します/] },
+      { id: 1, title: "📝 今の状態について", patterns: [/^📝\s*今の状態について/, /^📝\s*いまの状態を整理します（メモ）/, /^📝\s*いまの状態を整理します/] },
       { id: 2, title: "⚠️ Kairoが気になっているポイント", patterns: [/^⚠️\s*Kairoが気になっているポイント/] },
       { id: 3, title: "🏥 Kairoの判断", patterns: [/^🏥\s*Kairoの判断/] },
       { id: 4, title: "💬 最後に", patterns: [/^💬\s*最後に/] },

@@ -266,6 +266,7 @@ function parseAIMessage(text) {
     { icon: '💊', name: '一般的な市販薬' },
     { icon: '🌱', name: '最後に' },
     // 病院をおすすめする場合
+    { icon: '📝', name: '今の状態について' },
     { icon: '📝', name: 'いまの状態を整理します（メモ）' },
     { icon: '⚠️', name: 'Kairoが気になっているポイント' },
     { icon: '🏥', name: 'Kairoの判断' },
@@ -465,6 +466,7 @@ function isDecisionCompleted(text) {
     '⏳ 今後の見通し',
     '🚨 もし次の症状が出たら',
     '🏥 Kairoの判断',
+    '📝 今の状態について',
     '📝 いまの状態を整理します',
     '⚠️ Kairoが気になっているポイント',
     '病院に行くことをおすすめします',
@@ -762,7 +764,8 @@ function addMessage(text, isUser = false, save = true) {
       const headerText = block.header ? (block.header.icon + " " + block.header.name) : "";
       headerDiv.dataset.headerText = headerText;
       const isStateBlock =
-        block?.header?.icon === "🤝" && /今の状態について/.test(block?.header?.name || "");
+        (block?.header?.icon === "🤝" || block?.header?.icon === "📝") &&
+        /今の状態について|いまの状態を整理します/.test(block?.header?.name || "");
       let detailButton = null;
       let headerTitleEl = headerDiv;
       if (isStateBlock) {
@@ -813,6 +816,7 @@ function addSummaryBlock(messageDiv, fullText) {
     fullText.includes('✅ 今すぐやること') ||
     fullText.includes('⏳ 今後の見通し') ||
     fullText.includes('🚨 もし次の症状が出たら') ||
+    fullText.includes('📝 今の状態について') ||
     fullText.includes('📝 いまの状態を整理します') ||
     fullText.includes('⚠️ Kairoが気になっているポイント') ||
     fullText.includes('🏥 Kairoの判断');
