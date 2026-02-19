@@ -2192,11 +2192,41 @@ function mapDailyImpactAnswerToRestLevel(answer) {
   if (normalized === "普通に動ける") return "NONE";
   if (normalized === "少しつらいが動ける") return "LIGHT";
   if (normalized === "動けないほどつらい") return "STRONG";
+  // INFECTIONカテゴリ（体温質問）でも 3択を 1:1 で休息判定に使う
+  if (normalized === "平熱に近い") return "NONE";
+  if (normalized === "37度台") return "LIGHT";
+  if (normalized === "38度以上") return "STRONG";
   return null;
 }
 
+function resolveQuestionCategoryFromState(state) {
+  const text = [
+    state?.primarySymptom || "",
+    state?.slotAnswers?.pain_score || "",
+    state?.slotAnswers?.worsening || "",
+    state?.slotAnswers?.duration || "",
+    state?.slotAnswers?.daily_impact || "",
+    state?.slotAnswers?.associated_symptoms || "",
+    state?.slotAnswers?.cause_category || "",
+    state?.causeDetailText || "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return detectQuestionCategory4(text);
+}
+
 function resolveRestLevelFromState(state) {
-  // Rest判定は4問目（日常生活への影響）のみを参照する
+  // Rest判定はカテゴリ別ルールで決定する
+  const category = resolveQuestionCategoryFromState(state);
+  if (category === "SKIN") {
+    // 仕様: SKIN は常に NONE
+    return "NONE";
+  }
+  if (category === "GI") {
+    // 仕様: GI は常に LIGHT
+    return "LIGHT";
+  }
+  // PAIN / INFECTION は 4問目（daily_impact）の回答を 1:1 で参照する
   const byAnswer = mapDailyImpactAnswerToRestLevel(state?.slotAnswers?.daily_impact);
   if (byAnswer) return byAnswer;
   // 自由記述は近似マッピング結果（slotNormalized）でフォールバック
@@ -3377,8 +3407,8 @@ function getCategoryQuestionOverride(category, slotKey) {
     }
     if (slotKey === "cause_category") {
       return {
-        question: "始まり方はどれに近いですか？",
-        options: ["徐々に始まった", "食後に悪化する", "突然強くなった"],
+        question: "何かきっかけで思い当たることはありますか？",
+        options: ["冷えや寒気がある", "便秘", "食あたり"],
       };
     }
   }
@@ -4340,11 +4370,11 @@ function mapFreeTextToOptionIndex(answer, options, type) {
       if (/下痢|軟便/.test(text)) return 1;
       if (/変化ない|特にない|なし/.test(text)) return 0;
     }
-    // GI: 発症
-    if (indexOf("突然強くなった") >= 0) {
-      if (/突然|急に|いきなり|急激/.test(text)) return 2;
-      if (/食後|食べた後/.test(text)) return 1;
-      if (/徐々に|じわじわ|少しずつ/.test(text)) return 0;
+    // GI: きっかけ
+    if (indexOf("食あたり") >= 0) {
+      if (/食あたり|当たっ|生もの|傷ん|食後/.test(text)) return 2;
+      if (/便秘|出ない|硬い便/.test(text)) return 1;
+      if (/冷え|冷たい|体が冷え|冷房/.test(text)) return 0;
     }
   }
 
