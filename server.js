@@ -7,6 +7,7 @@ require("dotenv").config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const IS_DEBUG = false;
 
 // Middleware
 app.use(cors());
@@ -4442,38 +4443,100 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
     new Set(top.filter((r) => r.trusted).map((r) => r.host).filter(Boolean))
   ).slice(0, 4);
 
-  const lines = [
-    "あなたの状態の理解を深める",
-    "",
-    `抽出した症状語: ${symptoms.join(" / ") || "（抽出なし）"}`,
-    `検索クエリ(JP): ${queryJP}`,
-    `検索クエリ(EN): ${queryEN}`,
-    "",
-    "状態の説明",
-  ];
-  findings.explanation
-    .slice(0, 2)
-    .map((line) => summarizeFindingLine(line, symptoms))
-    .filter(Boolean)
-    .forEach((line) => lines.push(line));
-  lines.push("", "進行パターン");
-  findings.progression
-    .slice(0, 2)
-    .map((line) => summarizeFindingLine(line, symptoms))
-    .filter(Boolean)
-    .forEach((line) => lines.push(line));
-  lines.push("", "見極めポイント");
-  findings.checkpoints
-    .slice(0, 3)
-    .map((line) => summarizeFindingLine(line, symptoms))
-    .filter(Boolean)
-    .forEach((line) => lines.push(line));
+  const level = state?.decisionLevel || finalizeRiskLevel(state);
+  const category = resolveQuestionCategoryFromState(state);
+  const causeText = pickCauseTextForConcreteMode(state, summaryFacts);
+  const isCauseValid = Boolean(causeText && !/(特に思い当たらない|はっきりとは分からない|思い当たらない|不明|わからない)/.test(causeText));
+  const maxPatterns = isCauseValid ? 1 : 2;
+  const strengthText = Number.isFinite(state?.lastPainScore)
+    ? `痛みは${state.lastPainScore}/10程度`
+    : getSlotStatusValue(state, "severity", state?.slotAnswers?.pain_score || "");
+  const durationText = getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "");
+  const symptomText = getSlotStatusValue(state, "worsening", state?.slotAnswers?.worsening || "");
+  const detailPayload = {
+    symptoms,
+    strengthText,
+    durationText,
+    symptomText,
+    causeText,
+    maxPatterns,
+    findings,
+    level,
+  };
 
-  if (sourceNames.length > 0) {
-    lines.push("", `参考ソース: ${sourceNames.join(" / ")}`);
+  const systemPrompt = [
+    "あなたは医療不安を整理する説明作成AIです。",
+    "診断・断定は禁止。内部処理や検索語を表示してはいけません。",
+    "出力は次の順序に固定:",
+    "1) あなたの状態の理解を深める",
+    "2) 今の状態は、次のようなパターンと似ています。",
+    "3) ■ パターン名 + 説明3〜4行（最大2、cause有効時は最大1）",
+    "4) 🟢/🟡のみ: 現時点の安心材料（3行）と、こんな変化があれば受診を検討（最大3行）",
+    "禁止語: 「このような症状では」「一般的に」「場合があります」",
+    "「可能性があります」は乱発禁止。必要時は1回まで。",
+    "ユーザーの時間情報・強さ・変化を説明に必ず織り込むこと。",
+  ].join("\n");
+
+  let message = "";
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: JSON.stringify(detailPayload) },
+      ],
+      temperature: 0.4,
+      max_tokens: 600,
+    });
+    message = String(completion?.choices?.[0]?.message?.content || "").trim();
+  } catch (_) {
+    message = "";
   }
+
+  if (!message) {
+    const lines = [
+      "あなたの状態の理解を深める",
+      "",
+      "今の状態は、次のようなパターンと似ています。",
+      "",
+    ];
+    const patternTitle = isCauseValid ? `${causeText}が関与するパターン` : "現在の症状経過に近いパターン";
+    const p1 = findings.explanation[0] || findings.progression[0] || "症状の背景要素が重なって、いまの不調が続いている状態です。";
+    const p2 = findings.progression[0] || "時間経過で波が出るため、強さと変化の追跡が重要です。";
+    const p3 = findings.checkpoints[0] || "悪化や新しい症状が加わるかを見極めることが判断の軸になります。";
+    const causeLine = isCauseValid
+      ? `${causeText}というきっかけがある場合、${durationText || "ここ数時間"}で強さが変わることがあります。`
+      : `${durationText || "現在"}の経過で、${strengthText || "痛みの強さ"}と変化を合わせてみると整理しやすくなります。`;
+    lines.push(`■ ${patternTitle}`);
+    lines.push(causeLine);
+    lines.push(String(p1).replace(/\s+/g, " ").trim());
+    lines.push(String(p2).replace(/\s+/g, " ").trim());
+    lines.push(String(p3).replace(/\s+/g, " ").trim());
+
+    if (level === "🟢" || level === "🟡") {
+      lines.push("", "現時点の安心材料");
+      buildReassuranceBulletsForPatterns(state).slice(0, 3).forEach((b) => lines.push(b));
+      lines.push("", "こんな変化があれば受診を検討");
+      buildConsultChangeBulletsForPatterns(category).slice(0, 3).forEach((b) => lines.push(b));
+    }
+    message = lines.join("\n");
+  }
+
+  message = String(message || "")
+    .replace(/このような症状では/g, "今回の経過では")
+    .replace(/一般的に/g, "今回の情報では")
+    .replace(/場合があります/g, "ことがあります")
+    .split("\n")
+    .filter((line) => !/^(抽出した症状語:|検索クエリ\(JP\):|検索クエリ\(EN\):|参考ソース:|デバッグ)/.test(line.trim()))
+    .join("\n")
+    .trim();
+
+  if (IS_DEBUG) {
+    message += `\n\n[debug]\n症状語: ${symptoms.join(" / ")}\nqueryJP: ${queryJP}\nqueryEN: ${queryEN}\nsource: ${sourceNames.join(" / ")}`;
+  }
+
   return {
-    message: lines.join("\n").trim(),
+    message,
     query: `${queryJP} || ${queryEN}`,
     queryJP,
     queryEN,
@@ -6452,37 +6515,46 @@ app.post("/api/state-patterns", async (req, res) => {
       Array.isArray(summaryFacts) ? summaryFacts : [],
       summarySection || ""
     );
-    return res.status(200).json({
+    const basePayload = {
       message,
-      query,
-      queryJP,
-      queryEN,
-      sourceNames,
       sourcePolicy: [
         "公的機関",
         "大学病院",
         "国際医療機関",
         "大手医療情報サイト",
       ],
-    });
+    };
+    if (IS_DEBUG) {
+      return res.status(200).json({
+        ...basePayload,
+        query,
+        queryJP,
+        queryEN,
+        sourceNames,
+      });
+    }
+    return res.status(200).json(basePayload);
   } catch (error) {
     console.error("state-patterns error:", error);
     return res.status(200).json({
       message: [
         "あなたの状態の理解を深める",
         "",
-        "抽出した症状語にもとづいて説明を準備しましたが、検索の取得に失敗しました。",
+        "今の状態は、次のようなパターンと似ています。",
         "",
-        "状態の説明",
-        "・今の症状語を中心に、原因と経過を追加確認するのが適切です。",
+        "■ 現在の症状経過に近いパターン",
+        "症状の強さと経過時間をあわせて見ると、今の状態を整理しやすくなります。",
+        "強さが上がるか、同じ強さのまま続くかが、次の判断ポイントです。",
+        "新しい症状が加わらないかを、短い間隔で確認していくのが安全です。",
         "",
-        "進行パターン",
-        "・症状の強さ・持続時間・新しい症状の有無を2〜3時間ごとに確認してください。",
+        "現時点の安心材料",
+        "・強い緊急サインが直ちに重なっている情報は今のところ見えていません",
         "",
-        "見極めポイント",
-        "・悪化、長時間の持続、新しい強い症状が出たら受診を検討してください。",
+        "こんな変化があれば受診を検討",
+        "・痛みやつらさが短時間で強まる",
+        "・新しい強い症状が加わる",
+        "・数時間たっても改善の動きが見えない",
       ].join("\n"),
-      query: "",
       sourcePolicy: [],
     });
   }
