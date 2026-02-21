@@ -2377,9 +2377,12 @@ function pickActionsForBlock(plan, maxCount = 2) {
   return picked;
 }
 
-function buildImmediateActionsBlock(level, state, historyText = "", plan = null) {
+function buildImmediateActionsBlock(level, state, historyText = "", research = null) {
   const lines = ["✅ 今すぐやること（これだけでOK）"];
-  const plannedActions = pickActionsForBlock(plan, 2);
+  const plannedActions = pickActionsForBlock(research, 2);
+  const sourceNames = Array.isArray(research?.sourceNames)
+    ? research.sourceNames.filter(Boolean).slice(0, 3)
+    : [];
   const fallbackActions = [
     {
       title:
@@ -2391,19 +2394,23 @@ function buildImmediateActionsBlock(level, state, historyText = "", plan = null)
   const finalActions = plannedActions.length > 0 ? plannedActions : fallbackActions;
   finalActions.slice(0, 2).forEach((action, idx) => {
     lines.push(formatActionTitleWithBullet(action.title));
-    lines.push(formatActionReasonLine(action.reason));
+    const reason =
+      idx === 0 && sourceNames.length > 0
+        ? `${action.reason}（参考: ${sourceNames.join(" / ")}）`
+        : action.reason;
+    lines.push(formatActionReasonLine(reason));
     if (idx < Math.min(finalActions.length, 2) - 1) lines.push("");
   });
   return lines.join("\n");
 }
 
-function ensureImmediateActionsBlock(text, level, state, historyText = "", plan = null) {
+function ensureImmediateActionsBlock(text, level, state, historyText = "", research = null) {
   if (!text) return text;
   if (level !== "🟡" && level !== "🟢") return text;
   return replaceSummaryBlock(
     text,
     "✅ 今すぐやること",
-    buildImmediateActionsBlock(level, state, historyText, plan)
+    buildImmediateActionsBlock(level, state, historyText, research)
   );
 }
 
@@ -4314,6 +4321,166 @@ function buildConcreteStatePatternMessage(state, summaryFacts = [], summarySecti
   return { message: lines.join("\n").trim(), query };
 }
 
+function collectConcreteSymptomTerms(state, summaryFacts = [], summarySection = "") {
+  const rawCandidates = [
+    state?.slotStatus?.severity?.value,
+    state?.slotStatus?.worsening?.value,
+    state?.slotStatus?.duration?.value,
+    state?.slotStatus?.impact?.value,
+    state?.slotStatus?.associated?.value,
+    state?.slotStatus?.cause_category?.value,
+    state?.causeDetailText,
+    state?.primarySymptom,
+    ...(Array.isArray(summaryFacts) ? summaryFacts : []),
+    ...extractBulletLinesFromText(summarySection || ""),
+  ]
+    .map((v) => String(v || "").trim())
+    .filter(Boolean);
+
+  const lexicon =
+    /(便秘|下痢|腹痛|お腹|胃痛|吐き気|嘔吐|キリキリ|ズキズキ|ヒリヒリ|締め付け|チクチク|しびれ|めまい|咳|せき|喉|のど|鼻水|発熱|寒気|だるい|赤み|発疹|水ぶくれ|乾燥|痛み\s*\d+\s*\/\s*10|さっきから|さっき|数時間|半日|一日以上|変化なし)/g;
+
+  const terms = [];
+  for (const raw of rawCandidates) {
+    const matches = raw.match(lexicon);
+    if (matches && matches.length > 0) {
+      matches.forEach((m) => terms.push(m.trim()));
+      continue;
+    }
+    // 辞書に乗らない具体語も拾うため、短い原文断片を保持
+    const clipped = raw.replace(/^・\s*/, "").replace(/^→\s*/, "").trim();
+    if (clipped.length > 1 && clipped.length <= 24) {
+      terms.push(clipped);
+    }
+  }
+  return Array.from(new Set(terms)).slice(0, 10);
+}
+
+function buildConcreteBilingualQueries(symptoms = []) {
+  const phrase = (Array.isArray(symptoms) ? symptoms : []).filter(Boolean).join(" ");
+  const safePhrase = phrase || "体調不良";
+  const queryJP = `${safePhrase} 原因 今の状態 どういう状況`;
+  const queryEN = `${safePhrase} possible causes current condition explanation`;
+  return { queryJP, queryEN };
+}
+
+function splitSearchFindings(results = []) {
+  const joined = (results || [])
+    .slice(0, 10)
+    .map((r) => `${r.title || ""} ${r.snippet || ""}`)
+    .join("\n");
+  const lines = joined
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const explanation = [];
+  const progression = [];
+  const checkpoints = [];
+
+  for (const line of lines) {
+    if (
+      /原因|related|associated|状態|condition|irritation|inflammation|trigger|誘因|刺激/.test(line) &&
+      explanation.length < 3
+    ) {
+      explanation.push(line);
+      continue;
+    }
+    if (
+      /悪化|長引|続く|progress|worsen|persist|flare|繰り返/.test(line) &&
+      progression.length < 3
+    ) {
+      progression.push(line);
+      continue;
+    }
+    if (
+      /受診|医療|emergency|red flag|warning sign|受診目安|救急|hospital|seek care/.test(line) &&
+      checkpoints.length < 3
+    ) {
+      checkpoints.push(line);
+      continue;
+    }
+  }
+
+  if (explanation.length === 0 && lines[0]) explanation.push(lines[0]);
+  if (progression.length === 0 && lines[1]) progression.push(lines[1]);
+  if (checkpoints.length === 0 && lines[2]) checkpoints.push(lines[2]);
+
+  return { explanation, progression, checkpoints };
+}
+
+function summarizeFindingLine(line, symptoms = []) {
+  const symptomText = (symptoms || []).slice(0, 3).join(" / ");
+  const cleaned = String(line || "")
+    .replace(/\s+/g, " ")
+    .replace(/[。\.]?\s*続きを読む.*$/i, "")
+    .trim();
+  if (!cleaned) return null;
+  return symptomText
+    ? `・${symptomText} という記載に近い文脈では、${cleaned}`
+    : `・${cleaned}`;
+}
+
+async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], summarySection = "") {
+  const symptoms = collectConcreteSymptomTerms(state, summaryFacts, summarySection);
+  const { queryJP, queryEN } = buildConcreteBilingualQueries(symptoms);
+
+  const [jaResults, enResults] = await Promise.all([
+    fetchGoogleCustomSearchResults(queryJP, "ja"),
+    fetchGoogleCustomSearchResults(queryEN, "en"),
+  ]);
+  const ranked = dedupeAndRankActionSearchResults([...jaResults, ...enResults], {
+    bodyPart: symptoms[0] || null,
+    painType: symptoms[1] || null,
+    duration: symptoms[2] || null,
+    triggers: symptoms,
+    associatedSymptoms: symptoms,
+  });
+  const top = ranked.slice(0, 8);
+  const findings = splitSearchFindings(top);
+  const sourceNames = Array.from(
+    new Set(top.filter((r) => r.trusted).map((r) => r.host).filter(Boolean))
+  ).slice(0, 4);
+
+  const lines = [
+    "あなたの状態の理解を深める",
+    "",
+    `抽出した症状語: ${symptoms.join(" / ") || "（抽出なし）"}`,
+    `検索クエリ(JP): ${queryJP}`,
+    `検索クエリ(EN): ${queryEN}`,
+    "",
+    "状態の説明",
+  ];
+  findings.explanation
+    .slice(0, 2)
+    .map((line) => summarizeFindingLine(line, symptoms))
+    .filter(Boolean)
+    .forEach((line) => lines.push(line));
+  lines.push("", "進行パターン");
+  findings.progression
+    .slice(0, 2)
+    .map((line) => summarizeFindingLine(line, symptoms))
+    .filter(Boolean)
+    .forEach((line) => lines.push(line));
+  lines.push("", "見極めポイント");
+  findings.checkpoints
+    .slice(0, 3)
+    .map((line) => summarizeFindingLine(line, symptoms))
+    .filter(Boolean)
+    .forEach((line) => lines.push(line));
+
+  if (sourceNames.length > 0) {
+    lines.push("", `参考ソース: ${sourceNames.join(" / ")}`);
+  }
+  return {
+    message: lines.join("\n").trim(),
+    query: `${queryJP} || ${queryEN}`,
+    queryJP,
+    queryEN,
+    sourceNames,
+  };
+}
+
 const ACTION_TRUSTED_MEDICAL_DOMAINS = [
   "mhlw.go.jp",
   "medlineplus.gov",
@@ -4342,20 +4509,38 @@ function isTrustedActionMedicalSource(url) {
   return ACTION_TRUSTED_MEDICAL_DOMAINS.some((domain) => host === domain || host.endsWith(`.${domain}`));
 }
 
+function compactConcreteMessageForQuery(detailMessage) {
+  const lines = String(detailMessage || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter(
+      (line) =>
+        !/^(あなたの状態の理解を深める|今の状態は、次のようなパターンと似ています。|現時点の安心材料|こんな変化があれば受診を検討|■)/.test(
+          line
+        )
+    )
+    .map((line) => line.replace(/^・\s*/, ""));
+  return lines.join("／").slice(0, 280);
+}
+
 function buildExternalActionSearchQuery(concrete, features) {
+  const mergedNarrative = compactConcreteMessageForQuery(concrete?.message || "");
   const parts = [
+    mergedNarrative,
     concrete?.query || "",
     features?.bodyPart || "",
     features?.painType || "",
     features?.duration || "",
     Array.isArray(features?.triggers) ? features.triggers.join(" ") : "",
     Array.isArray(features?.associatedSymptoms) ? features.associatedSymptoms.join(" ") : "",
+    "できること",
     "対処法",
     "self care",
   ]
     .filter(Boolean)
     .join(" / ");
-  return parts.replace(/\s{2,}/g, " ").trim().slice(0, 380);
+  return parts.replace(/\s{2,}/g, " ").trim().slice(0, 420);
 }
 
 async function fetchGoogleCustomSearchResults(query, language = "ja") {
@@ -4393,18 +4578,40 @@ async function fetchGoogleCustomSearchResults(query, language = "ja") {
   }
 }
 
-function dedupeAndRankActionSearchResults(results = []) {
+function computeSearchContextRelevance(item, features = {}) {
+  const text = `${item?.title || ""} ${item?.snippet || ""}`.toLowerCase();
+  let score = 0;
+  const cues = [
+    features?.bodyPart,
+    features?.painType,
+    features?.duration,
+    ...(Array.isArray(features?.triggers) ? features.triggers : []),
+    ...(Array.isArray(features?.associatedSymptoms) ? features.associatedSymptoms : []),
+  ]
+    .filter(Boolean)
+    .map((v) => String(v).toLowerCase());
+  for (const cue of cues) {
+    if (text.includes(cue)) score += 2;
+  }
+  if (/self[-\s]?care|care at home|対処|セルフケア|home treatment/.test(text)) score += 2;
+  return score;
+}
+
+function dedupeAndRankActionSearchResults(results = [], features = {}) {
   const seen = new Set();
   const out = [];
   for (const item of results) {
     const key = `${item.host}|${String(item.title || "").toLowerCase()}`;
     if (!item.link || seen.has(key)) continue;
     seen.add(key);
-    out.push(item);
+    out.push({
+      ...item,
+      relevance: computeSearchContextRelevance(item, features),
+    });
   }
   return out.sort((a, b) => {
-    if (a.trusted === b.trusted) return 0;
-    return a.trusted ? -1 : 1;
+    if (a.trusted !== b.trusted) return a.trusted ? -1 : 1;
+    return (b.relevance || 0) - (a.relevance || 0);
   });
 }
 
@@ -4602,7 +4809,10 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
     fetchGoogleCustomSearchResults(searchQuery, "ja"),
     fetchGoogleCustomSearchResults(searchQuery, "en"),
   ]);
-  const actionSearchResults = dedupeAndRankActionSearchResults([...jaSearch, ...enSearch]);
+  const actionSearchResults = dedupeAndRankActionSearchResults(
+    [...jaSearch, ...enSearch],
+    features
+  );
   const actionSearchText = actionSearchResults
     .slice(0, 10)
     .map((r) => `${r.title} ${r.snippet}`)
@@ -6233,11 +6443,11 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
-app.post("/api/state-patterns", (req, res) => {
+app.post("/api/state-patterns", async (req, res) => {
   try {
     const { conversationId, summaryFacts, summarySection } = req.body || {};
     const state = conversationId ? getOrInitConversationState(conversationId) : initConversationState();
-    const { message, query } = buildConcreteStatePatternMessage(
+    const { message, query, queryJP, queryEN, sourceNames } = await buildConcreteStateDetailsFromSearch(
       state,
       Array.isArray(summaryFacts) ? summaryFacts : [],
       summarySection || ""
@@ -6245,6 +6455,9 @@ app.post("/api/state-patterns", (req, res) => {
     return res.status(200).json({
       message,
       query,
+      queryJP,
+      queryEN,
+      sourceNames,
       sourcePolicy: [
         "公的機関",
         "大学病院",
@@ -6258,10 +6471,16 @@ app.post("/api/state-patterns", (req, res) => {
       message: [
         "あなたの状態の理解を深める",
         "",
-        "今の状態は、次のようなパターンと似ています。",
+        "抽出した症状語にもとづいて説明を準備しましたが、検索の取得に失敗しました。",
         "",
-        "■ 一時的な体調変化のパターン",
-        "このような症状では、生活リズムや負荷の影響で症状がゆらぐことがあります。",
+        "状態の説明",
+        "・今の症状語を中心に、原因と経過を追加確認するのが適切です。",
+        "",
+        "進行パターン",
+        "・症状の強さ・持続時間・新しい症状の有無を2〜3時間ごとに確認してください。",
+        "",
+        "見極めポイント",
+        "・悪化、長時間の持続、新しい強い症状が出たら受診を検討してください。",
       ].join("\n"),
       query: "",
       sourcePolicy: [],
