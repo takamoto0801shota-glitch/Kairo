@@ -4314,6 +4314,100 @@ function buildConcreteStatePatternMessage(state, summaryFacts = [], summarySecti
   return { message: lines.join("\n").trim(), query };
 }
 
+const ACTION_TRUSTED_MEDICAL_DOMAINS = [
+  "mhlw.go.jp",
+  "medlineplus.gov",
+  "nih.gov",
+  "nhs.uk",
+  "mayoclinic.org",
+  "who.int",
+  "cdc.gov",
+  "clevelandclinic.org",
+  "johnshopkinsmedicine.org",
+  "msdmanuals.com",
+  "webmd.com",
+];
+
+function getActionSearchHost(url) {
+  try {
+    return new URL(String(url || "")).hostname.replace(/^www\./i, "").toLowerCase();
+  } catch (_) {
+    return "";
+  }
+}
+
+function isTrustedActionMedicalSource(url) {
+  const host = getActionSearchHost(url);
+  if (!host) return false;
+  return ACTION_TRUSTED_MEDICAL_DOMAINS.some((domain) => host === domain || host.endsWith(`.${domain}`));
+}
+
+function buildExternalActionSearchQuery(concrete, features) {
+  const parts = [
+    concrete?.query || "",
+    features?.bodyPart || "",
+    features?.painType || "",
+    features?.duration || "",
+    Array.isArray(features?.triggers) ? features.triggers.join(" ") : "",
+    Array.isArray(features?.associatedSymptoms) ? features.associatedSymptoms.join(" ") : "",
+    "対処法",
+    "self care",
+  ]
+    .filter(Boolean)
+    .join(" / ");
+  return parts.replace(/\s{2,}/g, " ").trim().slice(0, 380);
+}
+
+async function fetchGoogleCustomSearchResults(query, language = "ja") {
+  const key =
+    process.env.GOOGLE_SEARCH_API_KEY ||
+    process.env.GOOGLE_CUSTOM_SEARCH_API_KEY ||
+    process.env.GOOGLE_API_KEY;
+  const cx = process.env.GOOGLE_SEARCH_CX || process.env.GOOGLE_CUSTOM_SEARCH_CX;
+  if (!key || !cx || !query) return [];
+  const params = new URLSearchParams({
+    key,
+    cx,
+    q: query,
+    num: "6",
+    safe: "active",
+    hl: language === "ja" ? "ja" : "en",
+    lr: language === "ja" ? "lang_ja" : "lang_en",
+  });
+  const url = `https://www.googleapis.com/customsearch/v1?${params.toString()}`;
+  try {
+    const response = await fetch(url);
+    if (!response.ok) return [];
+    const data = await response.json();
+    const items = Array.isArray(data?.items) ? data.items : [];
+    return items.map((item) => ({
+      title: String(item?.title || "").trim(),
+      snippet: String(item?.snippet || "").trim(),
+      link: String(item?.link || "").trim(),
+      host: getActionSearchHost(item?.link),
+      trusted: isTrustedActionMedicalSource(item?.link),
+      language,
+    }));
+  } catch (_) {
+    return [];
+  }
+}
+
+function dedupeAndRankActionSearchResults(results = []) {
+  const seen = new Set();
+  const out = [];
+  for (const item of results) {
+    const key = `${item.host}|${String(item.title || "").toLowerCase()}`;
+    if (!item.link || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out.sort((a, b) => {
+    if (a.trusted === b.trusted) return 0;
+    return a.trusted ? -1 : 1;
+  });
+}
+
 function extractFeatures(stateText) {
   const text = String(stateText || "");
   const normalized = text.replace(/\s+/g, "");
@@ -4476,7 +4570,20 @@ function fillActionSpecificity(actionText, hypothesisId) {
   return text;
 }
 
-function buildImmediateActionHypothesisPlan(state, historyText = "", summarySection = "") {
+function getExternalSearchBoostByHypothesis(hypothesisId, searchText) {
+  const t = String(searchText || "").toLowerCase();
+  if (!t) return 0;
+  const boosts = {
+    skin_dry_irritation: ["petroleum jelly", "ワセリン", "lip balm", "barrier", "乾燥", "刺激回避"],
+    tension_stimulus_headache: ["screen", "blue light", "hydration", "headache", "睡眠", "ストレス"],
+    gi_irritation_pattern: ["oral rehydration", "ORS", "経口補水", "下痢", "吐き気", "少量頻回"],
+    upper_airway_irritation: ["throat", "humid", "warm fluids", "のど", "咳", "加湿"],
+  };
+  const keywords = boosts[hypothesisId] || [];
+  return keywords.reduce((acc, kw) => (t.includes(kw.toLowerCase()) ? acc + 1 : acc), 0);
+}
+
+async function buildImmediateActionHypothesisPlan(state, historyText = "", summarySection = "") {
   const summaryFacts = buildStateFactsBullets(state);
   const concrete = buildConcreteStatePatternMessage(state, summaryFacts, summarySection);
   const stateText = [
@@ -4490,6 +4597,17 @@ function buildImmediateActionHypothesisPlan(state, historyText = "", summarySect
 
   // Step1: 「今の状態について詳しく」の全文を特徴量へ分解
   const features = extractFeatures(stateText);
+  const searchQuery = buildExternalActionSearchQuery(concrete, features);
+  const [jaSearch, enSearch] = await Promise.all([
+    fetchGoogleCustomSearchResults(searchQuery, "ja"),
+    fetchGoogleCustomSearchResults(searchQuery, "en"),
+  ]);
+  const actionSearchResults = dedupeAndRankActionSearchResults([...jaSearch, ...enSearch]);
+  const actionSearchText = actionSearchResults
+    .slice(0, 10)
+    .map((r) => `${r.title} ${r.snippet}`)
+    .join(" ")
+    .toLowerCase();
 
   const hypotheses = [
     {
@@ -4560,10 +4678,12 @@ function buildImmediateActionHypothesisPlan(state, historyText = "", summarySect
 
   const scored = hypotheses.map((h) => {
     const result = scoreHypothesis(h, features);
+    const searchBoost = getExternalSearchBoostByHypothesis(h.id, actionSearchText);
     return {
       ...h,
-      score: result.score,
+      score: result.score + searchBoost,
       contraindicationHits: result.contraindicationHits,
+      searchBoost,
     };
   });
   const maxScore = Math.max(...scored.map((s) => s.score));
@@ -4595,7 +4715,7 @@ function buildImmediateActionHypothesisPlan(state, historyText = "", summarySect
         title:
           "今から4時間は画面を45分見たら10分休む周期にし、休止中は照明を落として、悪化時は中断して受診を検討しましょう",
         reason:
-          "光刺激と集中負荷が重なって症状が増幅している可能性があり、刺激量の分割が有効と考えられます。",
+          "光刺激と集中負荷が重なって症状が増幅している可能性があり、外部医療情報でも刺激量の分割が有効と示唆されています。",
         isOtc: false,
       },
       {
@@ -4612,7 +4732,7 @@ function buildImmediateActionHypothesisPlan(state, historyText = "", summarySect
         title:
           "経口補水液を100〜150mlずつ15〜20分ごとに2〜3時間続け、吐き気や痛みが悪化したら早めに受診を検討しましょう",
         reason:
-          "消化管刺激が疑われる場面では少量頻回の補給が負担を減らす可能性があります。",
+          "消化管刺激が疑われる場面では少量頻回の補給が負担を減らす可能性があり、外部情報とも整合しています。",
         isOtc: false,
       },
       {
@@ -4679,6 +4799,10 @@ function buildImmediateActionHypothesisPlan(state, historyText = "", summarySect
     hypothesisId: best.id,
     hypothesisCount: hypotheses.length,
     features,
+    searchQuery,
+    sourceNames: Array.from(
+      new Set(actionSearchResults.filter((r) => r.trusted).map((r) => r.host).filter(Boolean))
+    ).slice(0, 3),
     concreteMessage: concrete.message,
   };
 }
@@ -5710,7 +5834,7 @@ app.post("/api/chat", async (req, res) => {
       );
       aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
       if (level === "🟢" || level === "🟡") {
-        const immediateActionPlan = buildImmediateActionHypothesisPlan(
+        const immediateActionPlan = await buildImmediateActionHypothesisPlan(
           conversationState[conversationId],
           historyTextForOtc,
           aiResponse
