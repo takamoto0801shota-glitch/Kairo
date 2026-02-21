@@ -1376,13 +1376,22 @@ function applySymptomFitFilter(candidates, plan) {
 }
 
 function scoreSingaporePreference(candidate) {
-  const text = [candidate?.name || "", candidate?.vicinity || "", ...(candidate?.types || [])].join(" ");
-  const hasJapanese = /(japanese|日本語|日系|nihon)/i.test(text);
+  const text = [
+    candidate?.name || "",
+    candidate?.vicinity || "",
+    ...(candidate?.types || []),
+    candidate?.details?.editorialSummary || "",
+    ...(candidate?.details?.reviewTexts || []).slice(0, 5).join(" "),
+  ].join(" ");
+  const hasJapaneseClinic = /(japanese|日系|nihon)/i.test(candidate?.name || "");
+  const hasJapaneseSupport = /(日本語対応|japanese support|japanese speaking|日本語)/i.test(text);
   const hasGp = /(gp|general practitioner|family|clinic)/i.test(text);
   const hasLargeHospital = /(hospital|medical centre|medical center)/i.test(text);
-  if (hasJapanese) return 4;
-  if (hasGp) return 2;
-  if (hasLargeHospital) return 1;
+  // 仕様順: 1)日系 2)日本語対応 3)GP/Family 4)大型病院
+  if (hasJapaneseClinic) return 40;
+  if (hasJapaneseSupport) return 30;
+  if (hasGp) return 20;
+  if (hasLargeHospital) return 10;
   return 0;
 }
 
@@ -1428,10 +1437,15 @@ function buildCareReviewSummary(candidate, plan) {
   const details = candidate?.details;
   const snippets = Array.isArray(details?.reviewTexts) ? details.reviewTexts.slice(0, 8) : [];
   if (snippets.length === 0) {
-    return `${plan?.symptomLabel || "現在の症状"}の相談先として、場所・評価・距離のバランスで選定しています。`;
+    return [
+      `${plan?.symptomLabel || "現在の症状"}の初期相談先として、立地・診療領域・評価の整合で選定しています。`,
+    ];
   }
   const joined = snippets.join(" ").toLowerCase();
   const points = [];
+  if (/(腹痛|gastro|digestive|消化器|stomach|abdominal)/.test(joined)) {
+    points.push(`${plan?.symptomLabel || "症状"}に関連する相談への対応が丁寧という記載`);
+  }
   if (/(explain|説明|丁寧|わかりやすい|careful)/.test(joined)) {
     points.push("説明が丁寧で相談しやすいという声");
   }
@@ -1444,7 +1458,7 @@ function buildCareReviewSummary(candidate, plan) {
   if (points.length === 0) {
     points.push("初期相談で利用しやすいという声");
   }
-  return `${plan?.symptomLabel || "現在の症状"}に関して、${points.slice(0, 2).join("、")}が見られます。`;
+  return points.slice(0, 3).map((p) => `・${p}`);
 }
 
 async function reverseGeocodeLocation(location) {
@@ -2174,8 +2188,13 @@ async function resolveCareCandidates(state, destination) {
   if (Array.isArray(names) && names.length > 0) {
     return buildFallbackPlaces(names, state?.locationSnapshot);
   }
-  // 最後の保険
-  return buildFallbackPlaces(["近くの医療機関"], state?.locationSnapshot);
+  // 最後の保険（症状カテゴリと国別に具体化）
+  const country = String(state?.locationContext?.country || "Japan");
+  const gpFallback =
+    (FALLBACK_GP_BY_COUNTRY[country] && FALLBACK_GP_BY_COUNTRY[country].length > 0)
+      ? FALLBACK_GP_BY_COUNTRY[country]
+      : FALLBACK_GP_BY_COUNTRY.Japan;
+  return buildFallbackPlaces(gpFallback.slice(0, 2), state?.locationSnapshot);
 }
 
 function buildHospitalBlock(state, historyText, hospitalRec) {
@@ -2221,10 +2240,23 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
   if (list.length > 0) {
     list.forEach((c, idx) => {
       const rank = idx === 0 ? "🏥" : "🏥";
+      const normalizedName =
+        String(c?.name || "").trim() === "近くの医療機関"
+          ? destination.label === "GP"
+            ? "近くのGP/内科クリニック"
+            : destination.label === "耳鼻科"
+              ? "近くの耳鼻科クリニック"
+              : "近くの医療機関"
+          : String(c?.name || "").trim();
       lines.push("");
-      lines.push(`${rank} ${c.name}`);
+      lines.push(`${rank} ${normalizedName}`);
       lines.push(`${plan?.symptomLabel || "現在の症状"}の初期診療に対応可能な候補です。`);
-      lines.push(buildCareReviewSummary(c, plan));
+      const reviewSummaryLines = buildCareReviewSummary(c, plan);
+      if (Array.isArray(reviewSummaryLines)) {
+        reviewSummaryLines.slice(0, 3).forEach((line) => lines.push(line));
+      } else {
+        lines.push(String(reviewSummaryLines || ""));
+      }
       lines.push("");
       lines.push("この場所をおすすめする理由：");
       const reasons = buildHospitalRecommendationReasons(c, plan);
@@ -2233,7 +2265,11 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
       } else {
         lines.push("・現在地から行きやすく、初期相談先として使いやすい候補です");
       }
-      lines.push(`📍現在地から${formatDistanceForCare(c.distanceM)}`);
+      lines.push(
+        Number.isFinite(c?.distanceM)
+          ? `📍現在地から${formatDistanceForCare(c.distanceM)}`
+          : "📍距離情報は取得できませんでした（現在地ベースの候補です）"
+      );
     });
   } else {
     lines.push("近くで受診しやすい医療機関を優先して案内します。");
@@ -4557,11 +4593,19 @@ function enforceConcreteModalStructure(message, options = {}) {
       sentenceCount += 1;
       idx += 1;
     }
-    // 情報量を増やす要件: きっかけ有効時は4文を超えても医学情報を優先追記
+    // きっかけ有効時: 最小4文・最大5文に制限（簡潔）
     if (isCauseValid) {
-      supplements.slice(idx).forEach((line) => {
-        if (!body.includes(line)) body.push(line);
-      });
+      while (sentenceCount < 5 && idx < supplements.length) {
+        if (!body.includes(supplements[idx])) {
+          body.push(supplements[idx]);
+          sentenceCount += 1;
+        }
+        idx += 1;
+      }
+      while (sentenceCount > 5 && body.length > 0) {
+        body.pop();
+        sentenceCount = countJapaneseSentences(body.join(" "));
+      }
     }
     selectedBlocks[0] = [selectedBlocks[0][0], ...body];
   }

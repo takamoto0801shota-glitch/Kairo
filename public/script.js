@@ -58,6 +58,31 @@ function renderQuestionPayload(payload) {
   return introLines.concat(payload.question).join("\n");
 }
 
+function splitHeaderIconAndName(headerText = "") {
+  const raw = String(headerText || "").trim();
+  const match = raw.match(/^(\S+)\s*(.*)$/);
+  if (!match) return { icon: "", name: raw };
+  return {
+    icon: match[1] || "",
+    name: (match[2] || "").trim(),
+  };
+}
+
+function appendHeaderTitleWithIcon(headerDiv, iconText, nameText) {
+  const titleWrap = document.createElement("div");
+  titleWrap.className = "section-title";
+  const iconEl = document.createElement("span");
+  iconEl.className = "section-icon";
+  iconEl.textContent = iconText || "";
+  const labelEl = document.createElement("span");
+  labelEl.className = "block-header-title";
+  titleWrap.appendChild(iconEl);
+  titleWrap.appendChild(labelEl);
+  headerDiv.appendChild(titleWrap);
+  labelEl.textContent = nameText || "";
+  return labelEl;
+}
+
 // Generate or get conversation ID
 function getConversationId() {
   let conversationId = localStorage.getItem(CONVERSATION_ID_KEY);
@@ -767,11 +792,10 @@ function addMessage(text, isUser = false, save = true) {
         (block?.header?.icon === "🤝" || block?.header?.icon === "📝") &&
         /今の状態について|いまの状態を整理します/.test(block?.header?.name || "");
       let detailButton = null;
-      let headerTitleEl = headerDiv;
+      const iconText = block?.header?.icon || splitHeaderIconAndName(headerText).icon;
+      const nameText = block?.header?.name || splitHeaderIconAndName(headerText).name;
+      const headerTitleEl = appendHeaderTitleWithIcon(headerDiv, iconText, "");
       if (isStateBlock) {
-        headerTitleEl = document.createElement("span");
-        headerTitleEl.className = "block-header-title";
-        headerDiv.appendChild(headerTitleEl);
         detailButton = document.createElement("button");
         detailButton.type = "button";
         detailButton.className = "block-header-action";
@@ -784,7 +808,7 @@ function addMessage(text, isUser = false, save = true) {
       }
       
       if (headerText) {
-        appendLinesSequentially(headerTitleEl, headerText, () => {
+        appendLinesSequentially(headerTitleEl, nameText || headerText, () => {
           appendLinesSequentially(contentDiv, block.content || "", () => {
             if (detailButton) detailButton.disabled = false;
             blockIndex += 1;
@@ -838,7 +862,8 @@ function addSummaryBlock(messageDiv, fullText) {
   
   const headerDiv = document.createElement("div");
   headerDiv.className = "block-header";
-  headerDiv.textContent = summaryBlock.header;
+  const parsedHeader = splitHeaderIconAndName(summaryBlock.header || "");
+  appendHeaderTitleWithIcon(headerDiv, parsedHeader.icon, parsedHeader.name);
   blockDiv.appendChild(headerDiv);
   
   const contentDiv = document.createElement("div");

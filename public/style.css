@@ -390,6 +390,22 @@ body {
     border-bottom: 2px solid #e8e8e8;
 }
 
+.message.ai .section-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.message.ai .section-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    font-size: 20px;
+    flex-shrink: 0;
+}
+
 .message.ai .block-header-title {
     display: inline-block;
 }
