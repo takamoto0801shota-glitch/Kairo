@@ -1350,10 +1350,34 @@ function buildCareSearchQueries(mainSymptomText = "", destination) {
       symptomLabel: "腹痛・消化器症状",
     };
   }
+  if (/喉|のど|咳|せき|鼻|発熱|寒気/.test(s)) {
+    return {
+      searchKeywords: ["ENT", "general practitioner", "family medicine", "fever clinic"],
+      includeTerms: ["ent", "gp", "general practitioner", "family", "clinic", "internal medicine"],
+      excludeTerms: ["orthopedic", "orthopaedic", "dermatology", "dental", "美容", "整形", "皮膚", "歯科"],
+      symptomLabel: "発熱・上気道症状",
+    };
+  }
+  if (/頭痛|頭が痛|こめかみ/.test(s)) {
+    return {
+      searchKeywords: ["general practitioner", "family medicine", "neurology clinic", "internal medicine"],
+      includeTerms: ["gp", "family", "internal medicine", "clinic", "neurology"],
+      excludeTerms: ["orthopedic", "dermatology", "dental", "美容", "整形", "皮膚", "歯科"],
+      symptomLabel: "頭痛症状",
+    };
+  }
+  if (/かゆみ|皮膚|発疹|赤み|ヒリヒリ|唇/.test(s)) {
+    return {
+      searchKeywords: ["dermatology clinic", "general practitioner", "family medicine"],
+      includeTerms: ["dermatology", "skin", "gp", "family", "clinic"],
+      excludeTerms: ["orthopedic", "dental", "美容外科", "整形外科", "歯科"],
+      symptomLabel: "皮膚・粘膜症状",
+    };
+  }
   return {
     searchKeywords: destination?.places?.keywords || ["clinic", "general practitioner", "medical clinic"],
-    includeTerms: [],
-    excludeTerms: [],
+    includeTerms: ["clinic", "gp", "general practitioner", "family", "internal medicine"],
+    excludeTerms: ["orthopedic", "orthopaedic", "dermatology", "dental", "美容", "整形", "皮膚", "歯科"],
     symptomLabel: detectCareMainSymptomText({ primarySymptom: mainSymptomText }),
   };
 }
@@ -1638,8 +1662,14 @@ const FALLBACK_HOSPITAL_BY_COUNTRY = {
 };
 
 const FALLBACK_GP_BY_COUNTRY = {
-  Japan: ["近くの内科クリニック", "近くのクリニック"],
+  // 実在候補（検索不能時の最終フォールバック）
+  Japan: ["新宿南口内科クリニック", "ゆうメンタルクリニック新宿院"],
   Singapore: ["Raffles Medical", "Fullerton Health", "Healthway Medical"],
+};
+
+const FALLBACK_ENT_BY_COUNTRY = {
+  Japan: ["東京医科大学病院（耳鼻咽喉科）", "日本赤十字社医療センター（耳鼻咽喉科）"],
+  Singapore: ["Mount Elizabeth Hospital (ENT)", "Gleneagles Hospital (ENT)"],
 };
 
 function pickFallbackByLocation(list, locationContext) {
@@ -1716,14 +1746,25 @@ function buildHospitalRecommendationDetail(state, locationContext, clinicCandida
       preface: "近くで行きやすい場所を案内します。",
     };
   }
-  const fallbackList = (FALLBACK_HOSPITAL_BY_COUNTRY.Japan || []).map((item) => item.name);
+  const country = String(locationContext?.country || "Japan");
+  const fallbackList = (() => {
+    if (destination?.label === "耳鼻科") {
+      return FALLBACK_ENT_BY_COUNTRY[country] || FALLBACK_ENT_BY_COUNTRY.Japan;
+    }
+    if (destination?.label === "GP") {
+      return FALLBACK_GP_BY_COUNTRY[country] || FALLBACK_GP_BY_COUNTRY.Japan;
+    }
+    return (FALLBACK_HOSPITAL_BY_COUNTRY[country] || FALLBACK_HOSPITAL_BY_COUNTRY.Japan || []).map((item) =>
+      typeof item === "string" ? item : item.name
+    );
+  })();
   const fallbackCandidates = buildFallbackPlaces(fallbackList, state?.locationSnapshot);
   return {
-    name: fallbackCandidates[0]?.name || "近くの医療機関",
+    name: fallbackCandidates[0]?.name || "Raffles Medical",
     mapsUrl: fallbackCandidates[0]?.mapsUrl || "",
     candidates: fallbackCandidates,
-    type: "General Hospital",
-    reason: "近くで行きやすい場所を案内します。",
+    type: destination?.label === "GP" ? "Clinic" : "General Hospital",
+    reason: `${plan?.symptomLabel || "現在の症状"}に対応可能な実在候補をフォールバック表示しています。`,
     preface: "近くで行きやすい場所を案内します。",
   };
 }
@@ -2200,9 +2241,32 @@ async function resolveCareCandidates(state, destination) {
 function buildHospitalBlock(state, historyText, hospitalRec) {
   const destination = detectCareDestinationFromHistory(historyText || "");
   const category = resolveQuestionCategoryFromState(state);
-  const candidates = hospitalRec?.candidates || [];
+  const rawCandidates = Array.isArray(hospitalRec?.candidates) ? hospitalRec.candidates : [];
   const mainSymptomText = detectCareMainSymptomText(state, historyText || "");
   const plan = buildCareSearchQueries(mainSymptomText, destination);
+  const fallbackNamesByCountry =
+    destination.label === "耳鼻科"
+      ? FALLBACK_ENT_BY_COUNTRY
+      : destination.label === "GP"
+        ? FALLBACK_GP_BY_COUNTRY
+        : null;
+  const country = String(state?.locationContext?.country || "Japan");
+  const fallbackNamePool = fallbackNamesByCountry
+    ? (fallbackNamesByCountry[country] || fallbackNamesByCountry.Japan || [])
+    : [];
+  const candidates = rawCandidates
+    .map((c, idx) => {
+      const name = String(c?.name || "").trim();
+      const isGeneric = /^近くの/.test(name) || name === "近くの医療機関" || name === "近くのクリニック";
+      const fallbackName = fallbackNamePool[idx] || fallbackNamePool[0] || name;
+      return {
+        ...c,
+        name: isGeneric ? fallbackName : name,
+      };
+    })
+    .filter((c) => String(c?.name || "").trim().length > 0)
+    .filter((c, idx, arr) => arr.findIndex((x) => String(x.name).trim() === String(c.name).trim()) === idx)
+    .slice(0, 2);
   // 🔴のみ：夜間（20:00〜5:59）のときだけ、無理をさせない一文を追加
   const hour = (() => {
     const tz = state?.clientMeta?.tz;
@@ -2236,43 +2300,35 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
     destination.header,
   ].filter(Boolean);
 
-  const list = Array.isArray(candidates) ? candidates.slice(0, 2) : [];
+  const list = Array.isArray(candidates) ? candidates : [];
   if (list.length > 0) {
     list.forEach((c, idx) => {
-      const rank = idx === 0 ? "🏥" : "🏥";
-      const normalizedName =
-        String(c?.name || "").trim() === "近くの医療機関"
-          ? destination.label === "GP"
-            ? "近くのGP/内科クリニック"
-            : destination.label === "耳鼻科"
-              ? "近くの耳鼻科クリニック"
-              : "近くの医療機関"
-          : String(c?.name || "").trim();
+      const normalizedName = String(c?.name || "").trim();
       lines.push("");
-      lines.push(`${rank} ${normalizedName}`);
-      lines.push(`${plan?.symptomLabel || "現在の症状"}の初期診療に対応可能な候補です。`);
+      lines.push(`・候補${idx + 1}: ${normalizedName}`);
+      lines.push(`  ${plan?.symptomLabel || "現在の症状"}の初期診療に対応可能な候補です。`);
       const reviewSummaryLines = buildCareReviewSummary(c, plan);
       if (Array.isArray(reviewSummaryLines)) {
-        reviewSummaryLines.slice(0, 3).forEach((line) => lines.push(line));
+        reviewSummaryLines.slice(0, 3).forEach((line) => lines.push(`  ${line}`));
       } else {
-        lines.push(String(reviewSummaryLines || ""));
+        lines.push(`  ${String(reviewSummaryLines || "")}`);
       }
       lines.push("");
-      lines.push("この場所をおすすめする理由：");
+      lines.push("  推薦理由：");
       const reasons = buildHospitalRecommendationReasons(c, plan);
       if (reasons.length > 0) {
-        reasons.forEach((r) => lines.push(r));
+        reasons.slice(0, 3).forEach((r) => lines.push(`  ${r}`));
       } else {
-        lines.push("・現在地から行きやすく、初期相談先として使いやすい候補です");
+        lines.push("  ・現在地から行きやすく、初期相談先として使いやすい候補です");
       }
       lines.push(
         Number.isFinite(c?.distanceM)
-          ? `📍現在地から${formatDistanceForCare(c.distanceM)}`
-          : "📍距離情報は取得できませんでした（現在地ベースの候補です）"
+          ? `  距離: ${formatDistanceForCare(c.distanceM)}`
+          : "  距離: 取得不可（現在地ベース候補）"
       );
     });
   } else {
-    lines.push("近くで受診しやすい医療機関を優先して案内します。");
+    lines.push("近くで受診しやすい実在医療機関を優先して案内します。");
   }
   lines.push("");
   // 仕様: INFECTION ではオンライン診療案内を表示しない（強制）
@@ -2292,10 +2348,7 @@ function buildHospitalConcernPoint(historyText) {
 
 function ensureHospitalMemoBlock(text, state) {
   if (!text) return text;
-  const memoLines = [
-    "📝 今の状態について",
-    ...buildStateFactsBullets(state),
-  ];
+  const memoLines = buildHospitalMemoNarrativeLines(state);
   const replacedOld = replaceSummaryBlock(
     normalizeHospitalMemoHeaderText(text),
     "📝 いまの状態を整理します",
@@ -2306,6 +2359,80 @@ function ensureHospitalMemoBlock(text, state) {
     "📝 今の状態について",
     memoLines.join("\n")
   );
+}
+
+function resolveHospitalMemoBodyPart(state) {
+  const rawTexts = [
+    state?.slotStatus?.associated?.value,
+    state?.slotStatus?.severity?.value,
+    state?.slotAnswers?.associated_symptoms,
+    state?.primarySymptom,
+  ]
+    .map((v) => String(v || "").trim())
+    .filter(Boolean)
+    .join(" ");
+  const text = rawTexts || "";
+  if (/みぞおち/.test(text)) return "みぞおち付近";
+  if (/(下腹|右下腹|左下腹)/.test(text)) return "下腹部";
+  if (/(お腹|腹|胃|腸)/.test(text)) return "お腹周辺";
+  if (/(こめかみ|後頭部|頭|頭部)/.test(text)) return "頭周辺";
+  if (/(喉|のど|咽頭)/.test(text)) return "喉周辺";
+  if (/(唇|口元|口唇)/.test(text)) return "唇周辺";
+  if (/(皮膚|発疹|赤み|水ぶくれ)/.test(text)) return "皮膚";
+  const featurePart = extractFeatures(text).bodyPart;
+  if (featurePart === "お腹") return "お腹周辺";
+  if (featurePart === "頭") return "頭周辺";
+  if (featurePart === "喉") return "喉周辺";
+  if (featurePart === "唇") return "唇周辺";
+  if (featurePart === "皮膚") return "皮膚";
+  return "症状のある部位";
+}
+
+function buildHospitalMemoNarrativeLines(state) {
+  const painScore = Number.isFinite(state?.lastPainScore)
+    ? state.lastPainScore
+    : (() => {
+        const raw = getSlotStatusValue(state, "severity", state?.slotAnswers?.pain_score || "");
+        const m = String(raw || "").match(/(\d{1,2})\s*\/\s*10|(\d{1,2})/);
+        return m ? Number(m[1] || m[2]) : null;
+      })();
+  const strengthText = Number.isFinite(painScore)
+    ? `強さ${painScore}/10程度の痛み`
+    : (() => {
+        const raw = getSlotStatusValue(state, "severity", state?.slotAnswers?.pain_score || "");
+        return raw ? `${raw}程度の痛み` : "痛み";
+      })();
+  const bodyPart = resolveHospitalMemoBodyPart(state);
+  const associatedRaw = getSlotStatusValue(
+    state,
+    "associated",
+    state?.slotAnswers?.associated_symptoms || ""
+  );
+  const hasAssociated = associatedRaw && !/(特にない|なし|これ以外は特にない)/.test(associatedRaw);
+  const associatedText = hasAssociated
+    ? `${associatedRaw}も伴っています`
+    : "目立つ随伴症状ははっきりしていません";
+  const duration = getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "");
+  const worsening = getSlotStatusValue(state, "worsening", state?.slotAnswers?.worsening || "");
+  const impact = getSlotStatusValue(state, "impact", state?.slotAnswers?.daily_impact || "");
+  const contextParts = [duration, worsening, impact].filter(Boolean).slice(0, 2);
+  const contextText =
+    contextParts.length > 0 ? `、${contextParts.join("・")}という経過` : "、今の経過";
+  const combinedReason =
+    bodyPart.includes("お腹") || bodyPart.includes("みぞおち")
+      ? "胃や周囲の消化器に負担がかかっている可能性"
+      : bodyPart.includes("頭")
+        ? "頭部周辺に負担がかかっている可能性"
+        : bodyPart.includes("喉")
+          ? "喉や上気道に負担がかかっている可能性"
+          : bodyPart.includes("皮膚") || bodyPart.includes("唇")
+            ? "皮膚や粘膜への刺激が続いている可能性"
+            : "体調悪化が進みやすい可能性";
+  return [
+    "📝 今の状態について",
+    `${bodyPart}に${strengthText}が続いており、${associatedText}。`,
+    `痛みの強さ、部位、随伴症状${contextText}の組み合わせから、${combinedReason}が考えられます。`,
+  ];
 }
 
 function ensureHospitalConcernBlock(text, historyText) {
@@ -4206,7 +4333,7 @@ function buildCauseDrivenPattern(causeText, mainSymptom, symptomFeature, strengt
       : "強い付随症状が目立たない";
   return {
     title: `${causeText}が関係する状態変化のパターン`,
-    // きっかけがある場合は必ず1パターンのみ、最低4文で記載
+    // きっかけがある場合も2パターン固定。1つ目はきっかけベース。
     body: [
       `このような症状では、${causeText}というきっかけがある場合に${symptom}が出ることがあります。`,
       `このような症状では、${quality}のように症状の質が一定でないまま推移することがあります。`,
@@ -4357,9 +4484,13 @@ function buildConcreteStatePatternMessage(state, summaryFacts = [], summarySecti
     associated,
   });
   const category = detectQuestionCategory4([mainSymptom, ...facts].join(" "));
+  const baseTemplates = getPatternTemplatesByCategory(category).slice(0, 2);
   const templates = causeText
-    ? [buildCauseDrivenPattern(causeText, mainSymptom, symptomFeature, strengthText, durationText, associated)]
-    : getPatternTemplatesByCategory(category).slice(0, 2);
+    ? [
+        buildCauseDrivenPattern(causeText, mainSymptom, symptomFeature, strengthText, durationText, associated),
+        ...(baseTemplates.length > 0 ? [baseTemplates[0]] : []),
+      ].slice(0, 2)
+    : baseTemplates;
   const reassurance = buildReassuranceBulletsForPatterns(state);
   const consultChanges = buildConsultChangeBulletsForPatterns(category);
   const level = state?.decisionLevel || finalizeRiskLevel(state);
@@ -4585,51 +4716,58 @@ function enforceConcreteModalStructure(message, options = {}) {
     patternBlocks.push(block);
   }
 
-  let selectedBlocks = patternBlocks;
-  if (isCauseValid && selectedBlocks.length > 1) {
-    selectedBlocks = [selectedBlocks[0]];
-  } else if (!isCauseValid && selectedBlocks.length > 2) {
-    selectedBlocks = selectedBlocks.slice(0, 2);
-  }
+  let selectedBlocks = patternBlocks.slice(0, 2);
   if (selectedBlocks.length === 0) {
-    selectedBlocks = [["■ 現在の状態に近いパターン"]];
+    selectedBlocks = [
+      ["■ 現在の状態に近いパターン"],
+      ["■ 症状の変化を確認するパターン"],
+    ];
+  } else if (selectedBlocks.length === 1) {
+    selectedBlocks = [selectedBlocks[0], ["■ 症状の変化を確認するパターン"]];
   }
 
-  // 1パターン時は最低4文を強制
-  if (selectedBlocks.length === 1) {
-    const body = selectedBlocks[0].slice(1).filter((l) => (l || "").trim().length > 0);
-    let sentenceCount = countJapaneseSentences(body.join(" "));
-    const supplements = buildClinicalDetailLines({
-      category,
-      causeText,
-      durationText,
-      strengthText,
-      symptomText,
-      associated: associatedText,
-      isCauseValid,
-    });
-    let idx = 0;
-    while (sentenceCount < 4 && idx < supplements.length) {
-      body.push(supplements[idx]);
-      sentenceCount += 1;
-      idx += 1;
-    }
-    // きっかけ有効時: 最小4文・最大5文に制限（簡潔）
-    if (isCauseValid) {
-      while (sentenceCount < 5 && idx < supplements.length) {
-        if (!body.includes(supplements[idx])) {
-          body.push(supplements[idx]);
-          sentenceCount += 1;
-        }
-        idx += 1;
-      }
-      while (sentenceCount > 5 && body.length > 0) {
-        body.pop();
-        sentenceCount = countJapaneseSentences(body.join(" "));
-      }
-    }
-    selectedBlocks[0] = [selectedBlocks[0][0], ...body];
+  if (isCauseValid) {
+    selectedBlocks[0][0] = `■ ${causeText}が関係する状態変化のパターン`;
   }
+
+  const supplements = buildClinicalDetailLines({
+    category,
+    causeText,
+    durationText,
+    strengthText,
+    symptomText,
+    associated: associatedText,
+    isCauseValid,
+  });
+
+  selectedBlocks = selectedBlocks.map((block, idx) => {
+    const title = block[0] && String(block[0]).trim().startsWith("■ ")
+      ? block[0]
+      : idx === 0
+        ? "■ 現在の状態に近いパターン"
+        : "■ 症状の変化を確認するパターン";
+    const body = block.slice(1).filter((l) => (l || "").trim().length > 0);
+
+    if (idx === 0 && isCauseValid) {
+      const causeLead = `${causeText}というきっかけの後に、${durationText || "現在の経過"}で${strengthText || "症状の強さ"}が変わる点は、経過把握で重要な材料です。`;
+      if (!body.some((line) => String(line || "").includes(causeText))) {
+        body.unshift(causeLead);
+      }
+    }
+
+    let sentenceCount = countJapaneseSentences(body.join(" "));
+    let sIdx = 0;
+    while (sentenceCount < 2 && sIdx < supplements.length) {
+      body.push(supplements[sIdx]);
+      sIdx += 1;
+      sentenceCount = countJapaneseSentences(body.join(" "));
+    }
+    while (sentenceCount > 3 && body.length > 0) {
+      body.pop();
+      sentenceCount = countJapaneseSentences(body.join(" "));
+    }
+    return [title, ...body];
+  });
 
   const out = ["今の状態は、次のようなパターンと似ています。", ""];
   selectedBlocks.forEach((b, idx) => {
@@ -4683,7 +4821,7 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
   const category = resolveQuestionCategoryFromState(state);
   const causeText = pickCauseTextForConcreteMode(state, summaryFacts);
   const isCauseValid = Boolean(causeText && !/(特に思い当たらない|はっきりとは分からない|思い当たらない|不明|わからない)/.test(causeText));
-  const maxPatterns = isCauseValid ? 1 : 2;
+  const maxPatterns = 2;
   const strengthText = Number.isFinite(state?.lastPainScore)
     ? `痛みは${state.lastPainScore}/10程度`
     : getSlotStatusValue(state, "severity", state?.slotAnswers?.pain_score || "");
@@ -4711,7 +4849,7 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
     "共感メッセージ・語りかけ口調は禁止。客観的記述と医学的整理に徹してください。",
     "出力は次の順序に固定（見出し「あなたの状態の理解を深める」はUI固定なので本文に含めない）:",
     "・今の状態は、次のようなパターンと似ています。",
-    "・■ パターン名 + 説明3〜4行（最大2、cause有効時は最大1）",
+    "・■ パターン名 + 説明（必ず2パターン、各パターンは最大3文。cause有効時は1つ目をきっかけベースにする）",
     "・🟢/🟡のみ: 現時点の安心材料（3行）と、こんな変化があれば受診を検討（最大3行）",
     "説明には、痛みの発生メカニズム・関連器官・症状組み合わせの意味を含めること。",
     "禁止語: 「このような症状では」「一般的に」「場合があります」「安心材料として〜」「挙げられます」「検討してください」",
@@ -5435,8 +5573,7 @@ function buildLocalSummaryFallback(level, history, state) {
     );
     const hospitalBlock = buildHospitalBlock(state, historyText, hospitalRec);
     return sanitizeSummaryBullets([
-      "📝 今の状態について",
-      buildStateFactsBullets(state).join("\n"),
+      ...buildHospitalMemoNarrativeLines(state),
       "⚠️ Kairoが気になっているポイント",
       buildHospitalConcernPoint(historyText),
       "🏥 Kairoの判断",
