@@ -5140,6 +5140,81 @@ function extractFeatures(stateText) {
   };
 }
 
+function extractSymptomKeywordsFromText(text) {
+  const raw = String(text || "");
+  const lexicon =
+    /(便秘|下痢|腹痛|お腹|胃痛|吐き気|嘔吐|キリキリ|ズキズキ|ヒリヒリ|締め付け|チクチク|しびれ|めまい|咳|せき|喉|のど|鼻水|発熱|寒気|だるい|赤み|発疹|水ぶくれ|乾燥|痛み\s*\d+\s*\/\s*10|さっきから|さっき|数時間|半日|一日以上|変化なし)/g;
+  const matches = raw.match(lexicon) || [];
+  return Array.from(new Set(matches.map((m) => String(m || "").trim()).filter(Boolean))).slice(0, 12);
+}
+
+function parseNumericSignalsFromText(text) {
+  const raw = String(text || "");
+  const compact = raw.replace(/\s+/g, "");
+  const painMatch = raw.match(/(\d{1,2})\s*\/\s*10|痛み[はが]?\s*(\d{1,2})/);
+  const painScore = Number(painMatch?.[1] || painMatch?.[2] || NaN);
+  const tempMatch = raw.match(/(\d{2}(?:\.\d)?)\s*度/);
+  const temperatureC = Number(tempMatch?.[1] || NaN);
+  const durationMatches = [...raw.matchAll(/(\d+)\s*(分|時間|日|週間)/g)].map((m) => ({
+    value: Number(m[1]),
+    unit: m[2],
+  }));
+  const hasFeverNegation = /(発熱なし|熱はない|熱なし|平熱)/.test(compact);
+  return {
+    painScore: Number.isFinite(painScore) ? painScore : null,
+    temperatureC: Number.isFinite(temperatureC) ? temperatureC : null,
+    durationSignals: durationMatches.slice(0, 4),
+    hasFeverNegation,
+  };
+}
+
+function buildStructuredUserInputForLlm(text, state = null) {
+  const features = extractFeatures(text);
+  const numeric = parseNumericSignalsFromText(text);
+  const keywords = extractSymptomKeywordsFromText(text);
+  const slotSnapshot = {
+    severity: getSlotStatusValue(state, "severity", state?.slotAnswers?.pain_score || "") || null,
+    worsening: getSlotStatusValue(state, "worsening", state?.slotAnswers?.worsening || "") || null,
+    duration: getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "") || null,
+    impact: getSlotStatusValue(state, "impact", state?.slotAnswers?.daily_impact || "") || null,
+    associated: getSlotStatusValue(state, "associated", state?.slotAnswers?.associated_symptoms || "") || null,
+    cause_category: getSlotStatusValue(state, "cause_category", state?.slotAnswers?.cause_category || "") || null,
+  };
+  return {
+    numeric_signals: numeric,
+    symptom_keywords: keywords,
+    feature_signals: {
+      bodyPart: features.bodyPart,
+      painType: features.painType,
+      duration: features.duration,
+      onsetType: features.onsetType,
+      triggers: features.triggers,
+      associatedSymptoms: features.associatedSymptoms,
+      severityHint: features.severityHint,
+    },
+    slot_snapshot: slotSnapshot,
+  };
+}
+
+function buildStructuredConversationForLlm(history = [], state = null) {
+  const safeHistory = Array.isArray(history) ? history.filter((m) => m && m.role !== "system").slice(-14) : [];
+  return safeHistory.map((msg) => {
+    if (msg.role !== "user") {
+      return {
+        role: msg.role,
+        content: String(msg.content || "").slice(0, 600),
+      };
+    }
+    return {
+      role: "user",
+      content: JSON.stringify({
+        type: "structured_user_input",
+        payload: buildStructuredUserInputForLlm(msg.content, state),
+      }),
+    };
+  });
+}
+
 function hasAnyMatch(value, candidates = []) {
   if (!value || !Array.isArray(candidates)) return false;
   return candidates.includes(value);
@@ -6375,10 +6450,14 @@ app.post("/api/chat", async (req, res) => {
       }
     }
     const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n判断スロット埋まり数: ${slotsFilledCount}/6\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n緊急度判定は「危険フラグ優先モデル」を使用する（Phase1: 即時RED条件 / Phase2: 重症指数）。\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が7以上、または判断スロットが6つ埋まった時点で必ず判定・まとめへ移行する。\n※内部計算はユーザーに表示しないこと。最終判断はまとめ直前の1回のみ実行すること。`;
+    const structuredConversation = buildStructuredConversationForLlm(
+      conversationHistory[conversationId],
+      conversationState[conversationId]
+    );
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini", // Cost-effective model
       messages: [
-        ...conversationHistory[conversationId],
+        ...structuredConversation,
         { role: "system", content: scoreContext },
       ],
       temperature: 0.7,
@@ -6459,11 +6538,15 @@ app.post("/api/chat", async (req, res) => {
         ? `\n薬局名は「${pharmacyRec.name}」を優先してください。\n薬名は例示で2〜3件、一般名＋商品名で示し、末尾に「最終判断は薬剤師に相談してください。これは一般的に現地で使われる選択肢です。」を入れてください。\n`
         : "\n薬局名は国・都市レベルで具体名を1件提示し、薬名は例示で2〜3件、一般名＋商品名で示してください。\n末尾に「最終判断は薬剤師に相談してください。これは一般的に現地で使われる選択肢です。」を入れてください。\n";
       locationRePromptBeforeSummary = null;
+      const summaryContextMessages = buildStructuredConversationForLlm(
+        conversationHistory[conversationId],
+        conversationState[conversationId]
+      );
       const summaryOnlyMessages = [
         { role: "system", content: buildRepairPrompt(level) },
         { role: "system", content: clinicHint },
         { role: "system", content: pharmacyHint },
-        ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
+        ...summaryContextMessages,
       ];
       const forced = await openai.chat.completions.create({
         model: "gpt-4o-mini",
@@ -6475,7 +6558,7 @@ app.post("/api/chat", async (req, res) => {
       if (!hasAllSummaryBlocks(aiResponse)) {
         const strictMessages = [
           { role: "system", content: buildRepairPrompt(level) + "\n\n不足ブロックがある場合は必ず補完して、全ブロックを完成させてください。" },
-          ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
+          ...summaryContextMessages,
         ];
         const strict = await openai.chat.completions.create({
           model: "gpt-4o-mini",
@@ -6490,7 +6573,7 @@ app.post("/api/chat", async (req, res) => {
           model: "gpt-4o-mini",
           messages: [
             { role: "system", content: buildRepairPrompt(level) },
-            ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
+            ...summaryContextMessages,
           ],
           temperature: 0.7,
           max_tokens: 1000,
@@ -6657,7 +6740,7 @@ app.post("/api/chat", async (req, res) => {
 `;
       const questionMessages = [
         { role: "system", content: questionOnlyPrompt },
-        ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
+        ...structuredConversation,
       ];
       const reask = await openai.chat.completions.create({
         model: "gpt-4o-mini",
@@ -6763,7 +6846,7 @@ app.post("/api/chat", async (req, res) => {
 `;
       const finalMessages = [
         { role: "system", content: finalQuestionPrompt },
-        ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
+        ...structuredConversation,
       ];
       const finalAsk = await openai.chat.completions.create({
         model: "gpt-4o-mini",
@@ -6799,7 +6882,7 @@ app.post("/api/chat", async (req, res) => {
       if (needsRepair) {
         const repairMessages = [
           { role: "system", content: buildRepairPrompt(updatedLevel) },
-          ...conversationHistory[conversationId].filter((msg) => msg.role !== "system"),
+          ...structuredConversation,
         ];
         const repaired = await openai.chat.completions.create({
           model: "gpt-4o-mini",
