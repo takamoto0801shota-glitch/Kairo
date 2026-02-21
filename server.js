@@ -271,9 +271,9 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 **推奨フレーズ（選択式で提示）：**
 - 「その前後で、何かきっかけになりそうなことは思い当たりますか？
 
-	・	特に思い当たらない
-	・	何か思い当たるかも
-	・	はっきりとは分からない」
+	・	スマホやパソコンを長時間見た
+	・	寝不足や疲れが続いている
+	・	強いストレスや緊張があった」
 
 - 「普段と少し違うことはありませんでしたか？
 
@@ -2350,91 +2350,61 @@ function ensureOutlookBlock(text, state) {
   return replaceSummaryBlock(text, "⏳ 今後の見通し", buildOutlookBlock(state));
 }
 
-function buildImmediateActionsBlock(level, state, historyText = "") {
-  const restLevel = resolveRestLevelFromState(state);
-  const symptomSource = historyText || Object.values(state?.slotAnswers || {}).join("\n");
-  const category = detectSymptomCategory(symptomSource);
+function formatActionTitleWithBullet(title) {
+  const raw = String(title || "").trim();
+  if (!raw) return "・まずは無理をせず安静を優先しましょう";
+  return raw.startsWith("・") ? raw : `・${raw}`;
+}
+
+function formatActionReasonLine(reason) {
+  const raw = String(reason || "").trim();
+  if (!raw) return "→ 今の状態で負担を減らす行動は、回復を早める助けになります。";
+  return raw.startsWith("→") ? raw : `→ ${raw}`;
+}
+
+function pickActionsForBlock(plan, maxCount = 2) {
+  const actions = Array.isArray(plan?.actions) ? plan.actions : [];
+  const picked = [];
+  let otcUsed = false;
+  for (const action of actions) {
+    if (!action || !action.title || !action.reason) continue;
+    const isOtc = Boolean(action.isOtc);
+    if (isOtc && otcUsed) continue;
+    picked.push(action);
+    if (isOtc) otcUsed = true;
+    if (picked.length >= maxCount) break;
+  }
+  return picked;
+}
+
+function buildImmediateActionsBlock(level, state, historyText = "", plan = null) {
   const lines = ["✅ 今すぐやること（これだけでOK）"];
-
-  const action1ByCategory = {
-    stomach: {
-      title: "・水分をしっかりとりましょう",
-      reason: "→ 水分不足は不調を悪化させる要因になります。十分な水分補給は回復を助けます。",
+  const plannedActions = pickActionsForBlock(plan, 2);
+  const fallbackActions = [
+    {
+      title:
+        "症状メモを2時間ごとに1回、合計3回（強さ・きっかけ・変化）で記録し、今日中に悪化サインがないか再確認しましょう",
+      reason:
+        "今ある情報だけでは原因が複数考えられるため、経過を定量化すると次の判断精度が上がる可能性があります。",
     },
-    head: {
-      title: "・水分をとって、静かな環境で過ごしましょう",
-      reason: "→ 脱水や刺激は頭痛のつらさを強めることがあります。体を回復モードに切り替えることが大切です。",
-    },
-    throat: {
-      title: "・こまめに水分をとり、のどを乾かさないようにしましょう",
-      reason: "→ 乾燥が続くとのどの刺激が強くなりやすいため、保湿と水分補給が回復を助けます。",
-    },
-    other: {
-      title: "・水分をしっかりとりましょう",
-      reason: "→ 体内の水分不足は痛みや倦怠感を悪化させる要因になります。十分な水分補給は回復を助けます。",
-    },
-  };
-  const action1 = action1ByCategory[category] || action1ByCategory.other;
-
-  if (level === "🟡") {
-    const openers = [
-      [
-        "現時点では市販薬の使用＋十分な休息が合理的な対応です。",
-        "今の症状レベルで無理を続けると、回復が遅れる可能性があります。今日は治す日にしてください。",
-      ],
-      [
-        "現時点では市販薬と休息を組み合わせる対応が医学的に妥当です。",
-        "無理を続けるより、今日は回復を最優先にする判断が合っています。今日は治す日にしてください。",
-      ],
-    ];
-    const opener = openers[Math.floor(Math.random() * openers.length)];
-    lines.push(...opener, "", action1.title, action1.reason, "");
-
-    if (restLevel === "LIGHT" || restLevel === "STRONG") {
-      lines.push(
-        "・今日は無理をせず、できるだけ横になって休みましょう",
-        "→ 活動を続けると症状が長引く可能性があります。休息は治療の一部です。",
-        "",
-        "症状の回復のために十分な休息が必要と感じる場合は、オンライン診療を利用し、医師の判断のもとでMC（医療証明書）を取得することができます。"
-      );
-    } else {
-      lines.push(
-        "・痛みが続く場合は市販の鎮痛薬を検討できます",
-        "→ 痛みを早めに抑えることで、症状の悪化を防げる可能性があります。",
-        "・今日は静かな環境で、体を休ませる時間を確保しましょう",
-        "→ 回復に必要な休息時間を先に確保すると、症状が長引くリスクを下げられます。"
-      );
-    }
-    return lines.join("\n");
-  }
-
-  // 🟢
-  lines.push(
-    action1.title,
-    action1.reason,
-    "・体を冷やさず、楽な姿勢で過ごしましょう",
-    "→ 体への負担を減らすことで、回復しやすい状態を保てます。"
-  );
-  if (restLevel === "LIGHT" || restLevel === "STRONG") {
-    lines.push(
-      "・今日は無理をせず、少し早めに休みましょう",
-      "→ 無理を続けると回復が遅れるため、今日は治す日と決めて休むのが安全です。",
-      "",
-      "症状の回復のために十分な休息が必要と感じる場合は、オンライン診療を利用し、医師の判断のもとでMC（医療証明書）を取得することができます。"
-    );
-  } else {
-    lines.push(
-      "・通常生活を続けながら様子をみましょう",
-      "→ 現時点では医療介入の必要性は低い状態です。"
-    );
-  }
+  ];
+  const finalActions = plannedActions.length > 0 ? plannedActions : fallbackActions;
+  finalActions.slice(0, 2).forEach((action, idx) => {
+    lines.push(formatActionTitleWithBullet(action.title));
+    lines.push(formatActionReasonLine(action.reason));
+    if (idx < Math.min(finalActions.length, 2) - 1) lines.push("");
+  });
   return lines.join("\n");
 }
 
-function ensureImmediateActionsBlock(text, level, state, historyText = "") {
+function ensureImmediateActionsBlock(text, level, state, historyText = "", plan = null) {
   if (!text) return text;
   if (level !== "🟡" && level !== "🟢") return text;
-  return replaceSummaryBlock(text, "✅ 今すぐやること", buildImmediateActionsBlock(level, state, historyText));
+  return replaceSummaryBlock(
+    text,
+    "✅ 今すぐやること",
+    buildImmediateActionsBlock(level, state, historyText, plan)
+  );
 }
 
 function mapDailyImpactAnswerToRestLevel(answer) {
@@ -3492,8 +3462,8 @@ const FIXED_QUESTIONS = {
     options: [],
   },
   cause_category: {
-    q: "何かきっかけで思い当たることはありますか？\n・特に思い当たらない\n・何か思い当たるかも\n・はっきりとは分からない",
-    options: ["特に思い当たらない", "何か思い当たるかも", "はっきりとは分からない"],
+    q: "何かきっかけで思い当たることはありますか？\n・スマホやパソコンを長時間見た\n・寝不足や疲れが続いている\n・強いストレスや緊張があった",
+    options: ["スマホやパソコンを長時間見た", "寝不足や疲れが続いている", "強いストレスや緊張があった"],
   },
 };
 
@@ -4344,6 +4314,375 @@ function buildConcreteStatePatternMessage(state, summaryFacts = [], summarySecti
   return { message: lines.join("\n").trim(), query };
 }
 
+function extractFeatures(stateText) {
+  const text = String(stateText || "");
+  const normalized = text.replace(/\s+/g, "");
+  const bodyPartMap = [
+    { key: "唇", re: /(唇|口元|口唇)/ },
+    { key: "頭", re: /(頭|こめかみ|後頭部|頭部)/ },
+    { key: "喉", re: /(喉|のど|咽頭)/ },
+    { key: "お腹", re: /(お腹|腹|胃|みぞおち|腸)/ },
+    { key: "皮膚", re: /(皮膚|手|指|顔|頬|腕|脚)/ },
+  ];
+  const painTypeMap = [
+    { key: "ズキズキ", re: /(ズキズキ|脈打つ)/ },
+    { key: "ヒリヒリ", re: /(ヒリヒリ|しみる)/ },
+    { key: "締め付け", re: /(締め付け|圧迫)/ },
+    { key: "キリキリ", re: /(キリキリ)/ },
+    { key: "チクチク", re: /(チクチク|ピリピリ)/ },
+  ];
+  const durationMap = [
+    { key: "さっき", re: /(さっき|今さっき)/ },
+    { key: "数時間", re: /(数時間|半日|今日)/ },
+    { key: "1日以上", re: /(昨日|一日以上|数日|何日)/ },
+  ];
+  const triggerMap = [
+    { key: "画面刺激", re: /(スマホ|パソコン|画面|ブルーライト)/ },
+    { key: "睡眠不足", re: /(寝不足|睡眠不足|徹夜)/ },
+    { key: "疲労", re: /(疲れ|疲労|ハード)/ },
+    { key: "ストレス", re: /(ストレス|緊張|不安)/ },
+    { key: "冷え", re: /(冷え|寒気)/ },
+    { key: "食事", re: /(食後|食あたり|脂っこい|刺激物)/ },
+  ];
+  const assocMap = [
+    { key: "発熱", re: /(発熱|高熱|38度|37度)/ },
+    { key: "吐き気", re: /(吐き気|むかつき)/ },
+    { key: "嘔吐", re: /(嘔吐|吐いた)/ },
+    { key: "下痢", re: /(下痢|軟便)/ },
+    { key: "水ぶくれ", re: /(水ぶくれ|ただれ)/ },
+    { key: "赤み", re: /(赤み|発疹|腫れ)/ },
+    { key: "出血なし", re: /(出血はない|血は出てない|出血なし)/ },
+    { key: "息苦しさ", re: /(息苦しい|胸が苦しい)/ },
+  ];
+
+  const bodyPart = bodyPartMap.find((m) => m.re.test(normalized))?.key || null;
+  const painType = painTypeMap.find((m) => m.re.test(normalized))?.key || null;
+  const duration = durationMap.find((m) => m.re.test(normalized))?.key || null;
+  const onsetType = /(突然|急に|いきなり)/.test(normalized)
+    ? "突然"
+    : /(徐々に|だんだん|少しずつ)/.test(normalized)
+      ? "徐々に"
+      : null;
+  const triggers = triggerMap.filter((m) => m.re.test(normalized)).map((m) => m.key);
+  const associatedSymptoms = assocMap.filter((m) => m.re.test(normalized)).map((m) => m.key);
+
+  let severityHint = null;
+  const painMatch = text.match(/(\d{1,2})\s*\/\s*10|痛み[はが]?\s*(\d{1,2})/);
+  const painScore = Number(painMatch?.[1] || painMatch?.[2] || NaN);
+  if (Number.isFinite(painScore)) {
+    severityHint = painScore >= 8 ? "high" : painScore >= 5 ? "medium" : "low";
+  } else if (/(動けないほど|38度以上|激痛|強い息苦しさ)/.test(normalized)) {
+    severityHint = "high";
+  } else if (/(少しつらい|37度台|つらい)/.test(normalized)) {
+    severityHint = "medium";
+  } else {
+    severityHint = "low";
+  }
+  return {
+    bodyPart,
+    painType,
+    duration,
+    onsetType,
+    triggers,
+    associatedSymptoms,
+    severityHint,
+  };
+}
+
+function hasAnyMatch(value, candidates = []) {
+  if (!value || !Array.isArray(candidates)) return false;
+  return candidates.includes(value);
+}
+
+function overlapCount(values = [], candidates = []) {
+  if (!Array.isArray(values) || !Array.isArray(candidates)) return 0;
+  const set = new Set(values);
+  return candidates.filter((v) => set.has(v)).length;
+}
+
+function scoreHypothesis(hypothesis, features) {
+  let score = 0;
+  const majorBody = hasAnyMatch(features.bodyPart, hypothesis?.matchRules?.bodyPart || []);
+  const majorPain = hasAnyMatch(features.painType, hypothesis?.matchRules?.painType || []);
+  if (majorBody) score += 2;
+  if (majorPain) score += 2;
+  if (hasAnyMatch(features.duration, hypothesis?.matchRules?.duration || [])) score += 1;
+  if (hasAnyMatch(features.onsetType, hypothesis?.matchRules?.onsetType || [])) score += 1;
+  if (overlapCount(features.triggers, hypothesis?.matchRules?.triggers || []) > 0) score += 1;
+  if (overlapCount(features.associatedSymptoms, hypothesis?.matchRules?.associatedSymptoms || []) > 0) score += 1;
+  const contraindicationHits =
+    overlapCount(
+      features.associatedSymptoms,
+      hypothesis?.contraindications?.associatedSymptoms || []
+    ) +
+    overlapCount(features.triggers, hypothesis?.contraindications?.triggers || []);
+  score -= contraindicationHits * 3;
+  return { score, contraindicationHits };
+}
+
+function shouldRecommendOTC(hypothesis, severity) {
+  const sev = String(severity || "low");
+  if (sev === "high") return false;
+  if (hypothesis?.contraindicationHits > 0) return false;
+  const otcRationalHypotheses = new Set([
+    "skin_dry_irritation",
+    "tension_stimulus_headache",
+  ]);
+  return otcRationalHypotheses.has(hypothesis?.id);
+}
+
+function contextMatchScore(actionText, features, hypothesis) {
+  const text = String(actionText || "");
+  let score = 0;
+  if (features.bodyPart && text.includes(features.bodyPart)) score += 2;
+  if (features.painType && text.includes(features.painType)) score += 2;
+  if (features.duration && text.includes(features.duration)) score += 1;
+  if ((features.triggers || []).some((t) => text.includes(t))) score += 2;
+  if ((features.associatedSymptoms || []).some((s) => text.includes(s))) score += 1;
+  if (hypothesis?.id && text.includes("ワセリン") && hypothesis.id === "skin_dry_irritation") score += 2;
+  if (hypothesis?.id && text.includes("経口補水液") && hypothesis.id === "gi_irritation_pattern") score += 2;
+  return score;
+}
+
+function validateActionSpecificity(actionText) {
+  const text = String(actionText || "");
+  const hasAmount = /\d+\s*(ml|回|粒|錠|分|時間|回分)|米粒|半量/.test(text);
+  const hasFrequency = /(ごと|毎|おき|1日\d+回|朝昼晩)/.test(text);
+  const hasDuration = /(時間|日|今日中|半日|24時間)/.test(text);
+  const hasRecheck = /(悪化|続く|改善しない|受診|再評価|見直し)/.test(text);
+  return hasAmount && hasFrequency && hasDuration && hasRecheck;
+}
+
+function fillActionSpecificity(actionText, hypothesisId) {
+  let text = String(actionText || "").trim();
+  if (!/\d+\s*(ml|回|粒|錠|分|時間|回分)|米粒|半量/.test(text)) {
+    const amountByHypothesis = {
+      skin_dry_irritation: "米粒2〜3粒",
+      tension_stimulus_headache: "150〜200ml",
+      gi_irritation_pattern: "100〜150ml",
+      upper_airway_irritation: "120〜180ml",
+    };
+    text += `。量は${amountByHypothesis[hypothesisId] || "1回分"}を目安にしてください`;
+  }
+  if (!/(ごと|毎|おき|1日\d+回|朝昼晩)/.test(text)) {
+    text += "。頻度は1〜2時間ごとに1回です";
+  }
+  if (!/(時間|日|今日中|半日|24時間)/.test(text)) {
+    text += "。期間はまず今日中（半日〜24時間）続けてください";
+  }
+  if (!/(悪化|続く|改善しない|受診|再評価|見直し)/.test(text)) {
+    text += "。悪化する・6〜8時間で改善しない場合は受診を検討して再評価してください";
+  }
+  return text;
+}
+
+function buildImmediateActionHypothesisPlan(state, historyText = "", summarySection = "") {
+  const summaryFacts = buildStateFactsBullets(state);
+  const concrete = buildConcreteStatePatternMessage(state, summaryFacts, summarySection);
+  const stateText = [
+    concrete.message,
+    historyText,
+    state?.causeDetailText || "",
+    ...Object.values(state?.slotAnswers || {}),
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  // Step1: 「今の状態について詳しく」の全文を特徴量へ分解
+  const features = extractFeatures(stateText);
+
+  const hypotheses = [
+    {
+      id: "skin_dry_irritation",
+      name: "乾燥・接触刺激",
+      safetyRank: 1,
+      matchRules: {
+        bodyPart: ["唇", "皮膚"],
+        painType: ["ヒリヒリ", "チクチク"],
+        duration: ["さっき", "数時間"],
+        onsetType: ["徐々に"],
+        triggers: ["画面刺激", "冷え", "ストレス"],
+        associatedSymptoms: ["出血なし", "赤み"],
+      },
+      contraindications: {
+        associatedSymptoms: ["水ぶくれ", "発熱"],
+      },
+    },
+    {
+      id: "tension_stimulus_headache",
+      name: "刺激関連頭痛パターン",
+      safetyRank: 2,
+      matchRules: {
+        bodyPart: ["頭"],
+        painType: ["ズキズキ", "締め付け"],
+        duration: ["数時間", "1日以上"],
+        onsetType: ["徐々に"],
+        triggers: ["画面刺激", "睡眠不足", "疲労", "ストレス"],
+        associatedSymptoms: [],
+      },
+      contraindications: {
+        associatedSymptoms: ["発熱", "息苦しさ"],
+      },
+    },
+    {
+      id: "gi_irritation_pattern",
+      name: "消化管刺激パターン",
+      safetyRank: 3,
+      matchRules: {
+        bodyPart: ["お腹"],
+        painType: ["キリキリ"],
+        duration: ["さっき", "数時間"],
+        onsetType: ["突然", "徐々に"],
+        triggers: ["食事", "冷え", "ストレス"],
+        associatedSymptoms: ["吐き気", "下痢"],
+      },
+      contraindications: {
+        associatedSymptoms: ["発熱", "嘔吐"],
+      },
+    },
+    {
+      id: "upper_airway_irritation",
+      name: "上気道炎症パターン",
+      safetyRank: 4,
+      matchRules: {
+        bodyPart: ["喉"],
+        painType: ["ヒリヒリ"],
+        duration: ["数時間", "1日以上"],
+        onsetType: ["徐々に"],
+        triggers: ["冷え", "疲労", "ストレス"],
+        associatedSymptoms: ["発熱"],
+      },
+      contraindications: {
+        associatedSymptoms: ["息苦しさ"],
+      },
+    },
+  ];
+
+  const scored = hypotheses.map((h) => {
+    const result = scoreHypothesis(h, features);
+    return {
+      ...h,
+      score: result.score,
+      contraindicationHits: result.contraindicationHits,
+    };
+  });
+  const maxScore = Math.max(...scored.map((s) => s.score));
+  const nearTop = scored.filter((s) => s.score >= maxScore - 1);
+  const best = nearTop.sort((a, b) => a.safetyRank - b.safetyRank)[0] || scored[0];
+
+  const otcAllowed = shouldRecommendOTC(best, features.severityHint);
+  let candidateActions = [];
+  if (best.id === "skin_dry_irritation") {
+    if (otcAllowed) {
+      candidateActions.push({
+        title:
+          "白色ワセリンを米粒2〜3粒ぶん取り、唇全体に白く残る厚さで塗り、2〜3時間ごとに24時間続け、悪化時は受診を検討しましょう",
+        reason:
+          "乾燥や接触刺激でバリアが落ちている可能性があり、表面保護を先に作るとしみる刺激を減らせると考えられます。",
+        isOtc: true,
+      });
+    }
+    candidateActions.push({
+      title:
+        "患部はなめない・こすらないを徹底し、乾燥時は毎回ワセリンへ置き換えて半日続け、6時間で改善しなければ再評価しましょう",
+      reason:
+        "摩擦や唾液刺激が続くと回復が遅れる可能性があるため、刺激を断つ行動が整合的です。",
+      isOtc: false,
+    });
+  } else if (best.id === "tension_stimulus_headache") {
+    candidateActions = [
+      {
+        title:
+          "今から4時間は画面を45分見たら10分休む周期にし、休止中は照明を落として、悪化時は中断して受診を検討しましょう",
+        reason:
+          "光刺激と集中負荷が重なって症状が増幅している可能性があり、刺激量の分割が有効と考えられます。",
+        isOtc: false,
+      },
+      {
+        title:
+          "常温水を150〜200mlずつ30〜60分ごとに4回補給し、半日続けても改善しなければ行動計画を見直しましょう",
+        reason:
+          "脱水や自律神経の揺れが関与している可能性があり、水分補給の再調整が文脈に合います。",
+        isOtc: false,
+      },
+    ];
+  } else if (best.id === "gi_irritation_pattern") {
+    candidateActions = [
+      {
+        title:
+          "経口補水液を100〜150mlずつ15〜20分ごとに2〜3時間続け、吐き気や痛みが悪化したら早めに受診を検討しましょう",
+        reason:
+          "消化管刺激が疑われる場面では少量頻回の補給が負担を減らす可能性があります。",
+        isOtc: false,
+      },
+      {
+        title:
+          "食事は6〜8時間休み、再開時はおかゆを半量から1回ずつ試して、再悪化したら中止して再評価しましょう",
+        reason:
+          "負荷を急に戻すと症状がぶり返す可能性があるため、再開量を絞る設計が合理的です。",
+        isOtc: false,
+      },
+    ];
+  } else {
+    candidateActions = [
+      {
+        title:
+          "温かい飲み物を120〜180mlずつ1時間ごとに6回取り、半日続けて喉の刺激が強まる場合は受診を検討しましょう",
+        reason:
+          "上気道の乾燥刺激が関係する可能性があり、保湿を保つことで悪化を抑えられることがあります。",
+        isOtc: false,
+      },
+      {
+        title:
+          "室温20〜24℃・湿度50〜60%を維持し、会話量を半日にわたり普段の半分に抑え、悪化時は再評価しましょう",
+        reason:
+          "刺激総量を下げると、のど症状の増幅を防げる可能性があります。",
+        isOtc: false,
+      },
+    ];
+  }
+
+  const blockedTemplate = /(水分を取る|横になる|安静にする)/;
+  candidateActions = candidateActions.filter((action) => {
+    if (!blockedTemplate.test(action.title)) return true;
+    return contextMatchScore(action.title, features, best) >= 3;
+  });
+
+  let otcUsed = false;
+  let finalActions = candidateActions
+    .filter((action) => {
+      if (action.isOtc && otcUsed) return false;
+      if (action.isOtc) otcUsed = true;
+      return true;
+    })
+    .map((action) => {
+      const title = validateActionSpecificity(action.title)
+        ? action.title
+        : fillActionSpecificity(action.title, best.id);
+      return { ...action, title };
+    })
+    .slice(0, 2);
+
+  if (finalActions.length === 0) {
+    finalActions = [
+      {
+        title:
+          "症状メモを2時間ごとに1回、合計3回（強さ・誘因・変化）で記録し、今日中に悪化したら受診を検討して再評価しましょう",
+        reason:
+          "現時点では複数仮説が並ぶため、経過を定量化して次判断の精度を上げる方法が安全側です。",
+        isOtc: false,
+      },
+    ];
+  }
+  return {
+    actions: finalActions,
+    hypothesisId: best.id,
+    hypothesisCount: hypotheses.length,
+    features,
+    concreteMessage: concrete.message,
+  };
+}
+
 function buildStateDecisionLine(state, level) {
   // 🟡のみ：指定の要素（医療機関でできることが大きく変わらない可能性）を含めて生成（固定文にはしない）
   if (level === "🟡") {
@@ -5078,22 +5417,9 @@ app.post("/api/chat", async (req, res) => {
             classified.usedFreeText ? message : lastOptionsSnapshot[selectedIndex]
           );
           if (type === "cause_category") {
-            const raw = lastOptionsSnapshot[selectedIndex] || "";
             const freeText = classified.usedFreeText ? message : "";
             if (classified.usedFreeText && hasConcreteCauseDetail(freeText)) {
-              // 具体的な自由記述がある場合は7問目をスキップし、まとめへ進める
               conversationState[conversationId].causeDetailText = freeText.trim();
-              conversationState[conversationId].causeDetailPending = false;
-              conversationState[conversationId].causeDetailAnswered = true;
-              conversationState[conversationId].causeDetailAsked = false;
-            } else if (raw.includes("思い当たる") || /思い当たる|当たる|ある/.test(freeText)) {
-              conversationState[conversationId].causeDetailPending = true;
-              conversationState[conversationId].causeDetailAnswered = false;
-              conversationState[conversationId].causeDetailAsked = false;
-            } else {
-              conversationState[conversationId].causeDetailPending = false;
-              conversationState[conversationId].causeDetailAnswered = false;
-              conversationState[conversationId].causeDetailAsked = false;
             }
           }
         }
@@ -5122,47 +5448,6 @@ app.post("/api/chat", async (req, res) => {
     });
 
     const askedSlotsCount = countAskedSlots(conversationState[conversationId].askedSlots);
-    if (
-      conversationState[conversationId].causeDetailPending &&
-      !conversationState[conversationId].causeDetailAsked &&
-      countFilledSlots(conversationState[conversationId].slotFilled) >= 4
-    ) {
-      const followupQuestion = "具体的に教えてもらってもいいですか？";
-      conversationState[conversationId].causeDetailAsked = true;
-      conversationState[conversationId].expectsCauseDetail = true;
-
-      conversationHistory[conversationId].push({
-        role: "assistant",
-        content: followupQuestion,
-      });
-
-      const judgeMeta = {
-        judgement: "🟢",
-        confidence: conversationState[conversationId].confidence,
-        ratio: 0,
-        shouldJudge: false,
-        slotsFilledCount: countFilledSlots(conversationState[conversationId].slotFilled),
-        decisionAllowed: false,
-        questionCount: conversationState[conversationId].questionCount,
-        summaryLine: null,
-        questionType: null,
-        rawScore: null,
-        painScoreRatio: null,
-      };
-      console.log("[DEBUG] response payload", {
-        response: followupQuestion,
-        judgeMeta,
-        questionPayload: null,
-        normalizedAnswer: conversationState[conversationId].lastNormalizedAnswer || null,
-      });
-      return res.json({
-        message: followupQuestion,
-        response: followupQuestion,
-        judgeMeta,
-        questionPayload: null,
-        normalizedAnswer: conversationState[conversationId].lastNormalizedAnswer || null,
-      });
-    }
 
     const isInitialQuestionPhase =
       conversationState[conversationId].questionCount === 0 &&
@@ -5231,8 +5516,7 @@ app.post("/api/chat", async (req, res) => {
     const decisionAllowed = slotsFilledCount >= 6;
     const shouldJudgeNow =
       shouldJudge &&
-      decisionAllowed &&
-      !(conversationState[conversationId].causeDetailPending && !conversationState[conversationId].causeDetailAnswered);
+      decisionAllowed;
     const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled);
     if (!shouldJudgeNow) {
       const isFirstQuestion =
@@ -5426,6 +5710,11 @@ app.post("/api/chat", async (req, res) => {
       );
       aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
       if (level === "🟢" || level === "🟡") {
+        const immediateActionPlan = buildImmediateActionHypothesisPlan(
+          conversationState[conversationId],
+          historyTextForOtc,
+          aiResponse
+        );
         aiResponse = normalizeStateBlockForGreenYellow(
           aiResponse,
           conversationState[conversationId]
@@ -5434,7 +5723,8 @@ app.post("/api/chat", async (req, res) => {
           aiResponse,
           level,
           conversationState[conversationId],
-          historyTextForOtc
+          historyTextForOtc,
+          immediateActionPlan
         );
       }
       aiResponse = ensureOutlookBlock(aiResponse, conversationState[conversationId]);
