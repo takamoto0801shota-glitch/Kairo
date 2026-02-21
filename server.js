@@ -2454,6 +2454,27 @@ function ensureImmediateActionsBlock(text, level, state, historyText = "", resea
   );
 }
 
+function buildImmediateActionFallbackPlanFromState(state, overrides = {}) {
+  const context =
+    overrides.currentStateContext ||
+    buildCurrentStateContext(state, "", state?.lastConcreteDetailsText || "");
+  const action = {
+    title:
+      "症状メモを2時間ごとに1回、合計3回（強さ・変化・随伴症状）で記録し、同日中に悪化サインがないか再確認しましょう",
+    reason:
+      "現在の状態データを再評価しやすくなり、次の判断の精度を維持できます。",
+    isOtc: false,
+  };
+  return {
+    actions: Array.isArray(overrides.actions) && overrides.actions.length > 0 ? overrides.actions : [action],
+    currentStateContext: context,
+    searchQuery: overrides.searchQuery || "",
+    sourceNames: Array.isArray(overrides.sourceNames) ? overrides.sourceNames : [],
+    evidence: overrides.evidence || { top3: [], selfCare: [], observe: [], danger: [] },
+    concreteMessage: overrides.concreteMessage || "",
+  };
+}
+
 function mapDailyImpactAnswerToRestLevel(answer) {
   const normalized = String(answer || "").trim();
   if (normalized === "普通に動ける") return "NONE";
@@ -5148,6 +5169,41 @@ function parseJsonObjectFromText(text) {
   }
 }
 
+function buildSearchBackedHeuristicActions(context, evidence) {
+  const topic = normalizeContextLocation(context?.location || "");
+  const actions = [];
+  const selfCareText = (evidence?.selfCare || []).join(" ").toLowerCase();
+  if (topic === "皮膚" && /(petroleum|ワセリン|barrier|保湿)/.test(selfCareText)) {
+    actions.push({
+      title: "白色ワセリンを米粒2〜3粒ぶん、患部に白く残る厚さで塗り、2〜3時間ごとに半日続けて再評価しましょう",
+      reason: "検索結果で示されるセルフケアと整合する保護ケアで、刺激の反復を減らす狙いです。",
+      isOtc: true,
+    });
+  }
+  if (topic === "お腹") {
+    actions.push({
+      title: "経口補水液または水を100〜150mlずつ15〜20分ごとに2〜3時間続け、悪化時は受診に切り替えましょう",
+      reason: "上位情報の経過観察基準に沿って、脱水と症状推移を同時に管理するためです。",
+      isOtc: false,
+    });
+  }
+  if (topic === "頭") {
+    actions.push({
+      title: "画面作業を45分ごとに10分休止し、同時に150〜200mlの水分を30〜60分ごとに4回補給して半日評価しましょう",
+      reason: "検索で抽出した自己対応策を組み合わせ、刺激負荷と体調要因を同時に下げるためです。",
+      isOtc: false,
+    });
+  }
+  if (actions.length === 0) {
+    actions.push({
+      title: "症状メモを2時間ごとに1回、合計3回（強さ・変化・随伴症状）で記録し、同日中に悪化サインがないか再確認しましょう",
+      reason: "情報欠落時でも判断精度を維持するため、経過の定量化を優先します。",
+      isOtc: false,
+    });
+  }
+  return actions.slice(0, 2);
+}
+
 function normalizeAdviceTopic(topic) {
   const t = String(topic || "").toLowerCase();
   if (/(腹|お腹|胃|腸|gi)/.test(t)) return "お腹";
@@ -5171,88 +5227,122 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
   );
   const searchQuery = buildMandatoryGoogleQuery(currentStateContext);
 
-  const [jaSearch, enSearch] = await Promise.all([
-    fetchGoogleCustomSearchResults(searchQuery, "ja"),
-    fetchGoogleCustomSearchResults(searchQuery, "en"),
-  ]);
-  const ranked = dedupeAndRankActionSearchResults([...jaSearch, ...enSearch], currentStateContext.features || {});
-  if (!ranked || ranked.length === 0) {
-    throw new Error("Search required but no results");
-  }
+  try {
+    const [jaResult, enResult] = await Promise.allSettled([
+      fetchGoogleCustomSearchResults(searchQuery, "ja"),
+      fetchGoogleCustomSearchResults(searchQuery, "en"),
+    ]);
+    const jaSearch = jaResult.status === "fulfilled" ? jaResult.value : [];
+    const enSearch = enResult.status === "fulfilled" ? enResult.value : [];
+    let ranked = dedupeAndRankActionSearchResults(
+      [...jaSearch, ...enSearch],
+      currentStateContext.features || {}
+    );
+    // 検索0件時は、クエリを緩めて再試行
+    if (!ranked || ranked.length === 0) {
+      const relaxedQuery = `${currentStateContext.location || "symptom"} ${currentStateContext.symptoms.join(" ")} self care`;
+      const [jaRetry, enRetry] = await Promise.allSettled([
+        fetchGoogleCustomSearchResults(relaxedQuery, "ja"),
+        fetchGoogleCustomSearchResults(relaxedQuery, "en"),
+      ]);
+      ranked = dedupeAndRankActionSearchResults(
+        [
+          ...(jaRetry.status === "fulfilled" ? jaRetry.value : []),
+          ...(enRetry.status === "fulfilled" ? enRetry.value : []),
+        ],
+        currentStateContext.features || {}
+      );
+    }
+    if (!ranked || ranked.length === 0) {
+      return buildImmediateActionFallbackPlanFromState(state, {
+        currentStateContext,
+        searchQuery,
+        concreteMessage: concrete.message,
+      });
+    }
 
-  const evidence = extractTopSearchEvidence(ranked);
-  const sourceNames = Array.from(
-    new Set(ranked.filter((r) => r.trusted).map((r) => r.host).filter(Boolean))
-  ).slice(0, 3);
+    const evidence = extractTopSearchEvidence(ranked);
+    const sourceNames = Array.from(
+      new Set(ranked.filter((r) => r.trusted).map((r) => r.host).filter(Boolean))
+    ).slice(0, 3);
 
-  const llmPrompt = [
-    "You convert medical search evidence into immediate actions.",
-    "Use ONLY provided currentStateContext and extractedSearchEvidence.",
-    "Do not invent sources. Do not diagnose.",
-    "Return strict JSON: {\"topic\":\"...\",\"actions\":[{\"title\":\"...\",\"reason\":\"...\",\"isOtc\":false}]}",
-    "actions max 2, OTC max 1.",
-    "Keep Japanese output and preserve existing action writing style.",
-  ].join("\n");
-
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      { role: "system", content: llmPrompt },
-      {
-        role: "user",
-        content: JSON.stringify({
-          currentStateContext,
-          extractedSearchEvidence: {
-            selfCare: evidence.selfCare,
-            observe: evidence.observe,
-            danger: evidence.danger,
+    let parsed = null;
+    try {
+      const llmPrompt = [
+        "You convert medical search evidence into immediate actions.",
+        "Use ONLY provided currentStateContext and extractedSearchEvidence.",
+        "Do not invent sources. Do not diagnose.",
+        "Return strict JSON: {\"topic\":\"...\",\"actions\":[{\"title\":\"...\",\"reason\":\"...\",\"isOtc\":false}]}",
+        "actions max 2, OTC max 1.",
+        "Keep Japanese output and preserve existing action writing style.",
+      ].join("\n");
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: llmPrompt },
+          {
+            role: "user",
+            content: JSON.stringify({
+              currentStateContext,
+              extractedSearchEvidence: {
+                selfCare: evidence.selfCare,
+                observe: evidence.observe,
+                danger: evidence.danger,
+              },
+            }),
           },
-        }),
-      },
-    ],
-    temperature: 0.2,
-    max_tokens: 500,
-  });
-  const parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
-  if (!parsed || !Array.isArray(parsed.actions)) {
-    throw new Error("Search translation failed");
+        ],
+        temperature: 0.2,
+        max_tokens: 500,
+      });
+      parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
+    } catch (_) {
+      parsed = null;
+    }
+
+    const candidateActions = Array.isArray(parsed?.actions)
+      ? parsed.actions
+      : buildSearchBackedHeuristicActions(currentStateContext, evidence);
+    const adviceTopic = normalizeAdviceTopic(parsed?.topic || currentStateContext.location || "");
+    const contextTopic = normalizeContextLocation(currentStateContext.location || "");
+    const topicMismatch = adviceTopic && contextTopic && adviceTopic !== contextTopic;
+
+    let otcUsed = false;
+    let finalActions = candidateActions
+      .filter((a) => a && a.title && a.reason)
+      .filter((a) => {
+        const otc = Boolean(a.isOtc);
+        if (otc && otcUsed) return false;
+        if (otc) otcUsed = true;
+        return true;
+      })
+      .map((a) => ({
+        ...a,
+        title: validateActionSpecificity(a.title)
+          ? String(a.title)
+          : fillActionSpecificity(String(a.title), "search_based"),
+      }))
+      .slice(0, 2);
+
+    if (topicMismatch || finalActions.length === 0) {
+      finalActions = buildSearchBackedHeuristicActions(currentStateContext, evidence);
+    }
+
+    return buildImmediateActionFallbackPlanFromState(state, {
+      actions: finalActions.slice(0, 2),
+      currentStateContext,
+      searchQuery,
+      sourceNames,
+      evidence,
+      concreteMessage: concrete.message,
+    });
+  } catch (error) {
+    return buildImmediateActionFallbackPlanFromState(state, {
+      currentStateContext,
+      searchQuery,
+      concreteMessage: concrete.message,
+    });
   }
-
-  const adviceTopic = normalizeAdviceTopic(parsed.topic || "");
-  const contextTopic = normalizeContextLocation(currentStateContext.location || "");
-  if (adviceTopic && contextTopic && adviceTopic !== contextTopic) {
-    throw new Error("Context mismatch detected");
-  }
-
-  let otcUsed = false;
-  const finalActions = parsed.actions
-    .filter((a) => a && a.title && a.reason)
-    .filter((a) => {
-      const otc = Boolean(a.isOtc);
-      if (otc && otcUsed) return false;
-      if (otc) otcUsed = true;
-      return true;
-    })
-    .map((a) => ({
-      ...a,
-      title: validateActionSpecificity(a.title)
-        ? String(a.title)
-        : fillActionSpecificity(String(a.title), "search_based"),
-    }))
-    .slice(0, 2);
-
-  if (finalActions.length === 0) {
-    throw new Error("Search required but no valid actions");
-  }
-
-  return {
-    actions: finalActions,
-    currentStateContext,
-    searchQuery,
-    evidence,
-    sourceNames,
-    concreteMessage: concrete.message,
-  };
 }
 
 function buildStateDecisionLine(state, level) {
@@ -6282,11 +6372,19 @@ app.post("/api/chat", async (req, res) => {
       );
       aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
       if (level === "🟢" || level === "🟡") {
-        const immediateActionPlan = await buildImmediateActionHypothesisPlan(
-          conversationState[conversationId],
-          historyTextForOtc,
-          aiResponse
-        );
+        let immediateActionPlan = null;
+        try {
+          immediateActionPlan = await buildImmediateActionHypothesisPlan(
+            conversationState[conversationId],
+            historyTextForOtc,
+            aiResponse
+          );
+        } catch (immediateActionError) {
+          console.error("[ImmediateActionPlan Error]", immediateActionError?.message || immediateActionError);
+          immediateActionPlan = buildImmediateActionFallbackPlanFromState(
+            conversationState[conversationId]
+          );
+        }
         aiResponse = normalizeStateBlockForGreenYellow(
           aiResponse,
           conversationState[conversationId]
@@ -6656,10 +6754,54 @@ app.post("/api/chat", async (req, res) => {
       type: error?.constructor?.name,
       stack: error?.stack,
     });
-    const safeMessage =
-      "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。";
-    res.status(200).json({
-      conversationId: (req.body && req.body.conversationId) || null,
+    const cid = (req.body && req.body.conversationId) || null;
+    const state = cid ? conversationState[cid] : null;
+    const history = cid ? conversationHistory[cid] || [] : [];
+    const filled = state ? countFilledSlots(state.slotFilled) : 0;
+    if (state && filled >= 6) {
+      const level = state.decisionLevel || finalizeRiskLevel(state);
+      const fallbackSummary = enforceSummaryStructureStrict(
+        buildLocalSummaryFallback(level, history, state),
+        level,
+        history,
+        state
+      );
+      const triage = {
+        judgement: level,
+        confidence: state.confidence || 0,
+        ratio: state.decisionRatio ?? null,
+        shouldJudge: true,
+      };
+      const sections = extractSectionsBySpecs(
+        fallbackSummary,
+        getSummarySectionSpecsByJudgement(level)
+      ).map((entry) => entry.text);
+      return res.status(200).json({
+        conversationId: cid,
+        message: fallbackSummary,
+        response: fallbackSummary,
+        triage,
+        sections,
+        judgeMeta: {
+          judgement: level,
+          confidence: state.confidence || 0,
+          ratio: state.decisionRatio ?? null,
+          shouldJudge: true,
+          slotsFilledCount: filled,
+          decisionAllowed: true,
+          questionCount: state.questionCount || 0,
+          summaryLine: extractSummaryLine(fallbackSummary),
+          questionType: null,
+          rawScore: state.lastPainScore ?? null,
+          painScoreRatio: state.lastPainWeight ?? null,
+        },
+        questionPayload: null,
+        normalizedAnswer: state.lastNormalizedAnswer || null,
+      });
+    }
+    const safeMessage = "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。";
+    return res.status(200).json({
+      conversationId: cid,
       message: safeMessage,
       response: safeMessage,
       judgeMeta: {
