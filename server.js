@@ -4305,7 +4305,7 @@ function buildConcreteStatePatternMessage(state, summaryFacts = [], summarySecti
   const level = state?.decisionLevel || finalizeRiskLevel(state);
   const isGreenOrYellow = level === "🟢" || level === "🟡";
 
-  const lines = ["あなたの状態の理解を深める", "", "今の状態は、次のようなパターンと似ています。", ""];
+  const lines = ["今の状態は、次のようなパターンと似ています。", ""];
   for (const pattern of templates) {
     lines.push(`■ ${pattern.title}`);
     lines.push(pattern.body);
@@ -4422,6 +4422,105 @@ function summarizeFindingLine(line, symptoms = []) {
     : `・${cleaned}`;
 }
 
+function countJapaneseSentences(text) {
+  return String(text || "")
+    .split(/[。！？!?]/)
+    .map((s) => s.trim())
+    .filter(Boolean).length;
+}
+
+function enforceConcreteModalStructure(message, options = {}) {
+  const {
+    level = "🟢",
+    isCauseValid = false,
+    causeText = "",
+    strengthText = "",
+    durationText = "",
+    symptomText = "",
+    category = "PAIN",
+    state = null,
+  } = options;
+  const lines = String(message || "")
+    .split("\n")
+    .map((line) => line.trimEnd());
+
+  const sectionHeaders = new Set([
+    "現時点の安心材料",
+    "こんな変化があれば受診を検討",
+  ]);
+  const patternBlocks = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = (lines[i] || "").trim();
+    if (!line.startsWith("■ ")) {
+      i += 1;
+      continue;
+    }
+    const block = [line];
+    i += 1;
+    while (i < lines.length) {
+      const next = (lines[i] || "").trim();
+      if (next.startsWith("■ ") || sectionHeaders.has(next)) break;
+      block.push(lines[i]);
+      i += 1;
+    }
+    patternBlocks.push(block);
+  }
+
+  let selectedBlocks = patternBlocks;
+  if (isCauseValid && selectedBlocks.length > 1) {
+    selectedBlocks = [selectedBlocks[0]];
+  } else if (!isCauseValid && selectedBlocks.length > 2) {
+    selectedBlocks = selectedBlocks.slice(0, 2);
+  }
+  if (selectedBlocks.length === 0) {
+    selectedBlocks = [["■ 現在の状態に近いパターン"]];
+  }
+
+  // 1パターン時は最低4文を強制
+  if (selectedBlocks.length === 1) {
+    const body = selectedBlocks[0].slice(1).filter((l) => (l || "").trim().length > 0);
+    let sentenceCount = countJapaneseSentences(body.join(" "));
+    const supplements = [
+      isCauseValid
+        ? `${causeText}というきっかけのあとに、${durationText || "現在"}の経過で症状が目立ってきた流れです。`
+        : `${durationText || "現在"}の経過で、症状の波が見えやすい状態です。`,
+      `${strengthText || "いまの強さ"}と${symptomText || "症状の変化"}を同時にみると、今後の流れを把握しやすくなります。`,
+      "急に悪化しないかを短い間隔で確認すると、次の判断につなげやすくなります。",
+      "新しい強い症状が加わるかどうかが、受診タイミングの目安になります。",
+    ];
+    let idx = 0;
+    while (sentenceCount < 4 && idx < supplements.length) {
+      body.push(supplements[idx]);
+      sentenceCount += 1;
+      idx += 1;
+    }
+    selectedBlocks[0] = [selectedBlocks[0][0], ...body];
+  }
+
+  const out = ["今の状態は、次のようなパターンと似ています。", ""];
+  selectedBlocks.forEach((b, idx) => {
+    out.push(...b);
+    if (idx < selectedBlocks.length - 1) out.push("");
+  });
+
+  if (level === "🟢" || level === "🟡") {
+    out.push("", "現時点の安心材料");
+    const reassurance = buildReassuranceBulletsForPatterns(state).slice(0, 3);
+    reassurance.forEach((line) => out.push(line));
+    out.push("", "こんな変化があれば受診を検討");
+    const consult = buildConsultChangeBulletsForPatterns(category).slice(0, 3);
+    consult.forEach((line) => out.push(line));
+  }
+
+  return out
+    .join("\n")
+    .replace(/整理/g, "理解")
+    .replace(/このような症状では/g, "今回の経過では")
+    .replace(/一般的に/g, "今回の情報では")
+    .replace(/場合があります/g, "ことがあります");
+}
+
 async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], summarySection = "") {
   const symptoms = collectConcreteSymptomTerms(state, summaryFacts, summarySection);
   const { queryJP, queryEN } = buildConcreteBilingualQueries(symptoms);
@@ -4467,11 +4566,10 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
   const systemPrompt = [
     "あなたは医療不安を整理する説明作成AIです。",
     "診断・断定は禁止。内部処理や検索語を表示してはいけません。",
-    "出力は次の順序に固定:",
-    "1) あなたの状態の理解を深める",
-    "2) 今の状態は、次のようなパターンと似ています。",
-    "3) ■ パターン名 + 説明3〜4行（最大2、cause有効時は最大1）",
-    "4) 🟢/🟡のみ: 現時点の安心材料（3行）と、こんな変化があれば受診を検討（最大3行）",
+    "出力は次の順序に固定（見出し「あなたの状態の理解を深める」はUI固定なので本文に含めない）:",
+    "・今の状態は、次のようなパターンと似ています。",
+    "・■ パターン名 + 説明3〜4行（最大2、cause有効時は最大1）",
+    "・🟢/🟡のみ: 現時点の安心材料（3行）と、こんな変化があれば受診を検討（最大3行）",
     "禁止語: 「このような症状では」「一般的に」「場合があります」",
     "「可能性があります」は乱発禁止。必要時は1回まで。",
     "ユーザーの時間情報・強さ・変化を説明に必ず織り込むこと。",
@@ -4494,12 +4592,7 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
   }
 
   if (!message) {
-    const lines = [
-      "あなたの状態の理解を深める",
-      "",
-      "今の状態は、次のようなパターンと似ています。",
-      "",
-    ];
+    const lines = ["今の状態は、次のようなパターンと似ています。", ""];
     const patternTitle = isCauseValid ? `${causeText}が関与するパターン` : "現在の症状経過に近いパターン";
     const p1 = findings.explanation[0] || findings.progression[0] || "症状の背景要素が重なって、いまの不調が続いている状態です。";
     const p2 = findings.progression[0] || "時間経過で波が出るため、強さと変化の追跡が重要です。";
@@ -4530,6 +4623,17 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
     .filter((line) => !/^(抽出した症状語:|検索クエリ\(JP\):|検索クエリ\(EN\):|参考ソース:|デバッグ)/.test(line.trim()))
     .join("\n")
     .trim();
+
+  message = enforceConcreteModalStructure(message, {
+    level,
+    isCauseValid,
+    causeText,
+    strengthText,
+    durationText,
+    symptomText,
+    category,
+    state,
+  });
 
   if (IS_DEBUG) {
     message += `\n\n[debug]\n症状語: ${symptoms.join(" / ")}\nqueryJP: ${queryJP}\nqueryEN: ${queryEN}\nsource: ${sourceNames.join(" / ")}`;
@@ -6538,12 +6642,10 @@ app.post("/api/state-patterns", async (req, res) => {
     console.error("state-patterns error:", error);
     return res.status(200).json({
       message: [
-        "あなたの状態の理解を深める",
-        "",
         "今の状態は、次のようなパターンと似ています。",
         "",
         "■ 現在の症状経過に近いパターン",
-        "症状の強さと経過時間をあわせて見ると、今の状態を整理しやすくなります。",
+        "症状の強さと経過時間をあわせて見ると、今の状態を理解しやすくなります。",
         "強さが上がるか、同じ強さのまま続くかが、次の判断ポイントです。",
         "新しい症状が加わらないかを、短い間隔で確認していくのが安全です。",
         "",
