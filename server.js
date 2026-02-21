@@ -850,6 +850,9 @@ function initConversationState(input = {}) {
     clientMeta: input.clientMeta || {},
     locationSnapshot: null,
     summaryText: null,
+    lastConcreteDetailsText: null,
+    lastConcreteQueryJP: null,
+    lastConcreteQueryEN: null,
     judgmentSnapshot: null,
     followUpSnapshotPendingField: null,
     followUpSnapshotResume: null,
@@ -4429,6 +4432,63 @@ function countJapaneseSentences(text) {
     .filter(Boolean).length;
 }
 
+function buildClinicalDetailLines(options = {}) {
+  const {
+    category = "PAIN",
+    causeText = "",
+    durationText = "",
+    strengthText = "",
+    symptomText = "",
+    associated = "",
+    isCauseValid = false,
+  } = options;
+
+  const byCategory = {
+    GI: {
+      mechanism:
+        "発生メカニズムとしては、腸管のけいれんや蠕動の乱れ、消化管粘膜への刺激が重なると痛みが増幅しやすい。",
+      organ:
+        "関連器官は胃・小腸・大腸で、部位差によって痛みの質（キリキリ/鈍痛）と波の出方が変化する。",
+      combo:
+        "症状の組み合わせ（腹痛 + 便通変化 + 吐き気）の同時出現は、刺激性の消化管反応を示す情報として扱える。",
+    },
+    SKIN: {
+      mechanism:
+        "発生メカニズムとしては、角層バリア機能の低下により外的刺激の侵入と水分蒸散が同時に進み、ヒリヒリ感が持続しやすい。",
+      organ:
+        "関連器官は表皮・角層で、乾燥や摩擦の反復で局所炎症が増えると痛みの閾値が下がる。",
+      combo:
+        "症状の組み合わせ（ヒリヒリ + 乾燥 + 触刺激で増悪）は、バリア障害型の経過情報として解釈できる。",
+    },
+    INFECTION: {
+      mechanism:
+        "発生メカニズムとしては、上気道粘膜の炎症と乾燥刺激が重なり、咽頭痛や違和感が増幅しやすい。",
+      organ:
+        "関連器官は咽頭・鼻腔・気道上部で、炎症部位の広がりに応じて咳や全身症状の出方が変わる。",
+      combo:
+        "症状の組み合わせ（咽頭痛 + 咳/鼻症状 + 体温変化）は、局所炎症の進行度をみる判断材料になる。",
+    },
+    PAIN: {
+      mechanism:
+        "発生メカニズムとしては、筋緊張・血管反応・感覚神経の過敏化が重なり、痛みの強さが時間で変動しやすい。",
+      organ:
+        "関連器官は主に筋膜・末梢神経・血管系で、刺激負荷が続くと痛み閾値が低下しやすい。",
+      combo:
+        "症状の組み合わせ（痛みの質 + 強さスコア + 時間経過）は、悪化要因の同定に有効な情報軸になる。",
+    },
+  };
+
+  const base = byCategory[category] || byCategory.PAIN;
+  const causeLine = isCauseValid
+    ? `きっかけとして「${causeText}」がある場合、${durationText || "現在の経過"}で${strengthText || "症状強度"}が変動しやすい。`
+    : `${durationText || "現在の経過"}で${strengthText || "症状強度"}と${symptomText || "症状特徴"}を同時に追うと病態把握の精度が上がる。`;
+  const assocLine = associated
+    ? `随伴症状として「${associated}」が同時にある場合、単独症状よりも病態情報の解像度が高くなる。`
+    : "随伴症状の有無は、経過判定で重みの大きい観察点になる。";
+
+  return [causeLine, base.mechanism, base.organ, base.combo, assocLine];
+}
+
 function enforceConcreteModalStructure(message, options = {}) {
   const {
     level = "🟢",
@@ -4439,6 +4499,7 @@ function enforceConcreteModalStructure(message, options = {}) {
     symptomText = "",
     category = "PAIN",
     state = null,
+    associatedText = "",
   } = options;
   const lines = String(message || "")
     .split("\n")
@@ -4481,19 +4542,26 @@ function enforceConcreteModalStructure(message, options = {}) {
   if (selectedBlocks.length === 1) {
     const body = selectedBlocks[0].slice(1).filter((l) => (l || "").trim().length > 0);
     let sentenceCount = countJapaneseSentences(body.join(" "));
-    const supplements = [
-      isCauseValid
-        ? `${causeText}というきっかけのあとに、${durationText || "現在"}の経過で症状が目立ってきた流れです。`
-        : `${durationText || "現在"}の経過で、症状の波が見えやすい状態です。`,
-      `${strengthText || "いまの強さ"}と${symptomText || "症状の変化"}を同時にみると、今後の流れを把握しやすくなります。`,
-      "急に悪化しないかを短い間隔で確認すると、次の判断につなげやすくなります。",
-      "新しい強い症状が加わるかどうかが、受診タイミングの目安になります。",
-    ];
+    const supplements = buildClinicalDetailLines({
+      category,
+      causeText,
+      durationText,
+      strengthText,
+      symptomText,
+      associated: associatedText,
+      isCauseValid,
+    });
     let idx = 0;
     while (sentenceCount < 4 && idx < supplements.length) {
       body.push(supplements[idx]);
       sentenceCount += 1;
       idx += 1;
+    }
+    // 情報量を増やす要件: きっかけ有効時は4文を超えても医学情報を優先追記
+    if (isCauseValid) {
+      supplements.slice(idx).forEach((line) => {
+        if (!body.includes(line)) body.push(line);
+      });
     }
     selectedBlocks[0] = [selectedBlocks[0][0], ...body];
   }
@@ -4515,6 +4583,10 @@ function enforceConcreteModalStructure(message, options = {}) {
 
   return out
     .join("\n")
+    .replace(/[🟢🟡🔴🤝📝✅⏳⚠️💬🌱🏥🚨💊]/g, "")
+    .replace(/安心材料として/g, "")
+    .replace(/挙げられます/g, "記載できる")
+    .replace(/検討してください/g, "検討する")
     .replace(/整理/g, "理解")
     .replace(/このような症状では/g, "今回の経過では")
     .replace(/一般的に/g, "今回の情報では")
@@ -4552,6 +4624,11 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
     : getSlotStatusValue(state, "severity", state?.slotAnswers?.pain_score || "");
   const durationText = getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "");
   const symptomText = getSlotStatusValue(state, "worsening", state?.slotAnswers?.worsening || "");
+  const associatedText = getSlotStatusValue(
+    state,
+    "associated",
+    state?.slotAnswers?.associated_symptoms || ""
+  );
   const detailPayload = {
     symptoms,
     strengthText,
@@ -4566,11 +4643,13 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
   const systemPrompt = [
     "あなたは医療不安を整理する説明作成AIです。",
     "診断・断定は禁止。内部処理や検索語を表示してはいけません。",
+    "共感メッセージ・語りかけ口調は禁止。客観的記述と医学的整理に徹してください。",
     "出力は次の順序に固定（見出し「あなたの状態の理解を深める」はUI固定なので本文に含めない）:",
     "・今の状態は、次のようなパターンと似ています。",
     "・■ パターン名 + 説明3〜4行（最大2、cause有効時は最大1）",
     "・🟢/🟡のみ: 現時点の安心材料（3行）と、こんな変化があれば受診を検討（最大3行）",
-    "禁止語: 「このような症状では」「一般的に」「場合があります」",
+    "説明には、痛みの発生メカニズム・関連器官・症状組み合わせの意味を含めること。",
+    "禁止語: 「このような症状では」「一般的に」「場合があります」「安心材料として〜」「挙げられます」「検討してください」",
     "「可能性があります」は乱発禁止。必要時は1回まで。",
     "ユーザーの時間情報・強さ・変化を説明に必ず織り込むこと。",
   ].join("\n");
@@ -4631,6 +4710,7 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
     strengthText,
     durationText,
     symptomText,
+    associatedText,
     category,
     state,
   });
@@ -4944,242 +5024,189 @@ function fillActionSpecificity(actionText, hypothesisId) {
   return text;
 }
 
-function getExternalSearchBoostByHypothesis(hypothesisId, searchText) {
-  const t = String(searchText || "").toLowerCase();
-  if (!t) return 0;
-  const boosts = {
-    skin_dry_irritation: ["petroleum jelly", "ワセリン", "lip balm", "barrier", "乾燥", "刺激回避"],
-    tension_stimulus_headache: ["screen", "blue light", "hydration", "headache", "睡眠", "ストレス"],
-    gi_irritation_pattern: ["oral rehydration", "ORS", "経口補水", "下痢", "吐き気", "少量頻回"],
-    upper_airway_irritation: ["throat", "humid", "warm fluids", "のど", "咳", "加湿"],
+function buildCurrentStateContext(state, historyText = "", concreteMessage = "") {
+  const combinedText = [
+    state?.primarySymptom || "",
+    historyText || "",
+    concreteMessage || "",
+    state?.lastConcreteDetailsText || "",
+    ...Object.values(state?.slotAnswers || {}),
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const features = extractFeatures(combinedText);
+  const symptoms = collectConcreteSymptomTerms(state, buildStateFactsBullets(state), combinedText);
+  const intensityRaw = Number.isFinite(state?.lastPainScore)
+    ? state.lastPainScore
+    : Number(String(state?.slotAnswers?.pain_score || "").match(/\d+/)?.[0] || NaN);
+  const intensity = Number.isFinite(intensityRaw) ? intensityRaw : 5;
+  const location = features.bodyPart || resolveQuestionCategoryFromState(state);
+  const duration = features.duration || state?.slotAnswers?.duration || "";
+  const progression = state?.slotAnswers?.worsening || features.onsetType || "";
+  const associatedSymptoms = Array.from(
+    new Set([...(features.associatedSymptoms || []), String(state?.slotAnswers?.associated_symptoms || "")].filter(Boolean))
+  );
+  return {
+    symptoms,
+    location,
+    duration,
+    intensity,
+    progression,
+    associatedSymptoms,
+    features,
   };
-  const keywords = boosts[hypothesisId] || [];
-  return keywords.reduce((acc, kw) => (t.includes(kw.toLowerCase()) ? acc + 1 : acc), 0);
+}
+
+function buildMandatoryGoogleQuery(context) {
+  const location = String(context?.location || "symptom");
+  const symptoms = Array.isArray(context?.symptoms) ? context.symptoms.join(" ") : "";
+  const intensity = Number.isFinite(context?.intensity) ? context.intensity : 5;
+  const duration = String(context?.duration || "unknown");
+  return `${location} ${symptoms} intensity ${intensity}/10 duration ${duration} no fever no vomiting self care management`
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function extractTopSearchEvidence(results = []) {
+  const top3 = (results || []).slice(0, 3);
+  const selfCare = [];
+  const observe = [];
+  const danger = [];
+  for (const item of top3) {
+    const t = `${item?.title || ""} ${item?.snippet || ""}`.trim();
+    if (!t) continue;
+    if (/self|care|home|対処|セルフケア|hydration|rest|保湿|補水/.test(t.toLowerCase()) && selfCare.length < 3) {
+      selfCare.push(t);
+    }
+    if (/observe|monitor|watch|経過|継続|持続|再評価|悪化/.test(t.toLowerCase()) && observe.length < 3) {
+      observe.push(t);
+    }
+    if (/red flag|warning|emergency|救急|受診|激痛|嘔吐|高熱|呼吸/.test(t.toLowerCase()) && danger.length < 3) {
+      danger.push(t);
+    }
+  }
+  return { top3, selfCare, observe, danger };
+}
+
+function parseJsonObjectFromText(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch (_) {
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    try {
+      return JSON.parse(m[0]);
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+function normalizeAdviceTopic(topic) {
+  const t = String(topic || "").toLowerCase();
+  if (/(腹|お腹|胃|腸|gi)/.test(t)) return "お腹";
+  if (/(喉|のど|throat|respir)/.test(t)) return "喉";
+  if (/(頭|head|headache)/.test(t)) return "頭";
+  if (/(唇|皮膚|skin|lip)/.test(t)) return "皮膚";
+  return t;
+}
+
+function normalizeContextLocation(location) {
+  return normalizeAdviceTopic(location);
 }
 
 async function buildImmediateActionHypothesisPlan(state, historyText = "", summarySection = "") {
   const summaryFacts = buildStateFactsBullets(state);
   const concrete = buildConcreteStatePatternMessage(state, summaryFacts, summarySection);
-  const stateText = [
-    concrete.message,
+  const currentStateContext = buildCurrentStateContext(
+    state,
     historyText,
-    state?.causeDetailText || "",
-    ...Object.values(state?.slotAnswers || {}),
-  ]
-    .filter(Boolean)
-    .join("\n");
+    [concrete.message, state?.lastConcreteDetailsText || ""].filter(Boolean).join("\n")
+  );
+  const searchQuery = buildMandatoryGoogleQuery(currentStateContext);
 
-  // Step1: 「今の状態について詳しく」の全文を特徴量へ分解
-  const features = extractFeatures(stateText);
-  const searchQuery = buildExternalActionSearchQuery(concrete, features);
   const [jaSearch, enSearch] = await Promise.all([
     fetchGoogleCustomSearchResults(searchQuery, "ja"),
     fetchGoogleCustomSearchResults(searchQuery, "en"),
   ]);
-  const actionSearchResults = dedupeAndRankActionSearchResults(
-    [...jaSearch, ...enSearch],
-    features
-  );
-  const actionSearchText = actionSearchResults
-    .slice(0, 10)
-    .map((r) => `${r.title} ${r.snippet}`)
-    .join(" ")
-    .toLowerCase();
-
-  const hypotheses = [
-    {
-      id: "skin_dry_irritation",
-      name: "乾燥・接触刺激",
-      safetyRank: 1,
-      matchRules: {
-        bodyPart: ["唇", "皮膚"],
-        painType: ["ヒリヒリ", "チクチク"],
-        duration: ["さっき", "数時間"],
-        onsetType: ["徐々に"],
-        triggers: ["画面刺激", "冷え", "ストレス"],
-        associatedSymptoms: ["出血なし", "赤み"],
-      },
-      contraindications: {
-        associatedSymptoms: ["水ぶくれ", "発熱"],
-      },
-    },
-    {
-      id: "tension_stimulus_headache",
-      name: "刺激関連頭痛パターン",
-      safetyRank: 2,
-      matchRules: {
-        bodyPart: ["頭"],
-        painType: ["ズキズキ", "締め付け"],
-        duration: ["数時間", "1日以上"],
-        onsetType: ["徐々に"],
-        triggers: ["画面刺激", "睡眠不足", "疲労", "ストレス"],
-        associatedSymptoms: [],
-      },
-      contraindications: {
-        associatedSymptoms: ["発熱", "息苦しさ"],
-      },
-    },
-    {
-      id: "gi_irritation_pattern",
-      name: "消化管刺激パターン",
-      safetyRank: 3,
-      matchRules: {
-        bodyPart: ["お腹"],
-        painType: ["キリキリ"],
-        duration: ["さっき", "数時間"],
-        onsetType: ["突然", "徐々に"],
-        triggers: ["食事", "冷え", "ストレス"],
-        associatedSymptoms: ["吐き気", "下痢"],
-      },
-      contraindications: {
-        associatedSymptoms: ["発熱", "嘔吐"],
-      },
-    },
-    {
-      id: "upper_airway_irritation",
-      name: "上気道炎症パターン",
-      safetyRank: 4,
-      matchRules: {
-        bodyPart: ["喉"],
-        painType: ["ヒリヒリ"],
-        duration: ["数時間", "1日以上"],
-        onsetType: ["徐々に"],
-        triggers: ["冷え", "疲労", "ストレス"],
-        associatedSymptoms: ["発熱"],
-      },
-      contraindications: {
-        associatedSymptoms: ["息苦しさ"],
-      },
-    },
-  ];
-
-  const scored = hypotheses.map((h) => {
-    const result = scoreHypothesis(h, features);
-    const searchBoost = getExternalSearchBoostByHypothesis(h.id, actionSearchText);
-    return {
-      ...h,
-      score: result.score + searchBoost,
-      contraindicationHits: result.contraindicationHits,
-      searchBoost,
-    };
-  });
-  const maxScore = Math.max(...scored.map((s) => s.score));
-  const nearTop = scored.filter((s) => s.score >= maxScore - 1);
-  const best = nearTop.sort((a, b) => a.safetyRank - b.safetyRank)[0] || scored[0];
-
-  const otcAllowed = shouldRecommendOTC(best, features.severityHint);
-  let candidateActions = [];
-  if (best.id === "skin_dry_irritation") {
-    if (otcAllowed) {
-      candidateActions.push({
-        title:
-          "白色ワセリンを米粒2〜3粒ぶん取り、唇全体に白く残る厚さで塗り、2〜3時間ごとに24時間続け、悪化時は受診を検討しましょう",
-        reason:
-          "乾燥や接触刺激でバリアが落ちている可能性があり、表面保護を先に作るとしみる刺激を減らせると考えられます。",
-        isOtc: true,
-      });
-    }
-    candidateActions.push({
-      title:
-        "患部はなめない・こすらないを徹底し、乾燥時は毎回ワセリンへ置き換えて半日続け、6時間で改善しなければ再評価しましょう",
-      reason:
-        "摩擦や唾液刺激が続くと回復が遅れる可能性があるため、刺激を断つ行動が整合的です。",
-      isOtc: false,
-    });
-  } else if (best.id === "tension_stimulus_headache") {
-    candidateActions = [
-      {
-        title:
-          "今から4時間は画面を45分見たら10分休む周期にし、休止中は照明を落として、悪化時は中断して受診を検討しましょう",
-        reason:
-          "光刺激と集中負荷が重なって症状が増幅している可能性があり、外部医療情報でも刺激量の分割が有効と示唆されています。",
-        isOtc: false,
-      },
-      {
-        title:
-          "常温水を150〜200mlずつ30〜60分ごとに4回補給し、半日続けても改善しなければ行動計画を見直しましょう",
-        reason:
-          "脱水や自律神経の揺れが関与している可能性があり、水分補給の再調整が文脈に合います。",
-        isOtc: false,
-      },
-    ];
-  } else if (best.id === "gi_irritation_pattern") {
-    candidateActions = [
-      {
-        title:
-          "経口補水液を100〜150mlずつ15〜20分ごとに2〜3時間続け、吐き気や痛みが悪化したら早めに受診を検討しましょう",
-        reason:
-          "消化管刺激が疑われる場面では少量頻回の補給が負担を減らす可能性があり、外部情報とも整合しています。",
-        isOtc: false,
-      },
-      {
-        title:
-          "食事は6〜8時間休み、再開時はおかゆを半量から1回ずつ試して、再悪化したら中止して再評価しましょう",
-        reason:
-          "負荷を急に戻すと症状がぶり返す可能性があるため、再開量を絞る設計が合理的です。",
-        isOtc: false,
-      },
-    ];
-  } else {
-    candidateActions = [
-      {
-        title:
-          "温かい飲み物を120〜180mlずつ1時間ごとに6回取り、半日続けて喉の刺激が強まる場合は受診を検討しましょう",
-        reason:
-          "上気道の乾燥刺激が関係する可能性があり、保湿を保つことで悪化を抑えられることがあります。",
-        isOtc: false,
-      },
-      {
-        title:
-          "室温20〜24℃・湿度50〜60%を維持し、会話量を半日にわたり普段の半分に抑え、悪化時は再評価しましょう",
-        reason:
-          "刺激総量を下げると、のど症状の増幅を防げる可能性があります。",
-        isOtc: false,
-      },
-    ];
+  const ranked = dedupeAndRankActionSearchResults([...jaSearch, ...enSearch], currentStateContext.features || {});
+  if (!ranked || ranked.length === 0) {
+    throw new Error("Search required but no results");
   }
 
-  const blockedTemplate = /(水分を取る|横になる|安静にする)/;
-  candidateActions = candidateActions.filter((action) => {
-    if (!blockedTemplate.test(action.title)) return true;
-    return contextMatchScore(action.title, features, best) >= 3;
+  const evidence = extractTopSearchEvidence(ranked);
+  const sourceNames = Array.from(
+    new Set(ranked.filter((r) => r.trusted).map((r) => r.host).filter(Boolean))
+  ).slice(0, 3);
+
+  const llmPrompt = [
+    "You convert medical search evidence into immediate actions.",
+    "Use ONLY provided currentStateContext and extractedSearchEvidence.",
+    "Do not invent sources. Do not diagnose.",
+    "Return strict JSON: {\"topic\":\"...\",\"actions\":[{\"title\":\"...\",\"reason\":\"...\",\"isOtc\":false}]}",
+    "actions max 2, OTC max 1.",
+    "Keep Japanese output and preserve existing action writing style.",
+  ].join("\n");
+
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: llmPrompt },
+      {
+        role: "user",
+        content: JSON.stringify({
+          currentStateContext,
+          extractedSearchEvidence: {
+            selfCare: evidence.selfCare,
+            observe: evidence.observe,
+            danger: evidence.danger,
+          },
+        }),
+      },
+    ],
+    temperature: 0.2,
+    max_tokens: 500,
   });
+  const parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
+  if (!parsed || !Array.isArray(parsed.actions)) {
+    throw new Error("Search translation failed");
+  }
+
+  const adviceTopic = normalizeAdviceTopic(parsed.topic || "");
+  const contextTopic = normalizeContextLocation(currentStateContext.location || "");
+  if (adviceTopic && contextTopic && adviceTopic !== contextTopic) {
+    throw new Error("Context mismatch detected");
+  }
 
   let otcUsed = false;
-  let finalActions = candidateActions
-    .filter((action) => {
-      if (action.isOtc && otcUsed) return false;
-      if (action.isOtc) otcUsed = true;
+  const finalActions = parsed.actions
+    .filter((a) => a && a.title && a.reason)
+    .filter((a) => {
+      const otc = Boolean(a.isOtc);
+      if (otc && otcUsed) return false;
+      if (otc) otcUsed = true;
       return true;
     })
-    .map((action) => {
-      const title = validateActionSpecificity(action.title)
-        ? action.title
-        : fillActionSpecificity(action.title, best.id);
-      return { ...action, title };
-    })
+    .map((a) => ({
+      ...a,
+      title: validateActionSpecificity(a.title)
+        ? String(a.title)
+        : fillActionSpecificity(String(a.title), "search_based"),
+    }))
     .slice(0, 2);
 
   if (finalActions.length === 0) {
-    finalActions = [
-      {
-        title:
-          "症状メモを2時間ごとに1回、合計3回（強さ・誘因・変化）で記録し、今日中に悪化したら受診を検討して再評価しましょう",
-        reason:
-          "現時点では複数仮説が並ぶため、経過を定量化して次判断の精度を上げる方法が安全側です。",
-        isOtc: false,
-      },
-    ];
+    throw new Error("Search required but no valid actions");
   }
+
   return {
     actions: finalActions,
-    hypothesisId: best.id,
-    hypothesisCount: hypotheses.length,
-    features,
+    currentStateContext,
     searchQuery,
-    sourceNames: Array.from(
-      new Set(actionSearchResults.filter((r) => r.trusted).map((r) => r.host).filter(Boolean))
-    ).slice(0, 3),
+    evidence,
+    sourceNames,
     concreteMessage: concrete.message,
   };
 }
@@ -6619,6 +6646,9 @@ app.post("/api/state-patterns", async (req, res) => {
       Array.isArray(summaryFacts) ? summaryFacts : [],
       summarySection || ""
     );
+    state.lastConcreteDetailsText = message;
+    state.lastConcreteQueryJP = queryJP || null;
+    state.lastConcreteQueryEN = queryEN || null;
     const basePayload = {
       message,
       sourcePolicy: [
