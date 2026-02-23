@@ -2476,17 +2476,19 @@ function pickActionsForBlock(plan, maxCount = 2) {
 
 function buildImmediateActionsBlock(level, state, historyText = "", research = null) {
   const lines = ["✅ 今すぐやること（これだけでOK）"];
-  const plannedActions = pickActionsForBlock(research, 2);
+  if (level === "🟡") {
+    lines.push(buildYellowPsychologicalCushionLine());
+    lines.push("");
+  }
+  const plannedActions = sanitizeImmediateActions(
+    pickActionsForBlock(research, 2),
+    buildSafeImmediateFallbackAction()
+  );
   const sourceNames = Array.isArray(research?.sourceNames)
     ? research.sourceNames.filter(Boolean).slice(0, 3)
     : [];
   const fallbackActions = [
-    {
-      title:
-        "症状メモを2時間ごとに1回、合計3回（強さ・きっかけ・変化）で記録し、今日中に悪化サインがないか再確認しましょう",
-      reason:
-        "今ある情報だけでは原因が複数考えられるため、経過を定量化すると次の判断精度が上がる可能性があります。",
-    },
+    buildSafeImmediateFallbackAction(),
   ];
   const finalActions = plannedActions.length > 0 ? plannedActions : fallbackActions;
   finalActions.slice(0, 2).forEach((action, idx) => {
@@ -2499,6 +2501,24 @@ function buildImmediateActionsBlock(level, state, historyText = "", research = n
     if (idx < Math.min(finalActions.length, 2) - 1) lines.push("");
   });
   return lines.join("\n");
+}
+
+function buildYellowPsychologicalCushionLine() {
+  const templates = [
+    "いまの経過であれば、少し力を抜いて体の負担を整える時間として受け止められます。",
+    "現在の症状の流れは、判断を急がず落ち着いて体調の変化を見られる段階と捉えられます。",
+    "ここまでの経過なら、無理に動かず体を整えながら変化を見ていく時間と考えられます。",
+  ];
+  const forbidden = /(しましょう|してください|安全|大丈夫|問題ありません|緊急性|危険)/;
+  const inRange = (text) => {
+    const len = String(text || "").length;
+    return len >= 40 && len <= 65;
+  };
+  const candidates = templates.filter((line) => !forbidden.test(line) && inRange(line));
+  if (candidates.length > 0) {
+    return candidates[Math.floor(Math.random() * candidates.length)];
+  }
+  return "いまの経過なら、判断を急がず体の負担を整えながら落ち着いて様子を見られる段階と捉えられます。";
 }
 
 function ensureImmediateActionsBlock(text, level, state, historyText = "", research = null) {
@@ -2515,21 +2535,47 @@ function buildImmediateActionFallbackPlanFromState(state, overrides = {}) {
   const context =
     overrides.currentStateContext ||
     buildCurrentStateContext(state, "", state?.lastConcreteDetailsText || "");
-  const action = {
-    title:
-      "症状メモを2時間ごとに1回、合計3回（強さ・変化・随伴症状）で記録し、同日中に悪化サインがないか再確認しましょう",
-    reason:
-      "現在の状態データを再評価しやすくなり、次の判断の精度を維持できます。",
-    isOtc: false,
-  };
+  const action = buildSafeImmediateFallbackAction();
   return {
-    actions: Array.isArray(overrides.actions) && overrides.actions.length > 0 ? overrides.actions : [action],
+    actions:
+      Array.isArray(overrides.actions) && overrides.actions.length > 0
+        ? sanitizeImmediateActions(overrides.actions, action)
+        : [action],
     currentStateContext: context,
     searchQuery: overrides.searchQuery || "",
     sourceNames: Array.isArray(overrides.sourceNames) ? overrides.sourceNames : [],
     evidence: overrides.evidence || { top3: [], selfCare: [], observe: [], danger: [] },
     concreteMessage: overrides.concreteMessage || "",
   };
+}
+
+function buildSafeImmediateFallbackAction() {
+  return {
+    title:
+      "刺激（画面・強い光・空腹）を1つ減らし、水分を150〜200mlとって静かな環境で4〜6時間様子を見ましょう",
+    reason:
+      "検索で一致しやすい基本対処は、刺激負荷と脱水要因を同時に下げて症状のぶれを抑えることです。",
+    isOtc: false,
+  };
+}
+
+function isForbiddenImmediateAction(action = {}) {
+  const title = String(action?.title || "");
+  const reason = String(action?.reason || "");
+  const forbidden = [
+    /症状メモを2時間ごとに1回、合計3回（強さ・変化・随伴症状）で記録し、同日中に悪化サインがないか再確認しましょう/,
+    /症状メモを2時間ごとに1回、合計3回（強さ・きっかけ・変化）で記録し、今日中に悪化サインがないか再確認しましょう/,
+    /現在の状態データを再評価しやすくなり、次の判断の精度を維持できます。/,
+  ];
+  return forbidden.some((re) => re.test(title) || re.test(reason));
+}
+
+function sanitizeImmediateActions(actions = [], fallbackAction = null) {
+  const safe = (Array.isArray(actions) ? actions : [])
+    .filter((a) => a && a.title && a.reason)
+    .filter((a) => !isForbiddenImmediateAction(a));
+  if (safe.length > 0) return safe.slice(0, 2);
+  return fallbackAction ? [fallbackAction] : [];
 }
 
 function mapDailyImpactAnswerToRestLevel(answer) {
@@ -3695,6 +3741,18 @@ function detectQuestionCategory4(text) {
   return "PAIN";
 }
 
+function resolveLockedQuestionCategory(state, historyText = "") {
+  if (state?.triageCategory) return state.triageCategory;
+  const fromState = resolveQuestionCategoryFromState(state);
+  if (fromState) {
+    state.triageCategory = fromState;
+    return fromState;
+  }
+  const detected = detectQuestionCategory4(historyText);
+  state.triageCategory = detected || "PAIN";
+  return state.triageCategory;
+}
+
 function getCategoryQuestionOverride(category, slotKey) {
   if (category === "PAIN") {
     if (slotKey === "cause_category") {
@@ -4073,19 +4131,20 @@ function validateSummaryAgainstNormalized(text, state) {
 
 function buildStateFactsBullets(state) {
   const answers = state?.slotAnswers || {};
-  const filled = state?.slotFilled || {};
-  const val = (statusKey, fallback = "") =>
-    getSlotStatusValue(state, statusKey, fallback);
-  const toRiskRank = (slotKey) => {
-    const level = state?.slotNormalized?.[slotKey]?.riskLevel;
-    if (level === RISK_LEVELS.HIGH) return 3;
-    if (level === RISK_LEVELS.MEDIUM) return 2;
-    if (level === RISK_LEVELS.LOW) return 1;
-    return 0;
+  const val = (statusKey, fallback = "") => getSlotStatusValue(state, statusKey, fallback);
+  const isUnknownLike = (text) =>
+    /^(ない|なし|特にない|特になし|これ以外は特にない|わからない|分からない|不明|思い当たらない|特に思い当たらない)$/i.test(
+      String(text || "").trim()
+    );
+  const pushIfValid = (bucket, line) => {
+    const normalized = String(line || "").trim();
+    if (!normalized) return;
+    if (/^・\s*$/.test(normalized)) return;
+    if (/^・\s*(ない|なし|特にない|特になし|わからない|分からない|不明)\s*$/i.test(normalized)) return;
+    if (!bucket.includes(normalized)) bucket.push(normalized);
   };
-  const ranked = [];
 
-  // 1) 痛みスコア（必ず先頭）
+  // 1) 痛みスコア（先頭固定）
   const painScore = Number.isFinite(state?.lastPainScore)
     ? state.lastPainScore
     : (() => {
@@ -4097,78 +4156,42 @@ function buildStateFactsBullets(state) {
     painLine = `・痛みは${painScore}/10程度`;
   } else {
     const rawSeverity = val("severity", answers.pain_score);
-    painLine = rawSeverity ? `・痛みの強さ: ${rawSeverity}` : "・痛みの強さは未確認";
+    painLine = !rawSeverity || isUnknownLike(rawSeverity)
+      ? "・痛みは中等度"
+      : `・痛みは${String(rawSeverity).replace(/^痛み(は|が)?/, "").trim()}`;
+  }
+  const lines = [painLine];
+
+  const worsening = val("worsening", answers.worsening);
+  if (worsening && !isUnknownLike(worsening)) {
+    pushIfValid(lines, `・痛み方は${worsening}`);
   }
 
-  // 2) 以降は緊急度が高い順
-  // 危険兆候の有無
+  const duration = val("duration", answers.duration);
+  if (duration && !isUnknownLike(duration)) {
+    pushIfValid(lines, `・始まりは${duration}`);
+  }
+
+  const impact = val("impact", answers.daily_impact);
+  if (impact && !isUnknownLike(impact)) {
+    pushIfValid(lines, `・日常生活では${impact}`);
+  }
+
   const associated = val("associated", answers.associated_symptoms);
-  const hasDanger =
-    state?.slotNormalized?.associated_symptoms?.riskLevel === RISK_LEVELS.HIGH ||
-    /(しびれ|視界|意識|失神|息苦しさ|胸痛)/.test(associated);
-  ranked.push({
-    line: hasDanger ? "・危険兆候がみられる" : "・危険兆候は今のところはっきりしない",
-    score: hasDanger ? 3 : 0,
-    tie: 0,
-  });
-
-  // 日常生活への影響（daily_impact）
-  if (filled.daily_impact) {
-    const impact = val("impact", answers.daily_impact);
-    if (impact) {
-      ranked.push({
-        line: `・日常生活への影響: ${impact}`,
-        score: toRiskRank("daily_impact"),
-        tie: 1,
-      });
-    }
+  if (associated && !isUnknownLike(associated)) {
+    const a = String(associated).trim();
+    const assocLine = /(ある|ない|続く|出る|つらい|痛い|苦しい|しびれ|吐き気|めまい|嘔吐|発熱)/.test(a)
+      ? `・${a}`
+      : `・付随症状として${a}`;
+    pushIfValid(lines, assocLine);
   }
 
-  // 経過時間（数時間以上なら重要）
-  if (filled.duration) {
-    const duration = val("duration", answers.duration);
-    if (duration && /(数時間|時間|昨日|日|一日以上前|前から|ずっと)/.test(duration)) {
-      ranked.push({
-        line: `・経過時間: ${duration}`,
-        score: toRiskRank("duration"),
-        tie: 3,
-      });
-    }
+  const cause = val("cause_category", state?.causeDetailText || answers.cause_category);
+  if (cause && !isUnknownLike(cause)) {
+    pushIfValid(lines, `・きっかけは${cause}`);
   }
 
-  // 付随症状（ある場合のみ）
-  if (filled.associated_symptoms && associated && !/(特にない|なし|これ以外は特にない)/.test(associated)) {
-    ranked.push({
-      line: `・付随症状: ${associated}`,
-      score: toRiskRank("associated_symptoms"),
-      tie: 2,
-    });
-  }
-
-  // きっかけ（医学的に意味がある場合のみ）
-  if (filled.cause_category) {
-    const cause = val("cause_category", state?.causeDetailText || answers.cause_category);
-    if (cause && !/(思い当たらない|分からない|わからない|不明)/.test(cause)) {
-      ranked.push({
-        line: `・きっかけ: ${cause}`,
-        score: toRiskRank("cause_category"),
-        tie: 4,
-      });
-    }
-  }
-
-  ranked.sort((a, b) => {
-    if (b.score !== a.score) return b.score - a.score;
-    return a.tie - b.tie;
-  });
-
-  const uniq = [painLine];
-  for (const item of ranked) {
-    if (!item?.line || uniq.includes(item.line)) continue;
-    uniq.push(item.line);
-  }
-  const limited = uniq.slice(0, 4);
-  return limited.length > 0 ? limited : [painLine];
+  return lines.slice(0, 6);
 }
 
 function buildStateAboutLine(state, level) {
@@ -4176,16 +4199,23 @@ function buildStateAboutLine(state, level) {
   if (level === "🟡") {
     // RED抑制ガード時（PAIN + さっき/数時間前）は、危険否定ではなく時間軸ベースで記述する
     if (shouldBlockRedByPainRecentDuration(state)) {
-      const durationText = getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "");
-      const worseningText = getSlotStatusValue(state, "worsening", state?.slotAnswers?.worsening || "");
-      const symptomText = state?.primarySymptom || "症状";
-      const progressionPart = worseningText ? `、症状の推移（${worseningText}）` : "";
-      const timePart = durationText ? `（${durationText}から）` : "";
-      const templates = [
-        `現在の${symptomText}${timePart}は発症からの時間経過${progressionPart}からみて、急激な悪化を示す経過ではありません。`,
-        `現在の${symptomText}${timePart}は時間軸でみると急変方向の経過ではなく、今この瞬間に行動を変える必要が高い流れではありません。`,
-      ];
-      return templates[Math.floor(Math.random() * templates.length)];
+      const symptomSource = [
+        state?.primarySymptom || "",
+        state?.slotStatus?.associated?.value || "",
+        state?.slotAnswers?.associated_symptoms || "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      const toMainSymptomLabel = (text) => {
+        const s = String(text || "");
+        if (/(頭が痛|頭痛|こめかみ|後頭部)/.test(s)) return "頭痛";
+        if (/(お腹が痛|腹痛|胃痛|みぞおち|下腹)/.test(s)) return "腹痛";
+        if (/(喉が痛|のどが痛|喉の痛み|咽頭痛)/.test(s)) return "喉の痛み";
+        if (/(唇が痛|唇|口唇)/.test(s)) return "唇の痛み";
+        return "症状";
+      };
+      const mainSymptom = toMainSymptomLabel(symptomSource);
+      return `現在の${mainSymptom}は発症からの時間経過や症状の推移からみて、急激に悪化している経過ではありません。`;
     }
     const painScore = state?.lastPainScore;
     const painPart =
@@ -5275,9 +5305,26 @@ function buildCurrentStateContext(state, historyText = "", concreteMessage = "")
   const associatedSymptoms = Array.from(
     new Set([...(features.associatedSymptoms || []), String(state?.slotAnswers?.associated_symptoms || "")].filter(Boolean))
   );
+  const normalizeMainSymptomLabel = (text) => {
+    const s = String(text || "");
+    if (/(頭が痛|頭痛|こめかみ|後頭部)/.test(s)) return "頭痛";
+    if (/(お腹が痛|腹痛|胃痛|みぞおち|下腹)/.test(s)) return "腹痛";
+    if (/(喉が痛|のどが痛|喉の痛み|咽頭痛)/.test(s)) return "喉の痛み";
+    if (/(唇が痛|口唇|唇)/.test(s)) return "唇の痛み";
+    return String(state?.primarySymptom || "症状");
+  };
+  const summaryFacts = buildStateFactsBullets(state).map((line) => toBulletText(line));
+  const mainSymptom = normalizeMainSymptomLabel([
+    state?.primarySymptom || "",
+    state?.slotStatus?.associated?.value || "",
+    state?.slotAnswers?.associated_symptoms || "",
+    historyText || "",
+  ].join(" "));
   return {
     symptoms,
     location,
+    mainSymptom,
+    summaryFacts,
     duration,
     intensity,
     progression,
@@ -5287,13 +5334,13 @@ function buildCurrentStateContext(state, historyText = "", concreteMessage = "")
 }
 
 function buildMandatoryGoogleQuery(context) {
-  const location = String(context?.location || "symptom");
+  const mainSymptom = String(context?.mainSymptom || context?.location || "症状");
+  const facts = Array.isArray(context?.summaryFacts) ? context.summaryFacts.join(" ") : "";
   const symptoms = Array.isArray(context?.symptoms) ? context.symptoms.join(" ") : "";
-  const intensity = Number.isFinite(context?.intensity) ? context.intensity : 5;
-  const duration = String(context?.duration || "unknown");
-  return `${location} ${symptoms} intensity ${intensity}/10 duration ${duration} no fever no vomiting self care management`
+  return `${mainSymptom} ${facts} ${symptoms} 対処法`
     .replace(/\s{2,}/g, " ")
-    .trim();
+    .trim()
+    .slice(0, 260);
 }
 
 function extractTopSearchEvidence(results = []) {
@@ -5360,8 +5407,8 @@ function buildSearchBackedHeuristicActions(context, evidence) {
   }
   if (actions.length === 0) {
     actions.push({
-      title: "症状メモを2時間ごとに1回、合計3回（強さ・変化・随伴症状）で記録し、同日中に悪化サインがないか再確認しましょう",
-      reason: "情報欠落時でも判断精度を維持するため、経過の定量化を優先します。",
+      title: "刺激を1つ減らして静かな環境で休み、水分を150〜200mlとって4〜6時間の変化を確認しましょう",
+      reason: "検索結果で共通する初期対応は、刺激負荷と脱水要因を減らして症状のぶれを抑えることです。",
       isOtc: false,
     });
   }
@@ -5472,7 +5519,7 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
     const topicMismatch = adviceTopic && contextTopic && adviceTopic !== contextTopic;
 
     let otcUsed = false;
-    let finalActions = candidateActions
+    let finalActions = sanitizeImmediateActions(candidateActions, buildSafeImmediateFallbackAction())
       .filter((a) => a && a.title && a.reason)
       .filter((a) => {
         const otc = Boolean(a.isOtc);
@@ -5489,7 +5536,10 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
       .slice(0, 2);
 
     if (topicMismatch || finalActions.length === 0) {
-      finalActions = buildSearchBackedHeuristicActions(currentStateContext, evidence);
+      finalActions = sanitizeImmediateActions(
+        buildSearchBackedHeuristicActions(currentStateContext, evidence),
+        buildSafeImmediateFallbackAction()
+      );
     }
 
     return buildImmediateActionFallbackPlanFromState(state, {
@@ -6378,10 +6428,10 @@ app.post("/api/chat", async (req, res) => {
           .filter((msg) => msg.role === "user")
           .map((msg) => msg.content)
           .join("\n");
-        const category = resolveQuestionCategoryFromState(conversationState[conversationId]) || detectQuestionCategory4(historyText);
-        if (!conversationState[conversationId].triageCategory) {
-          conversationState[conversationId].triageCategory = category;
-        }
+        const category = resolveLockedQuestionCategory(
+          conversationState[conversationId],
+          historyText
+        );
         applyCategoryQuestionOverride(fixed, nextSlot, category, useFinalPrefix);
         const introTemplateIds = buildIntroTemplateIds(
           conversationState[conversationId],
@@ -6748,10 +6798,10 @@ app.post("/api/chat", async (req, res) => {
           .filter((msg) => msg.role === "user")
           .map((msg) => msg.content)
           .join("\n");
-        const category = resolveQuestionCategoryFromState(conversationState[conversationId]) || detectQuestionCategory4(historyText);
-        if (!conversationState[conversationId].triageCategory) {
-          conversationState[conversationId].triageCategory = category;
-        }
+        const category = resolveLockedQuestionCategory(
+          conversationState[conversationId],
+          historyText
+        );
         applyCategoryQuestionOverride(fixed, nextSlot, category, useFinalPrefix);
         const introTemplateIds = buildIntroTemplateIds(
           conversationState[conversationId],
