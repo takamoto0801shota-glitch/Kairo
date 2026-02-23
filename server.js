@@ -838,6 +838,7 @@ function initConversationState(input = {}) {
     decisionType: null,
     decisionLevel: null,
     decisionRatio: null,
+    triageCategory: null,
     followUpPhase: "idle",
     followUpStep: 0,
     followUpDestinationName: null,
@@ -2348,7 +2349,10 @@ function buildHospitalConcernPoint(historyText) {
 
 function ensureHospitalMemoBlock(text, state) {
   if (!text) return text;
-  const memoLines = buildHospitalMemoNarrativeLines(state);
+  const memoLines = [
+    "📝 今の状態について",
+    ...buildStateFactsBullets(state),
+  ];
   const replacedOld = replaceSummaryBlock(
     normalizeHospitalMemoHeaderText(text),
     "📝 いまの状態を整理します",
@@ -2359,80 +2363,6 @@ function ensureHospitalMemoBlock(text, state) {
     "📝 今の状態について",
     memoLines.join("\n")
   );
-}
-
-function resolveHospitalMemoBodyPart(state) {
-  const rawTexts = [
-    state?.slotStatus?.associated?.value,
-    state?.slotStatus?.severity?.value,
-    state?.slotAnswers?.associated_symptoms,
-    state?.primarySymptom,
-  ]
-    .map((v) => String(v || "").trim())
-    .filter(Boolean)
-    .join(" ");
-  const text = rawTexts || "";
-  if (/みぞおち/.test(text)) return "みぞおち付近";
-  if (/(下腹|右下腹|左下腹)/.test(text)) return "下腹部";
-  if (/(お腹|腹|胃|腸)/.test(text)) return "お腹周辺";
-  if (/(こめかみ|後頭部|頭|頭部)/.test(text)) return "頭周辺";
-  if (/(喉|のど|咽頭)/.test(text)) return "喉周辺";
-  if (/(唇|口元|口唇)/.test(text)) return "唇周辺";
-  if (/(皮膚|発疹|赤み|水ぶくれ)/.test(text)) return "皮膚";
-  const featurePart = extractFeatures(text).bodyPart;
-  if (featurePart === "お腹") return "お腹周辺";
-  if (featurePart === "頭") return "頭周辺";
-  if (featurePart === "喉") return "喉周辺";
-  if (featurePart === "唇") return "唇周辺";
-  if (featurePart === "皮膚") return "皮膚";
-  return "症状のある部位";
-}
-
-function buildHospitalMemoNarrativeLines(state) {
-  const painScore = Number.isFinite(state?.lastPainScore)
-    ? state.lastPainScore
-    : (() => {
-        const raw = getSlotStatusValue(state, "severity", state?.slotAnswers?.pain_score || "");
-        const m = String(raw || "").match(/(\d{1,2})\s*\/\s*10|(\d{1,2})/);
-        return m ? Number(m[1] || m[2]) : null;
-      })();
-  const strengthText = Number.isFinite(painScore)
-    ? `強さ${painScore}/10程度の痛み`
-    : (() => {
-        const raw = getSlotStatusValue(state, "severity", state?.slotAnswers?.pain_score || "");
-        return raw ? `${raw}程度の痛み` : "痛み";
-      })();
-  const bodyPart = resolveHospitalMemoBodyPart(state);
-  const associatedRaw = getSlotStatusValue(
-    state,
-    "associated",
-    state?.slotAnswers?.associated_symptoms || ""
-  );
-  const hasAssociated = associatedRaw && !/(特にない|なし|これ以外は特にない)/.test(associatedRaw);
-  const associatedText = hasAssociated
-    ? `${associatedRaw}も伴っています`
-    : "目立つ随伴症状ははっきりしていません";
-  const duration = getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "");
-  const worsening = getSlotStatusValue(state, "worsening", state?.slotAnswers?.worsening || "");
-  const impact = getSlotStatusValue(state, "impact", state?.slotAnswers?.daily_impact || "");
-  const contextParts = [duration, worsening, impact].filter(Boolean).slice(0, 2);
-  const contextText =
-    contextParts.length > 0 ? `、${contextParts.join("・")}という経過` : "、今の経過";
-  const combinedReason =
-    bodyPart.includes("お腹") || bodyPart.includes("みぞおち")
-      ? "胃や周囲の消化器に負担がかかっている可能性"
-      : bodyPart.includes("頭")
-        ? "頭部周辺に負担がかかっている可能性"
-        : bodyPart.includes("喉")
-          ? "喉や上気道に負担がかかっている可能性"
-          : bodyPart.includes("皮膚") || bodyPart.includes("唇")
-            ? "皮膚や粘膜への刺激が続いている可能性"
-            : "体調悪化が進みやすい可能性";
-  return [
-    "📝 今の状態について",
-    `${bodyPart}に${strengthText}が続いており、${associatedText}。`,
-    `痛みの強さ、部位、随伴症状${contextText}の組み合わせから、${combinedReason}が考えられます。`,
-  ];
 }
 
 function ensureHospitalConcernBlock(text, historyText) {
@@ -3766,7 +3696,15 @@ function detectQuestionCategory4(text) {
 }
 
 function getCategoryQuestionOverride(category, slotKey) {
-  if (category === "PAIN") return null;
+  if (category === "PAIN") {
+    if (slotKey === "cause_category") {
+      return {
+        question: "何かきっかけで思い当たることはありますか？",
+        options: ["スマホやパソコンを長時間見た", "寝不足や疲れが続いている", "強いストレスや緊張があった"],
+      };
+    }
+    return null;
+  }
   if (category === "SKIN") {
     if (slotKey === "daily_impact") {
       return {
@@ -4236,6 +4174,19 @@ function buildStateFactsBullets(state) {
 function buildStateAboutLine(state, level) {
   // 🟡のみ：指定の「型」に合わせて生成（固定文にはしない）
   if (level === "🟡") {
+    // RED抑制ガード時（PAIN + さっき/数時間前）は、危険否定ではなく時間軸ベースで記述する
+    if (shouldBlockRedByPainRecentDuration(state)) {
+      const durationText = getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "");
+      const worseningText = getSlotStatusValue(state, "worsening", state?.slotAnswers?.worsening || "");
+      const symptomText = state?.primarySymptom || "症状";
+      const progressionPart = worseningText ? `、症状の推移（${worseningText}）` : "";
+      const timePart = durationText ? `（${durationText}から）` : "";
+      const templates = [
+        `現在の${symptomText}${timePart}は発症からの時間経過${progressionPart}からみて、急激な悪化を示す経過ではありません。`,
+        `現在の${symptomText}${timePart}は時間軸でみると急変方向の経過ではなく、今この瞬間に行動を変える必要が高い流れではありません。`,
+      ];
+      return templates[Math.floor(Math.random() * templates.length)];
+    }
     const painScore = state?.lastPainScore;
     const painPart =
       painScore !== null && painScore !== undefined ? `（痛みは${painScore}くらい）` : "";
@@ -5648,7 +5599,8 @@ function buildLocalSummaryFallback(level, history, state) {
     );
     const hospitalBlock = buildHospitalBlock(state, historyText, hospitalRec);
     return sanitizeSummaryBullets([
-      ...buildHospitalMemoNarrativeLines(state),
+      "📝 今の状態について",
+      buildStateFactsBullets(state).join("\n"),
       "⚠️ Kairoが気になっているポイント",
       buildHospitalConcernPoint(historyText),
       "🏥 Kairoの判断",
@@ -5958,7 +5910,7 @@ function getPainSeverityScore(state) {
 }
 
 function shouldBlockRedByPainRecentDuration(state) {
-  const category = resolveQuestionCategoryFromState(state);
+  const category = state?.triageCategory || resolveQuestionCategoryFromState(state);
   if (category !== "PAIN") return false;
   const durationRaw = String(
     getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "")
@@ -6153,6 +6105,9 @@ app.post("/api/chat", async (req, res) => {
       ];
     }
     const state = getOrInitConversationState(conversationId);
+    if (!state.triageCategory) {
+      state.triageCategory = detectQuestionCategory4(message);
+    }
     console.log("[DEBUG] request init", {
       conversationId,
       hasConversationState: !!conversationState[conversationId],
@@ -6423,7 +6378,10 @@ app.post("/api/chat", async (req, res) => {
           .filter((msg) => msg.role === "user")
           .map((msg) => msg.content)
           .join("\n");
-        const category = detectQuestionCategory4(historyText);
+        const category = resolveQuestionCategoryFromState(conversationState[conversationId]) || detectQuestionCategory4(historyText);
+        if (!conversationState[conversationId].triageCategory) {
+          conversationState[conversationId].triageCategory = category;
+        }
         applyCategoryQuestionOverride(fixed, nextSlot, category, useFinalPrefix);
         const introTemplateIds = buildIntroTemplateIds(
           conversationState[conversationId],
@@ -6790,7 +6748,10 @@ app.post("/api/chat", async (req, res) => {
           .filter((msg) => msg.role === "user")
           .map((msg) => msg.content)
           .join("\n");
-        const category = detectQuestionCategory4(historyText);
+        const category = resolveQuestionCategoryFromState(conversationState[conversationId]) || detectQuestionCategory4(historyText);
+        if (!conversationState[conversationId].triageCategory) {
+          conversationState[conversationId].triageCategory = category;
+        }
         applyCategoryQuestionOverride(fixed, nextSlot, category, useFinalPrefix);
         const introTemplateIds = buildIntroTemplateIds(
           conversationState[conversationId],
