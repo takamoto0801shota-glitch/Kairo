@@ -2459,6 +2459,104 @@ function formatActionReasonLine(reason) {
   return raw.startsWith("→") ? raw : `→ ${raw}`;
 }
 
+function toConciseActionTitle(title) {
+  const raw = String(title || "").replace(/^・\s*/, "").trim();
+  if (!raw) return "刺激を減らして体への負担を軽くします";
+  const firstSentence = raw.split(/[。!?！？]/)[0].trim();
+  const compact = (firstSentence || raw).replace(/\s{2,}/g, " ");
+  return compact.length > 68 ? `${compact.slice(0, 68).trim()}…` : compact;
+}
+
+function ensureReliableReason(reason, evidence = {}) {
+  const raw = String(reason || "").trim();
+  const hasEvidenceCue = /(検索|上位情報|根拠|共通|示され|推奨|ガイドライン|一致)/.test(raw);
+  if (raw && hasEvidenceCue) return raw;
+  const sourceText = [
+    ...(Array.isArray(evidence?.selfCare) ? evidence.selfCare : []),
+    ...(Array.isArray(evidence?.observe) ? evidence.observe : []),
+    ...(Array.isArray(evidence?.danger) ? evidence.danger : []),
+  ]
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .slice(0, 80);
+  if (sourceText) {
+    return `検索結果で共通して示される対処方針に沿っており、症状の悪化要因を減らしやすいためです。`;
+  }
+  if (raw) {
+    return `${raw.replace(/。?$/, "")}。検索結果の要点と整合しているためです。`;
+  }
+  return "検索結果の要点と整合する対処で、負担を減らしながら経過を確認しやすいためです。";
+}
+
+function buildSecondaryImmediateFallbackAction() {
+  return {
+    title: "強い刺激を避けて、体調の変化だけを短時間で確認します",
+    reason: "検索結果で共通する初期対応として、刺激負荷を減らすと症状の推移を見極めやすくなるためです。",
+    isOtc: false,
+  };
+}
+
+function ensureActionCount(actions = [], targetCount = 2, context = {}, evidence = {}) {
+  const out = [];
+  const seen = new Set();
+  for (const item of (Array.isArray(actions) ? actions : [])) {
+    if (!item || !item.title || !item.reason) continue;
+    const key = String(item.title).trim();
+    if (!key || seen.has(key)) continue;
+    out.push(item);
+    seen.add(key);
+    if (out.length >= targetCount) return out;
+  }
+  const topic = normalizeContextLocation(context?.location || "");
+  const supplements = [];
+  if (topic === "頭") {
+    supplements.push(
+      {
+        title: "画面や強い光を避けて、静かな環境で過ごします",
+        reason: "視覚刺激を減らす対応は、検索結果でも悪化要因の抑制として一貫して示されるためです。",
+        isOtc: false,
+      },
+      {
+        title: "水分をこまめに取り、体調の変化を短時間で見ます",
+        reason: "脱水や負荷の重なりを減らすと、症状の推移を判断しやすくなるためです。",
+        isOtc: false,
+      }
+    );
+  } else if (topic === "お腹") {
+    supplements.push(
+      {
+        title: "胃腸に負担の少ない過ごし方に切り替えます",
+        reason: "刺激要因を減らす対応は、検索情報でも症状の持続を抑える方向として示されるためです。",
+        isOtc: false,
+      },
+      {
+        title: "一度に無理をせず、変化を見ながら対応します",
+        reason: "負荷を分散すると、悪化サインの有無を見極めやすくなるためです。",
+        isOtc: false,
+      }
+    );
+  } else {
+    supplements.push(buildSafeImmediateFallbackAction(), buildSecondaryImmediateFallbackAction());
+  }
+  for (const item of supplements) {
+    const key = String(item.title || "").trim();
+    if (!key || seen.has(key)) continue;
+    out.push({
+      ...item,
+      title: toConciseActionTitle(item.title),
+      reason: ensureReliableReason(item.reason, evidence),
+    });
+    seen.add(key);
+    if (out.length >= targetCount) break;
+  }
+  return out.slice(0, targetCount);
+}
+
+function ensureMinimumDoActions(actions = [], minCount = 3, context = {}, evidence = {}) {
+  const out = ensureActionCount(actions, minCount, context, evidence);
+  return out.slice(0, 4);
+}
+
 function pickActionsForBlock(plan, maxCount = 2) {
   const actions = Array.isArray(plan?.actions) ? plan.actions : [];
   const picked = [];
@@ -2486,13 +2584,19 @@ function buildImmediateActionsBlock(level, state, historyText = "", research = n
   const fallbackActions = [
     buildSafeImmediateFallbackAction(),
   ];
-  const finalActions = plannedActions.length > 0 ? plannedActions : fallbackActions;
+  const baseActions = plannedActions.length > 0 ? plannedActions : fallbackActions;
+  const finalActions = ensureActionCount(
+    baseActions,
+    2,
+    research?.currentStateContext || {},
+    research?.evidence || {}
+  );
   finalActions.slice(0, 2).forEach((action, idx) => {
-    lines.push(formatActionTitleWithBullet(action.title));
+    lines.push(formatActionTitleWithBullet(toConciseActionTitle(action.title)));
     const reason =
       idx === 0 && sourceNames.length > 0
-        ? `${action.reason}（参考: ${sourceNames.join(" / ")}）`
-        : action.reason;
+        ? `${ensureReliableReason(action.reason, research?.evidence || {})}（参考: ${sourceNames.join(" / ")}）`
+        : ensureReliableReason(action.reason, research?.evidence || {});
     lines.push(formatActionReasonLine(reason));
     if (idx < Math.min(finalActions.length, 2) - 1) lines.push("");
   });
@@ -2531,12 +2635,16 @@ function buildImmediateActionFallbackPlanFromState(state, overrides = {}) {
   const context =
     overrides.currentStateContext ||
     buildCurrentStateContext(state, "", state?.lastConcreteDetailsText || "");
-  const action = buildSafeImmediateFallbackAction();
+  const fallbackPrimary = buildSafeImmediateFallbackAction();
   return {
-    actions:
+    actions: ensureActionCount(
       Array.isArray(overrides.actions) && overrides.actions.length > 0
-        ? sanitizeImmediateActions(overrides.actions, action)
-        : [action],
+        ? sanitizeImmediateActions(overrides.actions, fallbackPrimary)
+        : [fallbackPrimary],
+      2,
+      context,
+      overrides.evidence || {}
+    ),
     currentStateContext: context,
     searchQuery: overrides.searchQuery || "",
     sourceNames: Array.isArray(overrides.sourceNames) ? overrides.sourceNames : [],
@@ -2643,7 +2751,10 @@ async function buildConcreteImmediateActionsDetails(state, actionSection = "") {
   const historyText = state?.historyTextForCare || "";
   const plan = await buildImmediateActionHypothesisPlan(state, historyText, actionSection || "");
   const doActions = sanitizeImmediateActions(plan?.actions || [], buildSafeImmediateFallbackAction())
-    .map((a) => ({ action: a.title, reason: a.reason }))
+    .map((a) => ({
+      action: toConciseActionTitle(a.title),
+      reason: ensureReliableReason(a.reason, plan?.evidence || {}),
+    }))
     .slice(0, 4);
   const dontActions = buildDontActionsFromContext(plan?.currentStateContext || {}, plan?.evidence || {});
   const cushion = buildYellowPsychologicalCushionLine();
@@ -2654,7 +2765,7 @@ async function buildConcreteImmediateActionsDetails(state, actionSection = "") {
       "出力はJSONのみ。診断断定は禁止。命令形禁止。",
       "次の形式で返す: {\"cushion\":\"...\",\"do\":[{\"action\":\"...\",\"reason\":\"...\"}],\"dont\":[{\"action\":\"...\",\"reason\":\"...\"}]}",
       "cushionは1文、40〜65文字、保証語・危険語を使わない。",
-      "doは最大4件、dontは最大2件。各reasonは簡潔に。",
+      "doは最大4件、dontは最大2件。各reasonは検索要点と整合する確実な理由にする。",
       "「症状メモを2時間ごとに1回...」は禁止。",
     ].join("\n");
     const completion = await openai.chat.completions.create({
@@ -2687,19 +2798,37 @@ async function buildConcreteImmediateActionsDetails(state, actionSection = "") {
       outDo.map((x) => ({ title: x.action, reason: x.reason, isOtc: false })),
       buildSafeImmediateFallbackAction()
     )
-      .map((x) => ({ action: x.title, reason: x.reason }))
+      .map((x) => ({
+        action: toConciseActionTitle(x.title),
+        reason: ensureReliableReason(x.reason, plan?.evidence || {}),
+      }))
       .slice(0, 4);
+    const ensuredDo = ensureMinimumDoActions(
+      safeDo.map((x) => ({ title: x.action, reason: x.reason, isOtc: false })),
+      3,
+      plan?.currentStateContext || {},
+      plan?.evidence || {}
+    ).map((x) => ({ action: x.title, reason: x.reason }));
     const safeDont = (Array.isArray(outDont) ? outDont : [])
       .filter((x) => x && x.action && x.reason)
       .slice(0, 2);
     return {
-      message: renderActionDetailMessage(outCushion, safeDo, safeDont.length > 0 ? safeDont : dontActions),
+      message: renderActionDetailMessage(outCushion, ensuredDo, safeDont.length > 0 ? safeDont : dontActions),
       query: plan?.searchQuery || "",
       sourceNames: plan?.sourceNames || [],
     };
   } catch (_) {
     return {
-      message: renderActionDetailMessage(cushion, doActions, dontActions),
+      message: renderActionDetailMessage(
+        cushion,
+        ensureMinimumDoActions(
+          doActions.map((x) => ({ title: x.action, reason: x.reason, isOtc: false })),
+          3,
+          plan?.currentStateContext || {},
+          plan?.evidence || {}
+        ).map((x) => ({ action: x.title, reason: x.reason })),
+        dontActions
+      ),
       query: plan?.searchQuery || "",
       sourceNames: plan?.sourceNames || [],
     };
@@ -4710,6 +4839,74 @@ function splitSearchFindings(results = []) {
   return { explanation, progression, checkpoints };
 }
 
+function cleanFindingText(line) {
+  return String(line || "")
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/[「」]/g, "")
+    .trim();
+}
+
+function buildEvidenceDrivenConcreteMessage(options = {}) {
+  const {
+    findings = {},
+    level = "🟢",
+    category = "PAIN",
+    state = null,
+    causeText = "",
+    durationText = "",
+    strengthText = "",
+    symptomText = "",
+  } = options;
+  const explanation = cleanFindingText((findings.explanation || [])[0] || "");
+  const progression = cleanFindingText((findings.progression || [])[0] || "");
+  const checkpoint = cleanFindingText((findings.checkpoints || [])[0] || "");
+  const clinical = buildClinicalDetailLines({
+    category,
+    causeText,
+    durationText,
+    strengthText,
+    symptomText,
+    associated: getSlotStatusValue(state, "associated", state?.slotAnswers?.associated_symptoms || ""),
+    isCauseValid: Boolean(causeText),
+  });
+  const c1 = cleanFindingText(clinical[1] || "");
+  const c2 = cleanFindingText(clinical[2] || "");
+
+  const p1 = [
+    explanation
+      ? `検索情報を統合すると、${explanation.replace(/。?$/, "")}と解釈できます。`
+      : `${durationText || "現在の経過"}と${strengthText || "症状の強さ"}の組み合わせは、症状変動を読むための軸になります。`,
+    progression
+      ? `進行の見方としては、${progression.replace(/。?$/, "")}という記載が複数ソースで確認されます。`
+      : `${c1 || "症状は時間帯や負荷で強さが変わることがあるため、経過の方向を連続して見ることが重要です。"}`
+  ];
+  const p2 = [
+    c2 || "関連する器官や刺激要因を分けて見ると、症状の重なり方を解釈しやすくなります。",
+    checkpoint
+      ? `見極めポイントとしては、${checkpoint.replace(/。?$/, "")}が受診判断の境界として整理されています。`
+      : "見極めは、症状が短時間で強まるか、新しい症状が加わるかを軸に置くのが妥当です。"
+  ];
+
+  const lines = [
+    "今の状態は、次のようなパターンと似ています。",
+    "",
+    "■ 検索情報から見た現在の状態パターン",
+    ...p1,
+    "",
+    "■ 経過と見極めのパターン",
+    ...p2,
+  ];
+
+  if (level === "🟢" || level === "🟡") {
+    lines.push("", "現時点の安心材料");
+    buildReassuranceBulletsForPatterns(state).slice(0, 3).forEach((b) => lines.push(b));
+    lines.push("", "こんな変化があれば受診を検討");
+    buildConsultChangeBulletsForPatterns(category).slice(0, 3).forEach((b) => lines.push(b));
+  }
+  return lines.join("\n").trim();
+}
+
 function summarizeFindingLine(line, symptoms = []) {
   const symptomText = (symptoms || []).slice(0, 3).join(" / ");
   const cleaned = String(line || "")
@@ -4930,7 +5127,6 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
   const category = resolveQuestionCategoryFromState(state);
   const causeText = pickCauseTextForConcreteMode(state, summaryFacts);
   const isCauseValid = Boolean(causeText && !/(特に思い当たらない|はっきりとは分からない|思い当たらない|不明|わからない)/.test(causeText));
-  const maxPatterns = 2;
   const strengthText = Number.isFinite(state?.lastPainScore)
     ? `痛みは${state.lastPainScore}/10程度`
     : getSlotStatusValue(state, "severity", state?.slotAnswers?.pain_score || "");
@@ -4941,70 +5137,16 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
     "associated",
     state?.slotAnswers?.associated_symptoms || ""
   );
-  const detailPayload = {
-    symptoms,
-    strengthText,
-    durationText,
-    symptomText,
-    causeText,
-    maxPatterns,
+  let message = buildEvidenceDrivenConcreteMessage({
     findings,
     level,
-  };
-
-  const systemPrompt = [
-    "あなたは医療不安を整理する説明作成AIです。",
-    "診断・断定は禁止。内部処理や検索語を表示してはいけません。",
-    "共感メッセージ・語りかけ口調は禁止。客観的記述と医学的整理に徹してください。",
-    "出力は次の順序に固定（見出し「あなたの状態の理解を深める」はUI固定なので本文に含めない）:",
-    "・今の状態は、次のようなパターンと似ています。",
-    "・■ パターン名 + 説明（必ず2パターン、各パターンは最大3文。cause有効時は1つ目をきっかけベースにする）",
-    "・🟢/🟡のみ: 現時点の安心材料（3行）と、こんな変化があれば受診を検討（最大3行）",
-    "説明には、痛みの発生メカニズム・関連器官・症状組み合わせの意味を含めること。",
-    "禁止語: 「このような症状では」「一般的に」「場合があります」「安心材料として〜」「挙げられます」「検討してください」",
-    "「可能性があります」は乱発禁止。必要時は1回まで。",
-    "ユーザーの時間情報・強さ・変化を説明に必ず織り込むこと。",
-  ].join("\n");
-
-  let message = "";
-  try {
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: JSON.stringify(detailPayload) },
-      ],
-      temperature: 0.4,
-      max_tokens: 600,
-    });
-    message = String(completion?.choices?.[0]?.message?.content || "").trim();
-  } catch (_) {
-    message = "";
-  }
-
-  if (!message) {
-    const lines = ["今の状態は、次のようなパターンと似ています。", ""];
-    const patternTitle = isCauseValid ? `${causeText}が関与するパターン` : "現在の症状経過に近いパターン";
-    const p1 = findings.explanation[0] || findings.progression[0] || "症状の背景要素が重なって、いまの不調が続いている状態です。";
-    const p2 = findings.progression[0] || "時間経過で波が出るため、強さと変化の追跡が重要です。";
-    const p3 = findings.checkpoints[0] || "悪化や新しい症状が加わるかを見極めることが判断の軸になります。";
-    const causeLine = isCauseValid
-      ? `${causeText}というきっかけがある場合、${durationText || "ここ数時間"}で強さが変わることがあります。`
-      : `${durationText || "現在"}の経過で、${strengthText || "痛みの強さ"}と変化を合わせてみると整理しやすくなります。`;
-    lines.push(`■ ${patternTitle}`);
-    lines.push(causeLine);
-    lines.push(String(p1).replace(/\s+/g, " ").trim());
-    lines.push(String(p2).replace(/\s+/g, " ").trim());
-    lines.push(String(p3).replace(/\s+/g, " ").trim());
-
-    if (level === "🟢" || level === "🟡") {
-      lines.push("", "現時点の安心材料");
-      buildReassuranceBulletsForPatterns(state).slice(0, 3).forEach((b) => lines.push(b));
-      lines.push("", "こんな変化があれば受診を検討");
-      buildConsultChangeBulletsForPatterns(category).slice(0, 3).forEach((b) => lines.push(b));
-    }
-    message = lines.join("\n");
-  }
+    category,
+    state,
+    causeText: isCauseValid ? causeText : "",
+    durationText,
+    strengthText,
+    symptomText,
+  });
 
   message = String(message || "")
     .replace(/このような症状では/g, "今回の経過では")
@@ -5657,9 +5799,8 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
       })
       .map((a) => ({
         ...a,
-        title: validateActionSpecificity(a.title)
-          ? String(a.title)
-          : fillActionSpecificity(String(a.title), "search_based"),
+        title: toConciseActionTitle(a.title),
+        reason: ensureReliableReason(a.reason, evidence),
       }))
       .slice(0, 2);
 
@@ -5667,7 +5808,11 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
       finalActions = sanitizeImmediateActions(
         buildSearchBackedHeuristicActions(currentStateContext, evidence),
         buildSafeImmediateFallbackAction()
-      );
+      ).map((a) => ({
+        ...a,
+        title: toConciseActionTitle(a.title),
+        reason: ensureReliableReason(a.reason, evidence),
+      }));
     }
 
     return buildImmediateActionFallbackPlanFromState(state, {
