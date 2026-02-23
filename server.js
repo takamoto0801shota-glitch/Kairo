@@ -649,7 +649,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 ⸻
 
 
-✅ 今すぐやること（これだけでOK）
+✅ 今すぐやること
 
 
 今日は次の3つだけ意識してください。
@@ -882,7 +882,7 @@ function buildRepairPrompt(requiredLevel) {
 - 選択肢や箇条書きの記号は必ず「・」を使う
 - ❗どのブロックも欠けてはいけない（1ブロックのみの出力は禁止）
 - ❗見出しは必ず以下を全て含める（順番厳守）：
-  - 🟢 ここまでの情報を整理します / 🤝 今の状態について / ✅ 今すぐやること（これだけでOK） / ⏳ 今後の見通し / 🌱 最後に
+  - 🟢 ここまでの情報を整理します / 🤝 今の状態について / ✅ 今すぐやること / ⏳ 今後の見通し / 🌱 最後に
   - または 📝 今の状態について / ⚠️ Kairoが気になっているポイント / 🏥 Kairoの判断 / 💬 最後に
 - 📝 今の状態について は事実のみ・具体的に書く
   - 「ない」「不明」「特になし」だけの記述は禁止
@@ -910,7 +910,7 @@ function buildRepairPrompt(requiredLevel) {
    - 「だから今日はこれでいいですよ」を必ず含める
 4) Kairoとしての判断（「今の情報を見る限り」「現時点では」の前置き必須）
 
-✅ 今すぐやること（これだけでOK）：
+✅ 今すぐやること：
 - 項目は最大3つ
 - 各項目は「行動 + 理由（1文）」のセット
 - 理由は不安を下げる説明に限定（正しさの証明・詳細な医学説明は禁止）
@@ -983,7 +983,7 @@ function getRequiredSummaryHeadersByLevel(level) {
     return [
       "🟢 ここまでの情報を整理します",
       "🤝 今の状態について",
-      "✅ 今すぐやること（これだけでOK）",
+      "✅ 今すぐやること",
       "⏳ 今後の見通し",
       "🌱 最後に",
     ];
@@ -991,7 +991,7 @@ function getRequiredSummaryHeadersByLevel(level) {
   return [
     "🟢 ここまでの情報を整理します",
     "🤝 今の状態について",
-    "✅ 今すぐやること（これだけでOK）",
+    "✅ 今すぐやること",
     "⏳ 今後の見通し",
     "🌱 最後に",
   ];
@@ -1026,7 +1026,7 @@ function splitByKnownHeaders(text, headers) {
 const ALL_SUMMARY_HEADERS = [
   "🟢 ここまでの情報を整理します",
   "🤝 今の状態について",
-  "✅ 今すぐやること（これだけでOK）",
+  "✅ 今すぐやること",
   "⏳ 今後の見通し",
   "🌱 最後に",
   "📝 今の状態について",
@@ -2475,11 +2475,7 @@ function pickActionsForBlock(plan, maxCount = 2) {
 }
 
 function buildImmediateActionsBlock(level, state, historyText = "", research = null) {
-  const lines = ["✅ 今すぐやること（これだけでOK）"];
-  if (level === "🟡") {
-    lines.push(buildYellowPsychologicalCushionLine());
-    lines.push("");
-  }
+  const lines = ["✅ 今すぐやること"];
   const plannedActions = sanitizeImmediateActions(
     pickActionsForBlock(research, 2),
     buildSafeImmediateFallbackAction()
@@ -2576,6 +2572,138 @@ function sanitizeImmediateActions(actions = [], fallbackAction = null) {
     .filter((a) => !isForbiddenImmediateAction(a));
   if (safe.length > 0) return safe.slice(0, 2);
   return fallbackAction ? [fallbackAction] : [];
+}
+
+function buildDontActionsFromContext(context = {}, evidence = {}) {
+  const topic = normalizeContextLocation(context?.location || "");
+  const base = [];
+  if (topic === "頭") {
+    base.push({
+      action: "画面を長時間見続ける",
+      reason: "視覚刺激が続くと、症状の波が大きくなりやすい情報が検索結果で重なっています。",
+    });
+    base.push({
+      action: "空腹や水分不足のまま作業を続ける",
+      reason: "体調要因が重なると、経過の見極めが難しくなるためです。",
+    });
+  } else if (topic === "お腹") {
+    base.push({
+      action: "脂っこい食事や刺激の強い食事を続ける",
+      reason: "消化管への負担が増えると、症状の持続につながりやすい情報が見られます。",
+    });
+    base.push({
+      action: "一度に多量の飲食をする",
+      reason: "短時間で負荷が高まると、変化の把握がしづらくなるためです。",
+    });
+  } else if (topic === "喉") {
+    base.push({
+      action: "乾燥した環境で長時間話し続ける",
+      reason: "咽頭刺激が重なると、違和感や痛みが長引く要因になりやすいためです。",
+    });
+    base.push({
+      action: "冷たい飲み物や刺激物を連続して摂る",
+      reason: "局所刺激が増えると、経過が読みづらくなる可能性があります。",
+    });
+  } else {
+    base.push({
+      action: "つらい状態のまま無理に活動量を上げる",
+      reason: "負荷が増えると、改善傾向の判断がしづらくなることがあります。",
+    });
+  }
+
+  const dangerText = [...(evidence?.danger || []), ...(evidence?.observe || [])]
+    .join(" ")
+    .toLowerCase();
+  if (/dehyd|脱水|hydration/.test(dangerText)) {
+    base.unshift({
+      action: "水分をほとんど取らないまま過ごす",
+      reason: "検索情報では、脱水が症状悪化の引き金になる点が繰り返し示されています。",
+    });
+  }
+  return base.slice(0, 2);
+}
+
+function renderActionDetailMessage(cushion, doActions = [], dontActions = []) {
+  const lines = [String(cushion || "").trim(), "", "▫️今すぐやること"];
+  doActions.slice(0, 4).forEach((item, idx) => {
+    lines.push(`・${String(item.action || "").trim()}`);
+    lines.push(`→ ${String(item.reason || "").trim()}`);
+    if (idx < Math.min(doActions.length, 4) - 1) lines.push("");
+  });
+  lines.push("", "▫️やらないほうがいいこと");
+  dontActions.slice(0, 2).forEach((item, idx) => {
+    lines.push(`・${String(item.action || "").trim()}`);
+    lines.push(`→ ${String(item.reason || "").trim()}`);
+    if (idx < Math.min(dontActions.length, 2) - 1) lines.push("");
+  });
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+async function buildConcreteImmediateActionsDetails(state, actionSection = "") {
+  const historyText = state?.historyTextForCare || "";
+  const plan = await buildImmediateActionHypothesisPlan(state, historyText, actionSection || "");
+  const doActions = sanitizeImmediateActions(plan?.actions || [], buildSafeImmediateFallbackAction())
+    .map((a) => ({ action: a.title, reason: a.reason }))
+    .slice(0, 4);
+  const dontActions = buildDontActionsFromContext(plan?.currentStateContext || {}, plan?.evidence || {});
+  const cushion = buildYellowPsychologicalCushionLine();
+
+  try {
+    const prompt = [
+      "あなたは医療情報を要約して行動を具体化するアシスタントです。",
+      "出力はJSONのみ。診断断定は禁止。命令形禁止。",
+      "次の形式で返す: {\"cushion\":\"...\",\"do\":[{\"action\":\"...\",\"reason\":\"...\"}],\"dont\":[{\"action\":\"...\",\"reason\":\"...\"}]}",
+      "cushionは1文、40〜65文字、保証語・危険語を使わない。",
+      "doは最大4件、dontは最大2件。各reasonは簡潔に。",
+      "「症状メモを2時間ごとに1回...」は禁止。",
+    ].join("\n");
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: prompt },
+        {
+          role: "user",
+          content: JSON.stringify({
+            currentStateContext: plan?.currentStateContext || {},
+            evidence: {
+              selfCare: plan?.evidence?.selfCare || [],
+              observe: plan?.evidence?.observe || [],
+              danger: plan?.evidence?.danger || [],
+            },
+            doActions,
+            dontActions,
+            fallbackCushion: cushion,
+          }),
+        },
+      ],
+      temperature: 0.3,
+      max_tokens: 650,
+    });
+    const parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
+    const outCushion = String(parsed?.cushion || cushion).trim();
+    const outDo = Array.isArray(parsed?.do) ? parsed.do : doActions;
+    const outDont = Array.isArray(parsed?.dont) ? parsed.dont : dontActions;
+    const safeDo = sanitizeImmediateActions(
+      outDo.map((x) => ({ title: x.action, reason: x.reason, isOtc: false })),
+      buildSafeImmediateFallbackAction()
+    )
+      .map((x) => ({ action: x.title, reason: x.reason }))
+      .slice(0, 4);
+    const safeDont = (Array.isArray(outDont) ? outDont : [])
+      .filter((x) => x && x.action && x.reason)
+      .slice(0, 2);
+    return {
+      message: renderActionDetailMessage(outCushion, safeDo, safeDont.length > 0 ? safeDont : dontActions),
+      query: plan?.searchQuery || "",
+      sourceNames: plan?.sourceNames || [],
+    };
+  } catch (_) {
+    return {
+      message: renderActionDetailMessage(cushion, doActions, dontActions),
+      query: plan?.searchQuery || "",
+      sourceNames: plan?.sourceNames || [],
+    };
+  }
 }
 
 function mapDailyImpactAnswerToRestLevel(answer) {
@@ -5560,13 +5688,9 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
 }
 
 function buildStateDecisionLine(state, level) {
-  // 🟡のみ：指定の要素（医療機関でできることが大きく変わらない可能性）を含めて生成（固定文にはしない）
+  // 🟡のみ：心理クッション文（1文）を返す
   if (level === "🟡") {
-    const templates = [
-      "そのため現時点では、医療機関を受診しても対応内容が大きく変わらない可能性がある状態と整理できます。",
-      "そのため現時点では、受診しても医療機関でできることが大きく変わらない可能性がある状態と整理できます。",
-    ];
-    return templates[Math.floor(Math.random() * templates.length)];
+    return buildYellowPsychologicalCushionLine();
   }
   return "なので、今は様子を見る判断で大丈夫そうです。";
 }
@@ -7127,6 +7251,50 @@ app.post("/api/state-patterns", async (req, res) => {
   }
 });
 
+app.post("/api/action-details", async (req, res) => {
+  try {
+    const { conversationId, actionSection } = req.body || {};
+    const state = conversationId ? getOrInitConversationState(conversationId) : initConversationState();
+    const { message, query, sourceNames } = await buildConcreteImmediateActionsDetails(
+      state,
+      actionSection || ""
+    );
+    const basePayload = {
+      message,
+      sourcePolicy: [
+        "公的機関",
+        "大学病院",
+        "国際医療機関",
+        "大手医療情報サイト",
+      ],
+    };
+    if (IS_DEBUG) {
+      return res.status(200).json({
+        ...basePayload,
+        query,
+        sourceNames,
+      });
+    }
+    return res.status(200).json(basePayload);
+  } catch (error) {
+    console.error("action-details error:", error);
+    return res.status(200).json({
+      message: [
+        buildYellowPsychologicalCushionLine(),
+        "",
+        "▫️今すぐやること",
+        "・刺激を1つ減らして静かな環境で過ごし、水分を150〜200mlとって4〜6時間の変化を見ます",
+        "→ 刺激と脱水の要因を同時に下げると、経過が読み取りやすくなります。",
+        "",
+        "▫️やらないほうがいいこと",
+        "・つらい状態のまま無理に活動量を上げる",
+        "→ 体への負荷が重なると、症状の変化を見極めにくくなるためです。",
+      ].join("\n"),
+      sourcePolicy: [],
+    });
+  }
+});
+
 function getSummarySectionSpecsByJudgement(judgement) {
   if (judgement === "🔴") {
     return [
@@ -7140,7 +7308,7 @@ function getSummarySectionSpecsByJudgement(judgement) {
     return [
       { id: 1, title: "🟢 ここまでの情報を整理します", patterns: [/^🟢\s*ここまでの情報を整理します/] },
       { id: 2, title: "🤝 今の状態について", patterns: [/^🤝\s*今の状態について/] },
-      { id: 3, title: "✅ 今すぐやること（これだけでOK）", patterns: [/^✅\s*今すぐやること（これだけでOK）/, /^✅\s*今すぐやること/] },
+      { id: 3, title: "✅ 今すぐやること", patterns: [/^✅\s*今すぐやること（これだけでOK）/, /^✅\s*今すぐやること/] },
       { id: 4, title: "⏳ 今後の見通し", patterns: [/^⏳\s*今後の見通し/, /^⏳\s*この先の見通し/] },
       { id: 5, title: "🌱 最後に", patterns: [/^🌱\s*最後に/] },
     ];
@@ -7148,7 +7316,7 @@ function getSummarySectionSpecsByJudgement(judgement) {
   return [
     { id: 1, title: "🟢 ここまでの情報を整理します", patterns: [/^🟢\s*ここまでの情報を整理します/] },
     { id: 2, title: "🤝 今の状態について", patterns: [/^🤝\s*今の状態について/] },
-    { id: 3, title: "✅ 今すぐやること（これだけでOK）", patterns: [/^✅\s*今すぐやること（これだけでOK）/, /^✅\s*今すぐやること/] },
+    { id: 3, title: "✅ 今すぐやること", patterns: [/^✅\s*今すぐやること（これだけでOK）/, /^✅\s*今すぐやること/] },
     { id: 4, title: "⏳ 今後の見通し", patterns: [/^⏳\s*今後の見通し/, /^⏳\s*この先の見通し/] },
     { id: 5, title: "🌱 最後に", patterns: [/^🌱\s*最後に/] },
   ];

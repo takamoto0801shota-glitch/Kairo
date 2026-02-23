@@ -2,6 +2,7 @@
 const API_URL = "/api/chat";
 const CLEAR_URL = "/api/clear";
 const STATE_PATTERNS_URL = "/api/state-patterns";
+const ACTION_DETAILS_URL = "/api/action-details";
 
 // Conversation history keys
 const HISTORY_KEY = "kairo_chat_history";
@@ -481,6 +482,53 @@ async function showConcreteStateDetails(blockContent) {
   }
 }
 
+async function fetchActionDetails(blockContent) {
+  const conversationId = getConversationId();
+  const response = await fetch(ACTION_DETAILS_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      conversationId,
+      actionSection: String(blockContent || ""),
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`action-details status=${response.status}`);
+  }
+  const data = await response.json();
+  return data?.message || "いまの行動を具体化できませんでした。少し時間をおいてもう一度お試しください。";
+}
+
+async function showConcreteActionDetails(blockContent) {
+  if (appState.concreteModalBusy) return;
+  appState.concreteModalBusy = true;
+  openConcreteModal();
+  setConcreteModalBody("いまの行動を、検索情報をもとに具体化しています…");
+  try {
+    const detailText = await fetchActionDetails(blockContent);
+    setConcreteModalBody(detailText);
+  } catch (error) {
+    console.error("行動具体化モーダル生成エラー:", error);
+    setConcreteModalBody(
+      [
+        "いまの経過であれば、少し力を抜いて体の負担を整える時間として受け止められます。",
+        "",
+        "▫️今すぐやること",
+        "・刺激を1つ減らし、水分を150〜200mlとって4〜6時間の変化を見ます",
+        "→ 体への負荷要因を減らすと、症状のぶれを把握しやすくなります。",
+        "",
+        "▫️やらないほうがいいこと",
+        "・強い刺激を続けたまま無理に作業を続ける",
+        "→ 負荷が重なると、回復の見通しを読みづらくすることがあります。",
+      ].join("\n")
+    );
+  } finally {
+    appState.concreteModalBusy = false;
+  }
+}
+
 // Check if decision is completed (判断が完了しているかチェック)
 function isDecisionCompleted(text) {
   // 判断を示すブロックが含まれているかチェック
@@ -791,18 +839,25 @@ function addMessage(text, isUser = false, save = true) {
       const isStateBlock =
         (block?.header?.icon === "🤝" || block?.header?.icon === "📝") &&
         /今の状態について|いまの状態を整理します/.test(block?.header?.name || "");
+      const isActionBlock =
+        block?.header?.icon === "✅" &&
+        /今すぐやること/.test(block?.header?.name || "");
       let detailButton = null;
       const iconText = block?.header?.icon || splitHeaderIconAndName(headerText).icon;
       const nameText = block?.header?.name || splitHeaderIconAndName(headerText).name;
       const headerTitleEl = appendHeaderTitleWithIcon(headerDiv, iconText, "");
-      if (isStateBlock) {
+      if (isStateBlock || isActionBlock) {
         detailButton = document.createElement("button");
         detailButton.type = "button";
         detailButton.className = "block-header-action";
         detailButton.textContent = "具体的に";
         detailButton.disabled = true;
         detailButton.addEventListener("click", () => {
-          showConcreteStateDetails(block.content || "");
+          if (isActionBlock) {
+            showConcreteActionDetails(block.content || "");
+          } else {
+            showConcreteStateDetails(block.content || "");
+          }
         });
         headerDiv.appendChild(detailButton);
       }
