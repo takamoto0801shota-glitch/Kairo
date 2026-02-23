@@ -5957,6 +5957,17 @@ function getPainSeverityScore(state) {
   return mapRiskLevelToSeverityScore(state?.slotNormalized?.pain_score?.riskLevel);
 }
 
+function shouldBlockRedByPainRecentDuration(state) {
+  const category = resolveQuestionCategoryFromState(state);
+  if (category !== "PAIN") return false;
+  const durationRaw = String(
+    getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "")
+  ).trim();
+  const selectedIndex = state?.durationMeta?.selectedIndex;
+  if (selectedIndex === 0 || selectedIndex === 1) return true;
+  return /(さっき|今さっき|数時間前|数時間|数分|数十分|今朝)/.test(durationRaw);
+}
+
 function calculateRiskFromState(state) {
   const scores = {
     pain: getPainSeverityScore(state),
@@ -5971,6 +5982,7 @@ function calculateRiskFromState(state) {
   const impactHigh = scores.impact === 3;
   const symptomsMidOrHigh = scores.symptoms >= 1;
   const criticalHighCount = [scores.pain, scores.impact, scores.symptoms].filter((v) => v === 3).length;
+  const blockRedByRecentPainDuration = shouldBlockRedByPainRecentDuration(state);
 
   const phase1Triggered =
     (painHigh && impactHigh) ||
@@ -5979,6 +5991,9 @@ function calculateRiskFromState(state) {
     criticalHighCount >= 2;
 
   if (phase1Triggered) {
+    if (blockRedByRecentPainDuration) {
+      return { ratio: 0.64, level: "🟡", urgency: "yellow" };
+    }
     console.log("---- KAIRO URGENCY DEBUG (Phase1 RED) ----");
     console.log("scores:", scores);
     console.log("phase1:", {
@@ -6018,6 +6033,9 @@ function calculateRiskFromState(state) {
   if (severityIndex >= 0.65) {
     urgency = "red";
   } else if (severityIndex >= 0.4) {
+    urgency = "yellow";
+  }
+  if (urgency === "red" && blockRedByRecentPainDuration) {
     urgency = "yellow";
   }
   const level = urgency === "red" ? "🔴" : urgency === "yellow" ? "🟡" : "🟢";
