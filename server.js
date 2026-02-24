@@ -2572,34 +2572,89 @@ function pickActionsForBlock(plan, maxCount = 2) {
   return picked;
 }
 
+/** ① なぜそれでいいのか（安心の土台・2文以内） */
+function buildWhySection(context = {}) {
+  const location = String(context?.location || context?.mainSymptom || "症状").trim();
+  const templates = [
+    [
+      "現在の状態では、体が一時的に過敏になっている可能性があります。",
+      "この段階では刺激を減らすことが回復の近道になります。",
+    ],
+    [
+      "今の経過であれば、一時的な変化として捉えられることが多いです。",
+      "刺激を減らすことで、体が回復モードに入りやすくなります。",
+    ],
+    [
+      "症状の強さや経過から、今は負荷を下げる段階と考えられます。",
+      "静かな環境で様子を見ることが、次の判断の土台になります。",
+    ],
+  ];
+  const idx = Math.floor(Math.random() * templates.length);
+  return templates[idx].join("\n");
+}
+
+/** ③ 予想経過（安心設計） */
+function buildExpectedCourse(context = {}) {
+  const templates = [
+    "多くの場合、数時間〜1日程度で徐々に落ち着いていくことが多いです。",
+    "多くのケースでは、数時間〜半日程度で変化の方向が見えやすくなることが多いです。",
+    "一般的には、数時間〜1日程度で症状の波が落ち着いていくことが多いとされています。",
+  ];
+  return templates[Math.floor(Math.random() * templates.length)];
+}
+
+/** ④ 締めの一文（心理的アンカー） */
+function buildClosingLine() {
+  const templates = [
+    "今は体を回復モードに入れることが最優先です。",
+    "今は体を整える時間として受け止めて大丈夫です。",
+    "今は体の負担を減らすことが、いちばんの近道です。",
+  ];
+  return templates[Math.floor(Math.random() * templates.length)];
+}
+
 function buildImmediateActionsBlock(level, state, historyText = "", research = null) {
-  const lines = ["✅ 今すぐやること"];
+  const context = research?.currentStateContext || buildCurrentStateContext(state, historyText || "", state?.lastConcreteDetailsText || "");
+  const lines = ["✅ 今すぐやること", ""];
+
+  // ① なぜそれでいいのか
+  lines.push(buildWhySection(context));
+  lines.push("");
+
+  // ② 今すぐやること（最大3件）
   const plannedActions = sanitizeImmediateActions(
-    pickActionsForBlock(research, 2),
+    pickActionsForBlock(research, 3),
     buildSafeImmediateFallbackAction()
   );
   const sourceNames = Array.isArray(research?.sourceNames)
     ? research.sourceNames.filter(Boolean).slice(0, 3)
     : [];
-  const fallbackActions = [
-    buildSafeImmediateFallbackAction(),
-  ];
+  const fallbackActions = [buildSafeImmediateFallbackAction()];
   const baseActions = plannedActions.length > 0 ? plannedActions : fallbackActions;
   const finalActions = ensureActionCount(
     baseActions,
     2,
-    research?.currentStateContext || {},
+    context,
     research?.evidence || {}
   );
-  finalActions.slice(0, 2).forEach((action, idx) => {
+  finalActions.slice(0, 3).forEach((action, idx) => {
     lines.push(formatActionTitleWithBullet(toConciseActionTitle(action.title)));
     const reason =
       idx === 0 && sourceNames.length > 0
         ? `${ensureReliableReason(action.reason, research?.evidence || {})}（参考: ${sourceNames.join(" / ")}）`
         : ensureReliableReason(action.reason, research?.evidence || {});
     lines.push(formatActionReasonLine(reason));
-    if (idx < Math.min(finalActions.length, 2) - 1) lines.push("");
+    if (idx < Math.min(finalActions.length, 3) - 1) lines.push("");
   });
+  lines.push("");
+
+  // ③ 予想経過
+  lines.push(buildExpectedCourse(context));
+  lines.push("");
+
+  // ④ 締めの一文
+  lines.push(buildClosingLine());
+
   return lines.join("\n");
 }
 
