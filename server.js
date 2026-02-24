@@ -3515,8 +3515,8 @@ function normalizeUserText(input) {
   const halfWidth = raw.replace(/[０-９]/g, (d) =>
     String.fromCharCode(d.charCodeAt(0) - 0xff10 + 0x30)
   );
-  // 曖昧語は保持したまま、表記ゆれのみ正規化する
-  return halfWidth.replace(/きのう/g, "昨日").replace(/おととい/g, "一昨日");
+  // ユーザー語は保持し、数値表記のみ補助的に正規化する
+  return halfWidth;
 }
 
 function hasCorrectionIntent(text) {
@@ -3590,44 +3590,80 @@ function mapWorseningToOptionIndex(worsening, category) {
 }
 
 function extractDurationFromText(text) {
-  const normalized = normalizeUserText(text);
-  if (/(さっき|今さっき|数分|数十分)/.test(normalized)) {
-    const raw = (normalized.match(/(さっき|今さっき|数分|数十分)/) || [])[0] || "さっき";
+  const rawText = String(text || "");
+  const normalized = normalizeUserText(rawText);
+  const shortRaw =
+    (rawText.match(/(さっき|今さっき|数分|数十分)/) || [])[0] ||
+    (normalized.match(/(さっき|今さっき|数分|数十分)/) || [])[0];
+  if (shortRaw) {
+    const raw = shortRaw || "さっき";
     return { raw_text: raw, normalized: "short", selectedIndex: 0 };
   }
-  const h = normalized.match(/(\d+)\s*時間前/);
-  if (h) return { raw_text: `${h[1]}時間前`, normalized: `${h[1]}h_ago`, selectedIndex: 1 };
+  const hRaw = rawText.match(/(\d+\s*時間(?:前)?)/);
+  const hNorm = normalized.match(/(\d+)\s*時間前/);
+  if (hRaw || hNorm) {
+    const raw = hRaw ? hRaw[1] : `${hNorm[1]}時間前`;
+    const hValue = Number((hNorm && hNorm[1]) || (hRaw && hRaw[1].match(/(\d+)/)?.[1]) || NaN);
+    return { raw_text: raw, normalized: Number.isFinite(hValue) ? `${hValue}h_ago` : "hours", selectedIndex: 1 };
+  }
   if (/(数時間|今朝|昨夜)/.test(normalized)) {
-    const raw = (normalized.match(/(数時間|今朝|昨夜)/) || [])[0] || "数時間前";
+    const raw =
+      (rawText.match(/(数時間|今朝|昨夜)/) || [])[0] ||
+      (normalized.match(/(数時間|今朝|昨夜)/) || [])[0] ||
+      "数時間前";
     return { raw_text: raw, normalized: "hours", selectedIndex: 1 };
   }
-  const d = normalized.match(/(\d+)\s*日前/);
-  if (d) return { raw_text: `${d[1]}日前`, normalized: `${d[1]}d_ago`, selectedIndex: 2 };
+  const dRaw = rawText.match(/(\d+\s*日(?:前)?)/);
+  const dNorm = normalized.match(/(\d+)\s*日前/);
+  if (dRaw || dNorm) {
+    const raw = dRaw ? dRaw[1] : `${dNorm[1]}日前`;
+    const dValue = Number((dNorm && dNorm[1]) || (dRaw && dRaw[1].match(/(\d+)/)?.[1]) || NaN);
+    return { raw_text: raw, normalized: Number.isFinite(dValue) ? `${dValue}d_ago` : "day_or_more", selectedIndex: 2 };
+  }
   if (/(昨日|一日前|数日|ずっと|前から|一昨日)/.test(normalized)) {
-    const raw = (normalized.match(/(昨日|一日前|数日|ずっと|前から|一昨日)/) || [])[0] || "一日以上前";
+    const raw =
+      (rawText.match(/(昨日|一日前|数日|ずっと|前から|一昨日)/) || [])[0] ||
+      (normalized.match(/(昨日|一日前|数日|ずっと|前から|一昨日)/) || [])[0] ||
+      "一日以上前";
     return { raw_text: raw, normalized: "day_or_more", selectedIndex: 2 };
   }
   return null;
 }
 
 function extractImpactFromText(text) {
+  const rawText = String(text || "").trim();
   const normalized = normalizeUserText(text);
+  const pickRaw = (re, fallback = rawText) => {
+    const m = String(text || "").match(re);
+    return (m && m[0] ? m[0] : fallback).trim();
+  };
   if (/仕事できない|学校休んだ|寝込|動けない|家事できない|集中できないほど/.test(normalized)) {
-    return { raw: (normalized.match(/仕事できない|学校休んだ|寝込んでる|動けない|家事できない|集中できないほど/) || [])[0] || normalized, selectedIndex: 2 };
+    return {
+      raw: pickRaw(/仕事できない|学校休んだ|寝込んでる|動けない|家事できない|集中できないほど/, rawText || normalized),
+      selectedIndex: 2,
+    };
   }
   if (/動けるけどつらい|少しつらいが動ける|無理すれば|つらいけど/.test(normalized)) {
-    return { raw: (normalized.match(/動けるけどつらい|少しつらいが動ける|無理すれば|つらいけど/) || [])[0] || normalized, selectedIndex: 1 };
+    return {
+      raw: pickRaw(/動けるけどつらい|少しつらいが動ける|無理すれば|つらいけど/, rawText || normalized),
+      selectedIndex: 1,
+    };
   }
   if (/普通に生活できる|普通に動ける|問題なく動ける/.test(normalized)) {
-    return { raw: (normalized.match(/普通に生活できる|普通に動ける|問題なく動ける/) || [])[0] || normalized, selectedIndex: 0 };
+    return {
+      raw: pickRaw(/普通に生活できる|普通に動ける|問題なく動ける/, rawText || normalized),
+      selectedIndex: 0,
+    };
   }
   return null;
 }
 
 function extractAssociatedSymptoms(text) {
+  const rawText = String(text || "").trim();
   const normalized = normalizeUserText(text);
-  if (/これ以外は特にない|他はない|特にない|なし/.test(normalized)) {
-    return { primary: null, associated: [], raw: "これ以外は特にない", selectedIndex: 0 };
+  if (/これ以外は特にない|他はない|特にない|なし|わからない|分からない|不明/.test(normalized)) {
+    const m = rawText.match(/これ以外は特にない|他はない|特にない|なし|わからない|分からない|不明/);
+    return { primary: null, associated: [], raw: (m && m[0]) || rawText || "これ以外は特にない", selectedIndex: 0 };
   }
   const terms = [
     "下痢", "腹痛", "頭痛", "吐き気", "めまい", "発熱", "熱", "咳", "鼻水", "鼻づまり",
@@ -3645,21 +3681,30 @@ function extractAssociatedSymptoms(text) {
   const associated = unique.slice(1);
   const high = /(しびれ|視界異常|意識|失神)/.test(normalized);
   const selectedIndex = high ? 2 : 1;
-  const raw = associated.length > 0 ? associated.join("、") : unique.join("、");
+  const matchedInRaw = [];
+  for (const term of unique) {
+    const re = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    const m = rawText.match(re);
+    matchedInRaw.push((m && m[0]) || term);
+  }
+  const raw = rawText.length > 0 ? rawText : matchedInRaw.join("、");
   return { primary, associated, raw, selectedIndex };
 }
 
 function extractCauseCategory(text) {
+  const rawText = String(text || "").trim();
   const normalized = normalizeUserText(text);
   if (/思い当たらない|わからない|分からない|不明/.test(normalized)) {
-    return { raw: (normalized.match(/思い当たらない|わからない|分からない|不明/) || [])[0] || normalized, selectedIndex: 0 };
+    const m = rawText.match(/思い当たらない|わからない|分からない|不明/);
+    return { raw: (m && m[0]) || rawText || normalized, selectedIndex: 0 };
   }
+  const mRaw = rawText.match(/([^。！？\n]{0,24}(食あたり|寝不足|ストレス|ぶつけ|冷房|冷え|ブルーライト|感染|花粉|飲酒|過労|疲れ|人混み|仕事)[^。！？\n]{0,24})/);
   const m = normalized.match(/([^。！？\n]{0,24}(食あたり|寝不足|ストレス|ぶつけ|冷房|冷え|ブルーライト|感染|花粉|飲酒|過労|疲れ|人混み|仕事)[^。！？\n]{0,24})/);
   if (m) {
-    return { raw: m[1].trim(), selectedIndex: 1 };
+    return { raw: ((mRaw && mRaw[1]) || m[1] || rawText).trim(), selectedIndex: 1 };
   }
   if (/(かも|と思う|かもしれない)/.test(normalized) && normalized.length <= 30) {
-    return { raw: normalized.trim(), selectedIndex: 2 };
+    return { raw: rawText || normalized.trim(), selectedIndex: 2 };
   }
   return null;
 }
@@ -4794,6 +4839,163 @@ function buildConcreteBilingualQueries(symptoms = []) {
   return { queryJP, queryEN };
 }
 
+/** 6スロットの値を収集（わからない・ない・不明は省く） */
+function collectSlotFactsForDiseaseSearch(state) {
+  const answers = state?.slotAnswers || {};
+  const rawSlotFacts = [
+    getSlotStatusValue(state, "severity", answers.pain_score),
+    getSlotStatusValue(state, "worsening", answers.worsening),
+    getSlotStatusValue(state, "duration", answers.duration),
+    getSlotStatusValue(state, "impact", answers.daily_impact),
+    getSlotStatusValue(state, "associated", answers.associated_symptoms),
+    getSlotStatusValue(state, "cause_category", state?.causeDetailText || answers.cause_category),
+  ]
+    .map((v) => String(v || "").trim())
+    .filter((v) => v.length > 0)
+    .filter((v) => !/^(ない|なし|特にない|特になし|わからない|分からない|不明|思い当たらない|特に思い当たらない)$/.test(v));
+  return Array.from(new Set(rawSlotFacts)).slice(0, 6);
+}
+
+/** 🤝/📝モーダル用：疾患検索クエリ（病名・説明に特化。6スロット情報を追加） */
+function buildDiseaseSearchQueries(mainSymptom = "", slotFacts = []) {
+  const s = String(mainSymptom || "症状").trim();
+  const facts = Array.isArray(slotFacts) ? slotFacts.filter(Boolean).join(" ") : "";
+  const suffix = facts ? ` ${facts}` : "";
+  const queryJP = `${s}${suffix} 考えられる疾患 病名 説明`.replace(/\s{2,}/g, " ").trim().slice(0, 260);
+  const queryEN = `${s}${suffix} possible conditions diseases explanation`.replace(/\s{2,}/g, " ").trim().slice(0, 260);
+  return { queryJP, queryEN };
+}
+
+/** 主症状ラベルを疾患検索用に正規化（ユーザー入力は使わない） */
+function toMainSymptomForDiseaseSearch(state) {
+  const source = [
+    state?.judgmentSnapshot?.main_symptom,
+    state?.primarySymptom || "",
+    getSlotStatusValue(state, "associated", ""),
+    state?.slotAnswers?.associated_symptoms || "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const s = String(source || "症状");
+  if (/(頭が痛|頭痛|こめかみ|後頭部)/.test(s)) return "頭痛";
+  if (/(お腹が痛|腹痛|胃痛|みぞおち|下腹|下痢|便秘)/.test(s)) return "腹痛";
+  if (/(喉が痛|のどが痛|喉の痛み|咽頭痛|咳)/.test(s)) return "喉の痛み";
+  if (/(唇が痛|口唇|唇|ヒリヒリ|乾燥)/.test(s)) return "唇の痛み";
+  if (/(発熱|熱|だるい|寒気)/.test(s)) return "発熱";
+  if (/(皮膚|かゆみ|発疹|赤み)/.test(s)) return "皮膚症状";
+  return "体調不良";
+}
+
+/** 🤝/📝モーダル：疾患名2つ＋各2〜3文の説明を生成（ユーザー情報は一切含めない） */
+async function buildDiseaseFocusedModalMessage(searchResults = [], mainSymptom = "", level = "🟢", state = null) {
+  const searchText = (searchResults || [])
+    .slice(0, 8)
+    .map((r) => `${r?.title || ""} ${r?.snippet || ""}`)
+    .join("\n")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 4000);
+  if (!searchText) {
+    return buildDiseaseFocusedModalFallback(mainSymptom, level, state);
+  }
+  try {
+    const prompt = [
+      "検索結果から、主症状に関連する代表的な疾患を2つ選び、各疾患を2〜3文で説明してください。",
+      "厳守：",
+      "- 疾患名を必ず2つ出す（例：緊張型頭痛、片頭痛 / 口内ヘルペス、口角炎）",
+      "- 各疾患ごとに2〜3文で説明",
+      "- ユーザーの症状・入力内容は一切含めない",
+      "- 「あなたの場合」「この症状は」などの個別化表現は禁止",
+      "- 診断を断定しない（「〜です」→「〜とされる状態です」）",
+      "- 合併症・重篤例の詳細説明は含めない",
+      "- 恐怖を煽る表現は禁止",
+      "JSON形式で返す：{\"diseases\":[{\"name\":\"疾患名\",\"description\":\"2〜3文の説明\"},{\"name\":\"疾患名\",\"description\":\"2〜3文の説明\"}]}",
+    ].join("\n");
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: prompt },
+        {
+          role: "user",
+          content: `主症状: ${mainSymptom}\n\n検索結果:\n${searchText}`,
+        },
+      ],
+      temperature: 0.2,
+      max_tokens: 800,
+    });
+    const raw = completion?.choices?.[0]?.message?.content || "";
+    const parsed = parseJsonObjectFromText(raw);
+    const diseases = Array.isArray(parsed?.diseases) ? parsed.diseases : [];
+    if (diseases.length >= 2) {
+      const lines = ["今の状態は、次のようなパターンと似ています。", ""];
+      diseases.slice(0, 2).forEach((d) => {
+        const name = String(d?.name || "").trim() || "考えられる状態";
+        const desc = String(d?.description || "").trim();
+        lines.push(`■ ${name}`);
+        lines.push(desc || "検索情報から、この状態が考えられることがあります。");
+        lines.push("");
+      });
+      if (level === "🟢" || level === "🟡") {
+        const category = state ? (state.triageCategory || resolveQuestionCategoryFromState(state)) : "PAIN";
+        lines.push("現時点の安心材料");
+        (state ? buildReassuranceBulletsForPatterns(state) : ["・強い緊急サインは今のところはっきりしていません"]).slice(0, 3).forEach((b) => lines.push(b));
+        lines.push("");
+        lines.push("こんな変化があれば受診を検討");
+        buildConsultChangeBulletsForPatterns(category).slice(0, 3).forEach((b) => lines.push(b));
+      }
+      return lines.join("\n").trim();
+    }
+  } catch (_) {
+    /* fallback */
+  }
+  return buildDiseaseFocusedModalFallback(mainSymptom, level, state);
+}
+
+function buildDiseaseFocusedModalFallback(mainSymptom, level, state = null) {
+  const fallbacks = {
+    頭痛: [
+      { name: "緊張型頭痛", desc: "筋肉の緊張やストレスが関係するとされる状態です。頭の周囲が締め付けられるような痛みが特徴です。" },
+      { name: "片頭痛", desc: "血管の拡張や神経の過敏化が関与するとされる状態です。ズキズキとした痛みが片側に出ることが多いとされています。" },
+    ],
+    腹痛: [
+      { name: "急性胃腸炎", desc: "ウイルスや細菌による消化管の炎症とされる状態です。腹痛や下痢、吐き気などを伴うことがあります。" },
+      { name: "過敏性腸症候群", desc: "ストレスや生活習慣が関与するとされる状態です。腹痛と便通の変化が主な特徴とされています。" },
+    ],
+    唇の痛み: [
+      { name: "口唇ヘルペス", desc: "ウイルス感染により唇に水ぶくれやヒリヒリ感が出るとされる状態です。" },
+      { name: "口角炎", desc: "口角の炎症や亀裂が生じるとされる状態です。乾燥やビタミン不足が関与することがあります。" },
+    ],
+    喉の痛み: [
+      { name: "急性咽頭炎", desc: "ウイルスや細菌による咽頭の炎症とされる状態です。のどの痛みや違和感が主な症状です。" },
+      { name: "急性扁桃炎", desc: "扁桃の炎症とされる状態です。発熱やのどの痛みを伴うことがあります。" },
+    ],
+    発熱: [
+      { name: "感冒", desc: "ウイルス感染による上気道の炎症とされる状態です。発熱、咳、鼻水などを伴うことがあります。" },
+      { name: "インフルエンザ", desc: "インフルエンザウイルスによる感染症とされる状態です。高熱や全身倦怠感が特徴です。" },
+    ],
+    皮膚症状: [
+      { name: "接触皮膚炎", desc: "刺激物への接触により皮膚に炎症が生じるとされる状態です。赤みやかゆみが主な症状です。" },
+      { name: "乾燥性皮膚炎", desc: "皮膚のバリア機能低下により乾燥やヒリつきが出るとされる状態です。" },
+    ],
+  };
+  const pair = fallbacks[mainSymptom] || fallbacks.頭痛;
+  const lines = ["今の状態は、次のようなパターンと似ています。", ""];
+  pair.forEach((d) => {
+    lines.push(`■ ${d.name}`);
+    lines.push(d.desc);
+    lines.push("");
+  });
+  if (level === "🟢" || level === "🟡") {
+    const category = state ? (state.triageCategory || resolveQuestionCategoryFromState(state)) : "PAIN";
+    lines.push("現時点の安心材料");
+    (state ? buildReassuranceBulletsForPatterns(state) : ["・強い緊急サインは今のところはっきりしていません"]).slice(0, 3).forEach((b) => lines.push(b));
+    lines.push("");
+    lines.push("こんな変化があれば受診を検討");
+    buildConsultChangeBulletsForPatterns(category).slice(0, 3).forEach((b) => lines.push(b));
+  }
+  return lines.join("\n").trim();
+}
+
 function splitSearchFindings(results = []) {
   const joined = (results || [])
     .slice(0, 10)
@@ -5103,74 +5305,34 @@ function enforceConcreteModalStructure(message, options = {}) {
 }
 
 async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], summarySection = "") {
-  const symptoms = collectConcreteSymptomTerms(state, summaryFacts, summarySection);
-  const { queryJP, queryEN } = buildConcreteBilingualQueries(symptoms);
+  const mainSymptom = toMainSymptomForDiseaseSearch(state);
+  const slotFacts = collectSlotFactsForDiseaseSearch(state);
+  const { queryJP, queryEN } = buildDiseaseSearchQueries(mainSymptom, slotFacts);
 
   const [jaResults, enResults] = await Promise.all([
     fetchGoogleCustomSearchResults(queryJP, "ja"),
     fetchGoogleCustomSearchResults(queryEN, "en"),
   ]);
-  const ranked = dedupeAndRankActionSearchResults([...jaResults, ...enResults], {
-    bodyPart: symptoms[0] || null,
-    painType: symptoms[1] || null,
-    duration: symptoms[2] || null,
-    triggers: symptoms,
-    associatedSymptoms: symptoms,
-  });
-  const top = ranked.slice(0, 8);
-  const findings = splitSearchFindings(top);
+  const allResults = [...(jaResults || []), ...(enResults || [])];
   const sourceNames = Array.from(
-    new Set(top.filter((r) => r.trusted).map((r) => r.host).filter(Boolean))
+    new Set(allResults.filter((r) => r.trusted).map((r) => r.host).filter(Boolean))
   ).slice(0, 4);
 
   const level = state?.decisionLevel || finalizeRiskLevel(state);
-  const category = resolveQuestionCategoryFromState(state);
-  const causeText = pickCauseTextForConcreteMode(state, summaryFacts);
-  const isCauseValid = Boolean(causeText && !/(特に思い当たらない|はっきりとは分からない|思い当たらない|不明|わからない)/.test(causeText));
-  const strengthText = Number.isFinite(state?.lastPainScore)
-    ? `痛みは${state.lastPainScore}/10程度`
-    : getSlotStatusValue(state, "severity", state?.slotAnswers?.pain_score || "");
-  const durationText = getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "");
-  const symptomText = getSlotStatusValue(state, "worsening", state?.slotAnswers?.worsening || "");
-  const associatedText = getSlotStatusValue(
-    state,
-    "associated",
-    state?.slotAnswers?.associated_symptoms || ""
-  );
-  let message = buildEvidenceDrivenConcreteMessage({
-    findings,
-    level,
-    category,
-    state,
-    causeText: isCauseValid ? causeText : "",
-    durationText,
-    strengthText,
-    symptomText,
-  });
+  let message = await buildDiseaseFocusedModalMessage(allResults, mainSymptom, level, state);
 
   message = String(message || "")
     .replace(/このような症状では/g, "今回の経過では")
     .replace(/一般的に/g, "今回の情報では")
     .replace(/場合があります/g, "ことがあります")
+    .replace(/あなたの場合|この症状は/g, "")
     .split("\n")
     .filter((line) => !/^(抽出した症状語:|検索クエリ\(JP\):|検索クエリ\(EN\):|参考ソース:|デバッグ)/.test(line.trim()))
     .join("\n")
     .trim();
 
-  message = enforceConcreteModalStructure(message, {
-    level,
-    isCauseValid,
-    causeText,
-    strengthText,
-    durationText,
-    symptomText,
-    associatedText,
-    category,
-    state,
-  });
-
   if (IS_DEBUG) {
-    message += `\n\n[debug]\n症状語: ${symptoms.join(" / ")}\nqueryJP: ${queryJP}\nqueryEN: ${queryEN}\nsource: ${sourceNames.join(" / ")}`;
+    message += `\n\n[debug]\n主症状: ${mainSymptom}\nqueryJP: ${queryJP}\nqueryEN: ${queryEN}\nsource: ${sourceNames.join(" / ")}`;
   }
 
   return {
@@ -5583,7 +5745,21 @@ function buildCurrentStateContext(state, historyText = "", concreteMessage = "")
     if (/(唇が痛|口唇|唇)/.test(s)) return "唇の痛み";
     return String(state?.primarySymptom || "症状");
   };
-  const summaryFacts = buildStateFactsBullets(state).map((line) => toBulletText(line));
+  const rawSlotFacts = [
+    state?.slotStatus?.severity?.value,
+    state?.slotStatus?.worsening?.value,
+    state?.slotStatus?.duration?.value,
+    state?.slotStatus?.impact?.value,
+    state?.slotStatus?.associated?.value,
+    state?.slotStatus?.cause_category?.value,
+  ]
+    .map((v) => String(v || "").trim())
+    .filter((v) => v.length > 0)
+    .filter((v) => !/^(ない|なし|特にない|特になし|わからない|分からない|不明|思い当たらない|特に思い当たらない)$/.test(v));
+  const summaryFacts =
+    rawSlotFacts.length > 0
+      ? Array.from(new Set(rawSlotFacts)).slice(0, 6)
+      : buildStateFactsBullets(state).map((line) => toBulletText(line));
   const mainSymptom = normalizeMainSymptomLabel([
     state?.primarySymptom || "",
     state?.slotStatus?.associated?.value || "",
@@ -6612,6 +6788,8 @@ app.post("/api/chat", async (req, res) => {
       role: "user",
       content: message,
     });
+    const userTurnCount = conversationHistory[conversationId].filter((msg) => msg.role === "user").length;
+    const isFirstUserTurn = userTurnCount <= 1;
 
     const askedSlotsCount = countAskedSlots(conversationState[conversationId].askedSlots);
 
@@ -6682,7 +6860,8 @@ app.post("/api/chat", async (req, res) => {
     const decisionAllowed = slotsFilledCount >= 6;
     const shouldJudgeNow =
       shouldJudge &&
-      decisionAllowed;
+      decisionAllowed &&
+      !isFirstUserTurn;
     const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled);
     if (!shouldJudgeNow) {
       const isFirstQuestion =
@@ -6743,6 +6922,36 @@ app.post("/api/chat", async (req, res) => {
           conversationId,
         });
       }
+    }
+
+    // 最終防御: 初回ユーザーターンでは、まとめ/フォローを絶対に返さない
+    if (isFirstUserTurn && hasAnySummaryBlocks(aiResponse)) {
+      const forcedSlot =
+        getMissingSlots(conversationState[conversationId].slotFilled)[0] || "worsening";
+      const fixed = buildFixedQuestion(forcedSlot, false);
+      const historyText = conversationHistory[conversationId]
+        .filter((msg) => msg.role === "user")
+        .map((msg) => msg.content)
+        .join("\n");
+      const category = resolveLockedQuestionCategory(
+        conversationState[conversationId],
+        historyText
+      );
+      applyCategoryQuestionOverride(fixed, forcedSlot, category, false);
+      aiResponse = fixed.question;
+      conversationState[conversationId].lastOptions = fixed.options;
+      conversationState[conversationId].lastQuestionType = fixed.type;
+      conversationState[conversationId].expectsPainScore = fixed.type === "pain_score";
+      conversationState[conversationId].askedSlots[forcedSlot] = true;
+      res.locals.questionPayload = {
+        introTemplateIds: buildIntroTemplateIds(
+          conversationState[conversationId],
+          conversationState[conversationId].questionCount,
+          forcedSlot
+        ),
+        question: fixed.question,
+      };
+      res.locals.isFixedQuestion = true;
     }
     const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n判断スロット埋まり数: ${slotsFilledCount}/6\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n緊急度判定は「危険フラグ優先モデル」を使用する（Phase1: 即時RED条件 / Phase2: 重症指数）。\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が7以上、または判断スロットが6つ埋まった時点で必ず判定・まとめへ移行する。\n※内部計算はユーザーに表示しないこと。最終判断はまとめ直前の1回のみ実行すること。`;
     const structuredConversation = buildStructuredConversationForLlm(
