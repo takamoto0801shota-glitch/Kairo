@@ -2467,10 +2467,20 @@ function toConciseActionTitle(title) {
   return compact.length > 68 ? `${compact.slice(0, 68).trim()}…` : compact;
 }
 
+function stripSearchTraceFromReason(text) {
+  return String(text || "")
+    .replace(/検索結果で(も)?/g, "")
+    .replace(/検索情報で(は)?/g, "")
+    .replace(/検索で/g, "")
+    .replace(/上位情報の/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 function ensureReliableReason(reason, evidence = {}) {
   const raw = String(reason || "").trim();
-  const hasEvidenceCue = /(検索|上位情報|根拠|共通|示され|推奨|ガイドライン|一致)/.test(raw);
-  if (raw && hasEvidenceCue) return raw;
+  const sanitized = stripSearchTraceFromReason(raw);
+  if (sanitized.length > 15) return sanitized.replace(/。?$/, "。");
   const sourceText = [
     ...(Array.isArray(evidence?.selfCare) ? evidence.selfCare : []),
     ...(Array.isArray(evidence?.observe) ? evidence.observe : []),
@@ -2480,18 +2490,18 @@ function ensureReliableReason(reason, evidence = {}) {
     .replace(/\s+/g, " ")
     .slice(0, 80);
   if (sourceText) {
-    return `検索結果で共通して示される対処方針に沿っており、症状の悪化要因を減らしやすいためです。`;
+    return `刺激負荷と負担を減らすことで、症状の悪化要因を抑えやすくなります。`;
   }
   if (raw) {
-    return `${raw.replace(/。?$/, "")}。検索結果の要点と整合しているためです。`;
+    return `${raw.replace(/。?$/, "")}。負担を減らしながら経過を確認しやすいためです。`;
   }
-  return "検索結果の要点と整合する対処で、負担を減らしながら経過を確認しやすいためです。";
+  return "刺激負荷を減らし水分を補うことで、症状のぶれを抑えながら経過を確認しやすくなります。";
 }
 
 function buildSecondaryImmediateFallbackAction() {
   return {
     title: "強い刺激を避けて、体調の変化だけを短時間で確認します",
-    reason: "検索結果で共通する初期対応として、刺激負荷を減らすと症状の推移を見極めやすくなるためです。",
+    reason: "刺激負荷を減らすと、症状の推移を見極めやすくなるためです。",
     isOtc: false,
   };
 }
@@ -2513,7 +2523,7 @@ function ensureActionCount(actions = [], targetCount = 2, context = {}, evidence
     supplements.push(
       {
         title: "画面や強い光を避けて、静かな環境で過ごします",
-        reason: "視覚刺激を減らす対応は、検索結果でも悪化要因の抑制として一貫して示されるためです。",
+        reason: "視覚刺激を減らすことで、悪化要因を抑えやすくなります。",
         isOtc: false,
       },
       {
@@ -2526,12 +2536,38 @@ function ensureActionCount(actions = [], targetCount = 2, context = {}, evidence
     supplements.push(
       {
         title: "胃腸に負担の少ない過ごし方に切り替えます",
-        reason: "刺激要因を減らす対応は、検索情報でも症状の持続を抑える方向として示されるためです。",
+        reason: "刺激要因を減らすことで、症状の持続を抑えやすくなります。",
         isOtc: false,
       },
       {
         title: "一度に無理をせず、変化を見ながら対応します",
         reason: "負荷を分散すると、悪化サインの有無を見極めやすくなるためです。",
+        isOtc: false,
+      }
+    );
+  } else if (topic === "喉") {
+    supplements.push(
+      {
+        title: "乾燥を避けて、こまめに水分を取ります",
+        reason: "咽頭の乾燥を抑えることで、症状の持続を抑えやすくなります。",
+        isOtc: false,
+      },
+      {
+        title: "刺激の強い飲食を控え、静かに過ごします",
+        reason: "局所刺激を減らすと、経過の見極めがしやすくなるためです。",
+        isOtc: false,
+      }
+    );
+  } else if (topic === "皮膚") {
+    supplements.push(
+      {
+        title: "患部をこすらず、刺激を避けて過ごします",
+        reason: "刺激の反復を減らすことで、悪化要因を抑えやすくなります。",
+        isOtc: false,
+      },
+      {
+        title: "保湿を心がけ、乾燥を防ぎます",
+        reason: "バリア機能を保つことで、症状の推移を判断しやすくなるためです。",
         isOtc: false,
       }
     );
@@ -2621,7 +2657,7 @@ function buildImmediateActionsBlock(level, state, historyText = "", research = n
   lines.push(buildWhySection(context));
   lines.push("");
 
-  // ② 今すぐやること（最大3件）
+  // ② 今すぐやること（最大3件）※フォールバック時もcontext由来の補足で埋める
   const plannedActions = sanitizeImmediateActions(
     pickActionsForBlock(research, 3),
     buildSafeImmediateFallbackAction()
@@ -2629,8 +2665,10 @@ function buildImmediateActionsBlock(level, state, historyText = "", research = n
   const sourceNames = Array.isArray(research?.sourceNames)
     ? research.sourceNames.filter(Boolean).slice(0, 3)
     : [];
-  const fallbackActions = [buildSafeImmediateFallbackAction()];
-  const baseActions = plannedActions.length > 0 ? plannedActions : fallbackActions;
+  const baseActions =
+    plannedActions.length > 0
+      ? plannedActions
+      : ensureActionCount([], 2, context, research?.evidence || {});
   const finalActions = ensureActionCount(
     baseActions,
     2,
@@ -2691,11 +2729,13 @@ function buildImmediateActionFallbackPlanFromState(state, overrides = {}) {
     overrides.currentStateContext ||
     buildCurrentStateContext(state, "", state?.lastConcreteDetailsText || "");
   const fallbackPrimary = buildSafeImmediateFallbackAction();
+  const seedActions =
+    Array.isArray(overrides.actions) && overrides.actions.length > 0
+      ? sanitizeImmediateActions(overrides.actions, fallbackPrimary)
+      : [];
   return {
     actions: ensureActionCount(
-      Array.isArray(overrides.actions) && overrides.actions.length > 0
-        ? sanitizeImmediateActions(overrides.actions, fallbackPrimary)
-        : [fallbackPrimary],
+      seedActions.length > 0 ? seedActions : [],
       2,
       context,
       overrides.evidence || {}
@@ -2713,7 +2753,7 @@ function buildSafeImmediateFallbackAction() {
     title:
       "刺激（画面・強い光・空腹）を1つ減らし、水分を150〜200mlとって静かな環境で4〜6時間様子を見ましょう",
     reason:
-      "検索で一致しやすい基本対処は、刺激負荷と脱水要因を同時に下げて症状のぶれを抑えることです。",
+      "刺激負荷と脱水要因を同時に下げることで、症状のぶれを抑えやすくなります。",
     isOtc: false,
   };
 }
@@ -2743,7 +2783,7 @@ function buildDontActionsFromContext(context = {}, evidence = {}) {
   if (topic === "頭") {
     base.push({
       action: "画面を長時間見続ける",
-      reason: "視覚刺激が続くと、症状の波が大きくなりやすい情報が検索結果で重なっています。",
+      reason: "視覚刺激が続くと、症状の波が大きくなりやすいためです。",
     });
     base.push({
       action: "空腹や水分不足のまま作業を続ける",
@@ -2780,20 +2820,20 @@ function buildDontActionsFromContext(context = {}, evidence = {}) {
   if (/dehyd|脱水|hydration/.test(dangerText)) {
     base.unshift({
       action: "水分をほとんど取らないまま過ごす",
-      reason: "検索情報では、脱水が症状悪化の引き金になる点が繰り返し示されています。",
+      reason: "脱水は症状悪化の引き金になりやすいためです。",
     });
   }
   return base.slice(0, 2);
 }
 
 function renderActionDetailMessage(cushion, doActions = [], dontActions = []) {
-  const lines = [String(cushion || "").trim(), "", "▫️今すぐやること"];
+  const lines = [String(cushion || "").trim(), "", "■今すぐやること"];
   doActions.slice(0, 4).forEach((item, idx) => {
     lines.push(`・${String(item.action || "").trim()}`);
     lines.push(`→ ${String(item.reason || "").trim()}`);
     if (idx < Math.min(doActions.length, 4) - 1) lines.push("");
   });
-  lines.push("", "▫️やらないほうがいいこと");
+  lines.push("", "■やらないほうがいいこと");
   dontActions.slice(0, 2).forEach((item, idx) => {
     lines.push(`・${String(item.action || "").trim()}`);
     lines.push(`→ ${String(item.reason || "").trim()}`);
@@ -5461,39 +5501,61 @@ function buildExternalActionSearchQuery(concrete, features) {
   return parts.replace(/\s{2,}/g, " ").trim().slice(0, 420);
 }
 
-async function fetchGoogleCustomSearchResults(query, language = "ja") {
+async function fetchGoogleCustomSearchResults(query, language = "ja", retries = 2) {
   const key =
     process.env.GOOGLE_SEARCH_API_KEY ||
     process.env.GOOGLE_CUSTOM_SEARCH_API_KEY ||
     process.env.GOOGLE_API_KEY;
   const cx = process.env.GOOGLE_SEARCH_CX || process.env.GOOGLE_CUSTOM_SEARCH_CX;
-  if (!key || !cx || !query) return [];
+  if (!key || !cx) return [];
+  const q = String(query || "").trim();
+  if (!q) return [];
   const params = new URLSearchParams({
     key,
     cx,
-    q: query,
-    num: "6",
+    q: q.slice(0, 512),
+    num: "10",
     safe: "active",
     hl: language === "ja" ? "ja" : "en",
     lr: language === "ja" ? "lang_ja" : "lang_en",
   });
   const url = `https://www.googleapis.com/customsearch/v1?${params.toString()}`;
-  try {
-    const response = await fetch(url);
-    if (!response.ok) return [];
-    const data = await response.json();
-    const items = Array.isArray(data?.items) ? data.items : [];
-    return items.map((item) => ({
-      title: String(item?.title || "").trim(),
-      snippet: String(item?.snippet || "").trim(),
-      link: String(item?.link || "").trim(),
-      host: getActionSearchHost(item?.link),
-      trusted: isTrustedActionMedicalSource(item?.link),
-      language,
-    }));
-  } catch (_) {
-    return [];
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(url);
+      const data = await response.json().catch(() => ({}));
+      if (data?.error) {
+        if (data.error.code === 429 && attempt < retries) {
+          await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+          continue;
+        }
+        return [];
+      }
+      if (!response.ok) {
+        if (response.status === 429 && attempt < retries) {
+          await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+          continue;
+        }
+        return [];
+      }
+      const items = Array.isArray(data?.items) ? data.items : [];
+      return items.map((item) => ({
+        title: String(item?.title || "").trim(),
+        snippet: String(item?.snippet || "").trim(),
+        link: String(item?.link || "").trim(),
+        host: getActionSearchHost(item?.link),
+        trusted: isTrustedActionMedicalSource(item?.link),
+        language,
+      }));
+    } catch (_) {
+      if (attempt < retries) {
+        await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+      } else {
+        return [];
+      }
+    }
   }
+  return [];
 }
 
 function computeSearchContextRelevance(item, features = {}) {
@@ -5844,21 +5906,62 @@ function buildMandatoryGoogleQuery(context) {
     .slice(0, 260);
 }
 
+const MAIN_SYMPTOM_TO_EN = {
+  頭痛: "headache",
+  腹痛: "stomach pain abdominal pain",
+  "喉の痛み": "sore throat",
+  "唇の痛み": "lip pain chapped lips",
+  頭: "headache",
+  お腹: "stomach pain",
+  喉: "sore throat",
+  皮膚: "skin irritation",
+  症状: "symptom relief",
+  PAIN: "headache pain",
+  GI: "stomach pain",
+  SKIN: "skin irritation",
+  INFECTION: "sore throat",
+};
+
+function buildImmediateActionSearchQueries(context) {
+  const mainSymptom = String(context?.mainSymptom || context?.location || "症状").trim();
+  const facts = Array.isArray(context?.summaryFacts) ? context.summaryFacts.join(" ") : "";
+  const symptoms = (Array.isArray(context?.symptoms) ? context.symptoms : []).join(" ").trim();
+  const mainEn =
+    MAIN_SYMPTOM_TO_EN[mainSymptom] ||
+    (/(頭|お腹|喉|皮膚|唇)/.test(mainSymptom)
+      ? MAIN_SYMPTOM_TO_EN[mainSymptom.match(/(頭|お腹|喉|皮膚|唇)/)?.[0]] || "symptom relief"
+      : "symptom relief");
+  return {
+    ja: [
+      `${mainSymptom} ${facts} ${symptoms} 対処法`.replace(/\s{2,}/g, " ").trim().slice(0, 256),
+      `${mainSymptom} ${symptoms} 対処法 セルフケア`.replace(/\s{2,}/g, " ").trim().slice(0, 256),
+      `${mainSymptom} 対処法`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
+      "体調不良 対処法 自宅",
+    ],
+    en: [
+      `${mainEn} ${symptoms} self care home treatment`.replace(/\s{2,}/g, " ").trim().slice(0, 256),
+      `${mainEn} self care`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
+      `${mainEn} home remedy`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
+      "symptom relief self care",
+    ],
+  };
+}
+
 function extractTopSearchEvidence(results = []) {
-  const top3 = (results || []).slice(0, 3);
+  const top = (results || []).slice(0, 8);
   const selfCare = [];
   const observe = [];
   const danger = [];
-  for (const item of top3) {
+  for (const item of top) {
     const t = `${item?.title || ""} ${item?.snippet || ""}`.trim();
     if (!t) continue;
-    if (/self|care|home|対処|セルフケア|hydration|rest|保湿|補水/.test(t.toLowerCase()) && selfCare.length < 3) {
+    if (/self|care|home|対処|セルフケア|hydration|rest|保湿|補水/.test(t.toLowerCase()) && selfCare.length < 5) {
       selfCare.push(t);
     }
-    if (/observe|monitor|watch|経過|継続|持続|再評価|悪化/.test(t.toLowerCase()) && observe.length < 3) {
+    if (/observe|monitor|watch|経過|継続|持続|再評価|悪化/.test(t.toLowerCase()) && observe.length < 5) {
       observe.push(t);
     }
-    if (/red flag|warning|emergency|救急|受診|激痛|嘔吐|高熱|呼吸/.test(t.toLowerCase()) && danger.length < 3) {
+    if (/red flag|warning|emergency|救急|受診|激痛|嘔吐|高熱|呼吸/.test(t.toLowerCase()) && danger.length < 5) {
       danger.push(t);
     }
   }
@@ -5888,28 +5991,35 @@ function buildSearchBackedHeuristicActions(context, evidence) {
   if (topic === "皮膚" && /(petroleum|ワセリン|barrier|保湿)/.test(selfCareText)) {
     actions.push({
       title: "白色ワセリンを米粒2〜3粒ぶん、患部に白く残る厚さで塗り、2〜3時間ごとに半日続けて再評価しましょう",
-      reason: "検索結果で示されるセルフケアと整合する保護ケアで、刺激の反復を減らす狙いです。",
+      reason: "保護ケアで刺激の反復を減らし、バリアを保つためです。",
       isOtc: true,
     });
   }
   if (topic === "お腹") {
     actions.push({
       title: "経口補水液または水を100〜150mlずつ15〜20分ごとに2〜3時間続け、悪化時は受診に切り替えましょう",
-      reason: "上位情報の経過観察基準に沿って、脱水と症状推移を同時に管理するためです。",
+      reason: "脱水と症状推移を同時に管理するためです。",
       isOtc: false,
     });
   }
   if (topic === "頭") {
     actions.push({
       title: "画面作業を45分ごとに10分休止し、同時に150〜200mlの水分を30〜60分ごとに4回補給して半日評価しましょう",
-      reason: "検索で抽出した自己対応策を組み合わせ、刺激負荷と体調要因を同時に下げるためです。",
+      reason: "刺激負荷と体調要因を同時に下げることで、症状の推移を判断しやすくするためです。",
+      isOtc: false,
+    });
+  }
+  if (topic === "喉") {
+    actions.push({
+      title: "乾燥を避けて水分をこまめに取り、刺激の強い飲食を控えて2〜3時間様子を見ましょう",
+      reason: "咽頭の乾燥と刺激を減らすことで、症状の持続を抑えやすくなります。",
       isOtc: false,
     });
   }
   if (actions.length === 0) {
     actions.push({
       title: "刺激を1つ減らして静かな環境で休み、水分を150〜200mlとって4〜6時間の変化を確認しましょう",
-      reason: "検索結果で共通する初期対応は、刺激負荷と脱水要因を減らして症状のぶれを抑えることです。",
+      reason: "刺激負荷と脱水要因を減らすことで、症状のぶれを抑えやすくなります。",
       isOtc: false,
     });
   }
@@ -5938,32 +6048,24 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
     [concrete.message, state?.lastConcreteDetailsText || ""].filter(Boolean).join("\n")
   );
   const searchQuery = buildMandatoryGoogleQuery(currentStateContext);
+  const queryLevels = buildImmediateActionSearchQueries(currentStateContext);
 
   try {
-    const [jaResult, enResult] = await Promise.allSettled([
-      fetchGoogleCustomSearchResults(searchQuery, "ja"),
-      fetchGoogleCustomSearchResults(searchQuery, "en"),
-    ]);
-    const jaSearch = jaResult.status === "fulfilled" ? jaResult.value : [];
-    const enSearch = enResult.status === "fulfilled" ? enResult.value : [];
-    let ranked = dedupeAndRankActionSearchResults(
-      [...jaSearch, ...enSearch],
-      currentStateContext.features || {}
-    );
-    // 検索0件時は、クエリを緩めて再試行
-    if (!ranked || ranked.length === 0) {
-      const relaxedQuery = `${currentStateContext.location || "symptom"} ${currentStateContext.symptoms.join(" ")} self care`;
-      const [jaRetry, enRetry] = await Promise.allSettled([
-        fetchGoogleCustomSearchResults(relaxedQuery, "ja"),
-        fetchGoogleCustomSearchResults(relaxedQuery, "en"),
+    let ranked = [];
+    for (let level = 0; level < Math.max(queryLevels.ja.length, queryLevels.en.length); level++) {
+      const jaQuery = queryLevels.ja[level] || queryLevels.ja[queryLevels.ja.length - 1];
+      const enQuery = queryLevels.en[level] || queryLevels.en[queryLevels.en.length - 1];
+      const [jaResult, enResult] = await Promise.allSettled([
+        fetchGoogleCustomSearchResults(jaQuery, "ja"),
+        fetchGoogleCustomSearchResults(enQuery, "en"),
       ]);
+      const jaSearch = jaResult.status === "fulfilled" ? jaResult.value : [];
+      const enSearch = enResult.status === "fulfilled" ? enResult.value : [];
       ranked = dedupeAndRankActionSearchResults(
-        [
-          ...(jaRetry.status === "fulfilled" ? jaRetry.value : []),
-          ...(enRetry.status === "fulfilled" ? enRetry.value : []),
-        ],
+        [...jaSearch, ...enSearch],
         currentStateContext.features || {}
       );
+      if (ranked && ranked.length > 0) break;
     }
     if (!ranked || ranked.length === 0) {
       return buildImmediateActionFallbackPlanFromState(state, {
@@ -6794,9 +6896,10 @@ app.post("/api/chat", async (req, res) => {
           conversationState[conversationId].slotFilled[type] = true;
         }
         if (selectedIndex !== null && lastOptionsSnapshot[selectedIndex]) {
-          conversationState[conversationId].slotAnswers[type] = classified.usedFreeText
-            ? message
-            : lastOptionsSnapshot[selectedIndex];
+          // 絶対ルール: 表示・検索はユーザーの言葉を第一優先。選択肢全文に置き換えない
+          const valueForDisplay = String(message || "").trim();
+          conversationState[conversationId].slotAnswers[type] =
+            valueForDisplay || lastOptionsSnapshot[selectedIndex];
           let normalized = buildNormalizedAnswer(
             type,
             lastOptionsSnapshot[selectedIndex],
@@ -6811,7 +6914,7 @@ app.post("/api/chat", async (req, res) => {
             conversationState[conversationId],
             type,
             "question_response",
-            classified.usedFreeText ? message : lastOptionsSnapshot[selectedIndex]
+            valueForDisplay || lastOptionsSnapshot[selectedIndex]
           );
           if (type === "cause_category") {
             const freeText = classified.usedFreeText ? message : "";
@@ -6913,6 +7016,7 @@ app.post("/api/chat", async (req, res) => {
     );
     // 強制仕様: 6スロット充填完了時のみ判定・まとめを許可
     const decisionAllowed = slotsFilledCount >= 6;
+    // 絶対ルール: 初回ユーザーターンでは絶対にまとめを出さない
     const shouldJudgeNow =
       shouldJudge &&
       decisionAllowed &&
@@ -6922,7 +7026,11 @@ app.post("/api/chat", async (req, res) => {
       const isFirstQuestion =
         conversationState[conversationId].questionCount === 0 &&
         conversationState[conversationId].lastPainScore === null;
-      const nextSlot = isFirstQuestion ? "pain_score" : missingSlots[0];
+      // 初回で全スロット埋まっても nextSlot を必ず設定（フォールスルー防止）
+      const nextSlot =
+        isFirstQuestion
+          ? "pain_score"
+          : missingSlots[0] || (isFirstUserTurn ? SLOT_KEYS[0] : null);
       if (nextSlot) {
         const useFinalPrefix =
           currentQuestionCount >= minQuestions && missingSlots.length === 1;
@@ -6979,7 +7087,61 @@ app.post("/api/chat", async (req, res) => {
       }
     }
 
-    // 最終防御: 初回ユーザーターンでは、まとめ/フォローを絶対に返さない
+    // 絶対防御: 初回ユーザーターンではLLMを呼ばず、必ず質問を返す（まとめ・フォロー禁止）
+    if (isFirstUserTurn) {
+      const fallbackSlot =
+        getMissingSlots(conversationState[conversationId].slotFilled)[0] || SLOT_KEYS[0];
+      const fixed = buildFixedQuestion(fallbackSlot, false);
+      const historyText = conversationHistory[conversationId]
+        .filter((msg) => msg.role === "user")
+        .map((msg) => msg.content)
+        .join("\n");
+      const category = resolveLockedQuestionCategory(
+        conversationState[conversationId],
+        historyText
+      );
+      applyCategoryQuestionOverride(fixed, fallbackSlot, category, false);
+      const aiResponseForced = fixed.question;
+      conversationState[conversationId].lastOptions = fixed.options;
+      conversationState[conversationId].lastQuestionType = fixed.type;
+      conversationState[conversationId].expectsPainScore = fixed.type === "pain_score";
+      conversationState[conversationId].askedSlots[fallbackSlot] = true;
+      conversationHistory[conversationId].push({
+        role: "assistant",
+        content: aiResponseForced,
+      });
+      const judgeMeta = {
+        judgement: level,
+        confidence,
+        ratio: Number(ratio.toFixed(2)),
+        shouldJudge: false,
+        slotsFilledCount,
+        decisionAllowed,
+        questionCount: conversationState[conversationId].questionCount,
+        summaryLine: null,
+        questionType: fixed.type,
+        rawScore: conversationState[conversationId].lastPainScore,
+        painScoreRatio: conversationState[conversationId].lastPainWeight,
+      };
+      return res.json({
+        message: aiResponseForced,
+        response: aiResponseForced,
+        judgeMeta,
+        questionPayload: {
+          introTemplateIds: buildIntroTemplateIds(
+            conversationState[conversationId],
+            conversationState[conversationId].questionCount,
+            fallbackSlot
+          ),
+          question: fixed.question,
+        },
+        normalizedAnswer: conversationState[conversationId].lastNormalizedAnswer || null,
+        locationSnapshot: conversationState[conversationId].locationSnapshot,
+        conversationId,
+      });
+    }
+
+    // 最終防御: 初回ユーザーターンでは、まとめ/フォローを絶対に返さない（上で return 済みのため通常到達しない）
     if (isFirstUserTurn && hasAnySummaryBlocks(aiResponse)) {
       const forcedSlot =
         getMissingSlots(conversationState[conversationId].slotFilled)[0] || "worsening";
@@ -7691,11 +7853,11 @@ app.post("/api/action-details", async (req, res) => {
       message: [
         buildYellowPsychologicalCushionLine(),
         "",
-        "▫️今すぐやること",
+        "■今すぐやること",
         "・刺激を1つ減らして静かな環境で過ごし、水分を150〜200mlとって4〜6時間の変化を見ます",
         "→ 刺激と脱水の要因を同時に下げると、経過が読み取りやすくなります。",
         "",
-        "▫️やらないほうがいいこと",
+        "■やらないほうがいいこと",
         "・つらい状態のまま無理に活動量を上げる",
         "→ 体への負荷が重なると、症状の変化を見極めにくくなるためです。",
       ].join("\n"),
