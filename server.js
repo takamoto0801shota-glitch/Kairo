@@ -394,7 +394,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
   
 【まとめブロックの完全性 - 最重要】
 - **まとめは必ず「全ブロック」を出す。途中の1ブロックだけを出すのは禁止。**
-- **（A）の場合は 📝→⚠️→🏥→💬 の4ブロックを必ず全部出す。**
+- **（A）の場合は 📝→✅→🏥→💬 の4ブロックを必ず全部出す。**
 - **（B）の場合は 🟢→🤝→✅→⏳→🚨→🌱 の6ブロックを必ず全部出す。**
 - **「🌱 最後に」「💬 最後に」だけを単独で出すのは禁止。**
 - **判断に必要な情報が足りないなら、まとめを出さずに質問を増やす。**
@@ -578,7 +578,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 ⸻
 
 
-🏥 Kairoの判断
+🏥 受診先の候補
 
 
 ここで初めて「病院をおすすめします」と明示する。
@@ -737,14 +737,14 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 - ③、②、①などの番号は一切使わない（ただし、最後のまとめ表では1,2,3の番号は使ってOK）
 - 「病院に行くことをおすすめします」「市販薬で対応できそうです」「様子見で大丈夫そうです」など、言葉で明確に伝える
 - 判断を提示する際は、必ず言葉で表現する
-- **病院をおすすめする場合は、必ず（A）の形式を使用すること（📝→⚠️→🏥→💬の順番を厳守）**
+- **病院をおすすめする場合は、必ず（A）の形式を使用すること（📝→✅→🏥→💬の順番を厳守）**
 - **様子見/市販薬の場合のみ、（B）の形式を使用すること**
 - 各ブロックは必ず改行と余白を入れる（改行は2回以上）
 - ノートを読む感覚で、視線が上から下に流れるUIを想定する
-- 病院をおすすめする場合、「📝 今の状態について」から始めて、結論（病院をおすすめする）は必ず最後（🏥 Kairoの判断）に出す
+- 病院をおすすめする場合、「📝 今の状態について」から始めて、結論（病院をおすすめする）は必ず最後（🏥 受診先の候補）に出す
 - **最後のまとめセクション（💬 最後に または 🌱 最後に）は、どんな場合でも必ず毎回表示すること（絶対に省略しない）**
 - **判断を提示した後は、必ず最後にまとめセクションを追加すること**
-- **病院をおすすめする場合は、必ず（A）の形式を使用すること（📝→⚠️→🏥→💬の順番を厳守）**
+- **病院をおすすめする場合は、必ず（A）の形式を使用すること（📝→✅→🏥→💬の順番を厳守）**
 - **様子見/市販薬の場合のみ、（B）の形式を使用すること**
 - 各ブロックは必ず改行と余白を入れる（改行は2回以上）
 - ノートを読む感覚で、視線が上から下に流れるUIを想定する
@@ -872,7 +872,7 @@ function buildRepairPrompt(requiredLevel) {
 - 出力はまとめブロックのみ（質問や追加の会話はしない）
 - ブロック構成は必ずフルセット
   - 様子見/市販薬の場合：🟢→🤝→✅→⏳→🚨→🌱 の6ブロック
-  - 病院推奨の場合：📝→⚠️→🏥→💬 の4ブロック
+  - 病院推奨の場合：📝→✅→🏥→💬 の4ブロック
 - 🟡は🟢と同じ構成で出力する
 - 文章はテンプレ禁止。会話内容に即して自然に書く
 - 断定しすぎない表現（「現時点では」「今の情報を見る限り」など）を使う
@@ -883,16 +883,16 @@ function buildRepairPrompt(requiredLevel) {
 - ❗どのブロックも欠けてはいけない（1ブロックのみの出力は禁止）
 - ❗見出しは必ず以下を全て含める（順番厳守）：
   - 🟢 ここまでの情報を整理します / 🤝 今の状態について / ✅ 今すぐやること / ⏳ 今後の見通し / 🌱 最後に
-  - または 📝 今の状態について / ⚠️ Kairoが気になっているポイント / 🏥 Kairoの判断 / 💬 最後に
+  - または 📝 今の状態について / ✅ 今すぐやること / 🏥 受診先の候補 / 💬 最後に
 - 📝 今の状態について は事実のみ・具体的に書く
   - 「ない」「不明」「特になし」だけの記述は禁止
   - 症状・経過・生活影響など具体語を含める
 - 「ない／特にない／該当しない」は不安材料として扱わず、安心材料として書く
 - 「ないは気になります」などの逆転表現は絶対に使わない
 - 判断や安心コメントには、直前までの情報のうち少なくとも1つを根拠として明示的に反映する
-- 🔴の場合、🏥 Kairoの判断で受診先のカテゴリを具体的に示す
+- 🔴の場合、🏥 受診先の候補で受診先のカテゴリを具体的に示す
   - 例：歯の痛み→歯医者／耳の痛み→耳鼻科／腹痛・頭痛→病院
-- 🏥 Kairoの判断は「近くで行きやすい場所を案内します」を入れ、候補は最大2件までにする
+- 🏥 受診先の候補は「近くで行きやすい場所を案内します」を入れ、候補は最大2件までにする
 - 🤝 今の状態については一般論の説明を禁止し、感覚の翻訳にする
   - 「今のあなたの状態なら、こう考えて大丈夫です」
   - 「だから今日はこれでいいですよ」
@@ -930,7 +930,7 @@ function buildRepairPrompt(requiredLevel) {
 
 function isHospitalFlow(text) {
   return (
-    text.includes("🏥 Kairoの判断") ||
+    text.includes("🏥 受診先の候補") ||
     text.includes("病院をおすすめします") ||
     text.includes("病院に行くことをおすすめします") ||
     text.includes("病院に行きましょう")
@@ -951,15 +951,14 @@ function hasAnySummaryBlocks(text) {
     normalized.includes("💊 一般的な市販薬") ||
     normalized.includes("🌱 最後に") ||
     normalized.includes("📝 今の状態について") ||
-    normalized.includes("⚠️ Kairoが気になっているポイント") ||
-    normalized.includes("🏥 Kairoの判断") ||
+    normalized.includes("🏥 受診先の候補") ||
     normalized.includes("💬 最後に")
   );
 }
 
 function hasAllSummaryBlocks(text) {
   const normalized = normalizeHospitalMemoHeaderText(text);
-  const hospitalHeaders = ["📝 今の状態について", "⚠️ Kairoが気になっているポイント", "🏥 Kairoの判断", "💬 最後に"];
+  const hospitalHeaders = ["📝 今の状態について", "✅ 今すぐやること", "🏥 受診先の候補", "💬 最後に"];
   const normalHeaders = ["🟢 ここまでの情報を整理します", "🤝 今の状態について", "✅ 今すぐやること", "⏳ 今後の見通し", "🌱 最後に"];
   const yellowHeaders = ["🟡 ここまでの情報を整理します", "🤝 今の状態について", "✅ 今すぐやること", "⏳ 今後の見通し", "🌱 最後に"];
   const required = isHospitalFlow(normalized)
@@ -974,8 +973,8 @@ function getRequiredSummaryHeadersByLevel(level) {
   if (level === "🔴") {
     return [
       "📝 今の状態について",
-      "⚠️ Kairoが気になっているポイント",
-      "🏥 Kairoの判断",
+      "✅ 今すぐやること",
+      "🏥 受診先の候補",
       "💬 最後に",
     ];
   }
@@ -1032,6 +1031,7 @@ const ALL_SUMMARY_HEADERS = [
   "📝 今の状態について",
   "📝 いまの状態を整理します（メモ）",
   "⚠️ Kairoが気になっているポイント",
+  "🏥 受診先の候補",
   "🏥 Kairoの判断",
   "💬 最後に",
   "💊 一般的な市販薬",
@@ -2291,10 +2291,8 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
     ? "現在は夜間の時間帯です。症状が強くなければ、明日受診する形が選択肢の一つです。"
     : "";
   const lines = [
-    "🏥 Kairoの判断",
+    "🏥 受診先の候補",
     timeMessage,
-    "「危険」という判断ではありませんが、",
-    "ここで一度プロに見てもらう選択が、いちばん迷いが残りません。",
     "",
     "⸻",
     "",
@@ -2347,11 +2345,53 @@ function buildHospitalConcernPoint(historyText) {
   return `今の症状の出方を整理すると、薬で様子を見るより、一度${destination.label}で確認した方が安心できる状態です。`;
 }
 
-function ensureHospitalMemoBlock(text, state) {
+function buildRedCushionLine(historyText) {
+  const destination = detectCareDestinationFromHistory(historyText || "");
+  return `今の症状の出方を整理すると、一度${destination.label}で確認した方が安心できる状態です。`;
+}
+
+function buildRedImmediateActionsFallback() {
+  return [
+    {
+      title: "症状が悪化したらすぐ受診する",
+      reason: "変化が早い段階で分かると、対応しやすくなります。",
+    },
+    {
+      title: "水分をこまめに取り、無理をしない",
+      reason: "体の負担を減らすことが、次の判断の土台になります。",
+    },
+  ];
+}
+
+function buildRedImmediateActionsBlock(state, historyText) {
+  const cushion = buildRedCushionLine(historyText);
+  const fixedFirst = [
+    "・本日中に医療機関へ連絡する",
+    "→ 早い段階で確認することで、重大な問題でないことが分かるケースも多くあります。",
+  ];
+  const fallbackActions = buildRedImmediateActionsFallback();
+  const extra = fallbackActions.slice(0, 2).flatMap((a) => [
+    `・${a.title}`,
+    `→ ${a.reason}`,
+  ]);
+  return [
+    "✅ 今すぐやること",
+    cushion,
+    "",
+    ...fixedFirst,
+    "",
+    ...extra,
+  ].join("\n");
+}
+
+function ensureHospitalMemoBlock(text, state, historyText = "") {
   if (!text) return text;
+  const judgment = buildHospitalConcernPoint(historyText);
   const memoLines = [
     "📝 今の状態について",
     ...buildStateFactsBullets(state),
+    "",
+    judgment,
   ];
   const replacedOld = replaceSummaryBlock(
     normalizeHospitalMemoHeaderText(text),
@@ -2365,16 +2405,21 @@ function ensureHospitalMemoBlock(text, state) {
   );
 }
 
-function ensureHospitalConcernBlock(text, historyText) {
+function ensureRedImmediateActionsBlock(text, state, historyText = "") {
   if (!text) return text;
-  return replaceSummaryBlock(
-    text,
-    "⚠️ Kairoが気になっているポイント",
-    [
-      "⚠️ Kairoが気になっているポイント",
-      buildHospitalConcernPoint(historyText),
-    ].join("\n")
-  );
+  const block = buildRedImmediateActionsBlock(state, historyText);
+  const replaced = replaceSummaryBlock(text, "✅ 今すぐやること", block);
+  if (replaced === text) {
+    const insertAfter = "📝 今の状態について";
+    const lines = text.split("\n");
+    const idx = lines.findIndex((line) => line.startsWith(insertAfter));
+    if (idx >= 0) {
+      const endIdx = lines.findIndex((line, i) => i > idx && /^(🏥|💬)\s/.test(line));
+      const insertAt = endIdx >= 0 ? endIdx : lines.length;
+      return [...lines.slice(0, insertAt), "", block, ...lines.slice(insertAt)].join("\n");
+    }
+  }
+  return replaced;
 }
 
 function ensureHospitalBlock(text, state, historyText) {
@@ -2388,7 +2433,9 @@ function ensureHospitalBlock(text, state, historyText) {
       state?.clinicCandidates || [],
       state?.hospitalCandidates || []
     );
-  const replaced = replaceSummaryBlock(text, "🏥 Kairoの判断", buildHospitalBlock(state, historyText, hospitalRec));
+  const block = buildHospitalBlock(state, historyText, hospitalRec);
+  let replaced = replaceSummaryBlock(text, "🏥 受診先の候補", block);
+  if (replaced === text) replaced = replaceSummaryBlock(text, "🏥 Kairoの判断", block);
   const withoutInfectionOnline = stripInfectionOnlineClinicGuidance(replaced, state);
   return stripHospitalMapLinks(withoutInfectionOnline);
 }
@@ -6250,13 +6297,18 @@ function buildLocalSummaryFallback(level, history, state) {
       state?.hospitalCandidates || []
     );
     const hospitalBlock = buildHospitalBlock(state, historyText, hospitalRec);
-    return sanitizeSummaryBullets([
+    const memoWithJudgment = [
       "📝 今の状態について",
       buildStateFactsBullets(state).join("\n"),
-      "⚠️ Kairoが気になっているポイント",
+      "",
       buildHospitalConcernPoint(historyText),
-      "🏥 Kairoの判断",
-      hospitalBlock.replace(/^🏥 Kairoの判断\n/, ""),
+    ].join("\n");
+    const redActionsBlock = buildRedImmediateActionsBlock(state, historyText);
+    return sanitizeSummaryBullets([
+      memoWithJudgment,
+      redActionsBlock,
+      "🏥 受診先の候補",
+      hospitalBlock.replace(/^🏥 受診先の候補\n/, ""),
       "💬 最後に",
       "不安な状況だと思います。迷ったときは受診する判断は慎重で正しいです。",
     ].join("\n"), state);
@@ -7341,8 +7393,8 @@ app.post("/api/chat", async (req, res) => {
       aiResponse = ensureOutlookBlock(aiResponse, conversationState[conversationId]);
       aiResponse = enforceYellowOtcPositionStrict(aiResponse, level);
       if (level === "🔴") {
-        aiResponse = ensureHospitalMemoBlock(aiResponse, conversationState[conversationId]);
-        aiResponse = ensureHospitalConcernBlock(aiResponse, historyTextForOtc);
+        aiResponse = ensureHospitalMemoBlock(aiResponse, conversationState[conversationId], historyTextForOtc);
+        aiResponse = ensureRedImmediateActionsBlock(aiResponse, conversationState[conversationId], historyTextForOtc);
         aiResponse = ensureHospitalBlock(
           aiResponse,
           conversationState[conversationId],
@@ -7870,8 +7922,8 @@ function getSummarySectionSpecsByJudgement(judgement) {
   if (judgement === "🔴") {
     return [
       { id: 1, title: "📝 今の状態について", patterns: [/^📝\s*今の状態について/, /^📝\s*いまの状態を整理します（メモ）/, /^📝\s*いまの状態を整理します/] },
-      { id: 2, title: "⚠️ Kairoが気になっているポイント", patterns: [/^⚠️\s*Kairoが気になっているポイント/] },
-      { id: 3, title: "🏥 Kairoの判断", patterns: [/^🏥\s*Kairoの判断/] },
+      { id: 2, title: "✅ 今すぐやること", patterns: [/^✅\s*今すぐやること（これだけでOK）/, /^✅\s*今すぐやること/] },
+      { id: 3, title: "🏥 受診先の候補", patterns: [/^🏥\s*受診先の候補/, /^🏥\s*Kairoの判断/] },
       { id: 4, title: "💬 最後に", patterns: [/^💬\s*最後に/] },
     ];
   }

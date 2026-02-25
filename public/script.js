@@ -294,8 +294,7 @@ function parseAIMessage(text) {
     // 病院をおすすめする場合
     { icon: '📝', name: '今の状態について' },
     { icon: '📝', name: 'いまの状態を整理します（メモ）' },
-    { icon: '⚠️', name: 'Kairoが気になっているポイント' },
-    { icon: '🏥', name: 'Kairoの判断' },
+    { icon: '🏥', name: '受診先の候補' },
     { icon: '💬', name: '最後に' }
   ];
 
@@ -538,10 +537,9 @@ function isDecisionCompleted(text) {
     '✅ 今すぐやること',
     '⏳ 今後の見通し',
     '🚨 もし次の症状が出たら',
-    '🏥 Kairoの判断',
+    '🏥 受診先の候補',
     '📝 今の状態について',
     '📝 いまの状態を整理します',
-    '⚠️ Kairoが気になっているポイント',
     '病院に行くことをおすすめします',
     '病院をおすすめします'
   ];
@@ -571,7 +569,7 @@ function getUrgencyLevel(text) {
 
   // 病院をおすすめする場合
   if (
-    text.includes('🏥 Kairoの判断') ||
+    text.includes('🏥 受診先の候補') ||
     text.includes('病院をおすすめします') ||
     text.includes('病院に行くことをおすすめします') ||
     text.includes('今すぐ病院') ||
@@ -619,7 +617,7 @@ function createSummaryBlock(text) {
     headerText = '今回は病院をおすすめします';
     
     // 判断を抽出（🏥 セクションから）
-    const hospitalMatch = text.match(/🏥[^⸻]*?Kairoの判断[^⸻]*?\*\*([^*]+)\*\*/s);
+    const hospitalMatch = text.match(/🏥[^⸻]*?(?:受診先の候補|Kairoの判断)[^⸻]*?\*\*([^*]+)\*\*/s);
     if (hospitalMatch) {
       summaryContent = hospitalMatch[1].trim() + '\n\n✅ 今やること\n\n専門家の確認が必要です。\n一人で判断しなくて大丈夫です。' + actionSuffix;
     } else {
@@ -675,7 +673,7 @@ function createSummaryBlock(text) {
 // Extract summary from AI message (サマリーカード用)
 function extractSummary(text) {
   // 病院をおすすめする場合（🏥 セクション）をチェック
-  const hospitalMatch = text.match(/🏥[^⸻]*?Kairoの判断[^⸻]*?([^⸻]*?)⸻/s);
+  const hospitalMatch = text.match(/🏥[^⸻]*?(?:受診先の候補|Kairoの判断)[^⸻]*?([^⸻]*?)⸻/s);
   if (hospitalMatch) {
     // 病院をおすすめする場合
     let summary = '🔴 病院をおすすめします\n👉 ';
@@ -897,8 +895,7 @@ function addSummaryBlock(messageDiv, fullText) {
     fullText.includes('🚨 もし次の症状が出たら') ||
     fullText.includes('📝 今の状態について') ||
     fullText.includes('📝 いまの状態を整理します') ||
-    fullText.includes('⚠️ Kairoが気になっているポイント') ||
-    fullText.includes('🏥 Kairoの判断');
+    fullText.includes('🏥 受診先の候補');
   if (hasSummaryInText) {
     return;
   }
