@@ -5566,7 +5566,8 @@ async function buildDiseaseSafetyFilteredMessage(
       "- 出力は必ずJSONのみ：{\"common\":[],\"conditional\":[],\"rare_emergency\":[]}",
       "- common = 一般的に頻度が高い原因（2〜4件）。各項目は「・<原因名> → <短い理由>」形式",
       "- 「→」の理由は**ユーザーの言動を要約**して記載。ユーザーが言っていないことは書かない。固定文（例：肩こりやストレスで）は使わず、ユーザーが実際に言った内容に合わせる。",
-      "- conditional = 条件付きで考慮すべき状況（2〜4件）。**本当の病名・疾患名**を記載する（例：群発頭痛、髄膜炎、副鼻腔炎）。症状の一般表現ではなく医学的に正しい病名を使う。検索結果＋ユーザー症状から要約。煽らない表現。固定テンプレート禁止。",
+      "- conditional = 条件付きで考慮すべき状況（2〜4件）。各項目は「・<病名> → <関連した理由>」形式。本当の病名を使い、理由はユーザー症状と関連付ける（例：群発頭痛 → ズキズキする痛みが目の奥に集中することがある）。検索結果＋ユーザー症状から要約。煽らない表現。固定テンプレート禁止。",
+      "- 禁止：理由に痛みの強さ（3/10、〇/10など）を絶対に使わない。",
       "- rare_emergency = 稀だが緊急性あり。**2件のみ**（強制）。検索結果＋ユーザー症状から要約。腫瘍・出血・致死・がん・破裂などの重篤疾患はここにのみ入れる。固定テンプレート禁止。",
       "- common/conditional に腫瘍・出血・致死・がん・破裂を含めない",
       "- 「あなたの場合」「この症状は」などの個別化表現は禁止。恐怖を煽る表現は禁止",
@@ -5612,11 +5613,19 @@ async function buildDiseaseSafetyFilteredMessage(
   let rare_emergency = sanitize(parsed?.rare_emergency, true).slice(0, 2);
 
   const userWords = rawFacts;
+  const stripPainScoreFromReason = (text) =>
+    String(text || "")
+      .replace(/\d+\s*\/\s*10/g, "")
+      .replace(/痛みの強さ|痛みスコア|〇\/10/g, "")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+
   common = common.map((item) => {
     const arrowIdx = item.indexOf(" → ");
     if (arrowIdx === -1) return item;
     const reason = item.slice(arrowIdx + 3).trim();
-    const fixed = replaceUnsaidPhrasesInReason(reason, userWords);
+    let fixed = replaceUnsaidPhrasesInReason(reason, userWords);
+    fixed = stripPainScoreFromReason(fixed) || fixed;
     return `${item.slice(0, arrowIdx + 3)}${fixed}`;
   });
 
@@ -5635,20 +5644,63 @@ async function buildDiseaseSafetyFilteredMessage(
   common = common.slice(0, 4);
 
   const conditionalFallbacksBySymptom = {
-    頭痛: ["・群発頭痛", "・髄膜炎", "・副鼻腔炎", "・高血圧性頭痛"],
-    腹痛: ["・虫垂炎", "・胆嚢炎", "・腸閉塞", "・膵炎"],
-    "喉の痛み": ["・扁桃周囲膿瘍", "・咽頭後膿瘍", "・急性喉頭蓋炎", "・伝染性単核球症"],
-    "唇の痛み": ["・口唇ヘルペス", "・口角炎", "・アレルギー性接触皮膚炎", "・血管性浮腫"],
-    発熱: ["・敗血症", "・髄膜炎", "・肺炎", "・尿路感染症"],
-    皮膚症状: ["・蜂窩織炎", "・丹毒", "・アナフィラキシー", "・薬疹"],
-    体調不良: ["・髄膜炎", "・敗血症", "・心筋梗塞", "・肺塞栓症"],
+    頭痛: [
+      "・群発頭痛 → ズキズキする痛みが目の奥に集中することがある",
+      "・副鼻腔炎 → 目の奥の痛みやだるさが関連することがある",
+      "・髄膜炎 → 発熱を伴う強い頭痛が続くことがある",
+      "・高血圧性頭痛 → 血圧の変動で頭痛が出ることがある",
+    ],
+    腹痛: [
+      "・虫垂炎 → 右下腹部の痛みが強くなることがある",
+      "・胆嚢炎 → 右上腹部の痛みや発熱を伴うことがある",
+      "・腸閉塞 → 腹痛と嘔吐が続くことがある",
+      "・膵炎 → みぞおちの強い痛みが出ることがある",
+    ],
+    "喉の痛み": [
+      "・扁桃周囲膿瘍 → のどの片側が強く腫れることがある",
+      "・急性喉頭蓋炎 → 呼吸がしづらくなることがある",
+      "・咽頭後膿瘍 → 飲み込みづらさや首の腫れが出ることがある",
+      "・伝染性単核球症 → だるさや発熱が続くことがある",
+    ],
+    "唇の痛み": [
+      "・口唇ヘルペス → 水ぶくれやヒリヒリ感が出ることがある",
+      "・口角炎 → 口角の亀裂や痛みが出ることがある",
+      "・アレルギー性接触皮膚炎 → かぶれや腫れが出ることがある",
+      "・血管性浮腫 → 唇が急に腫れることがある",
+    ],
+    発熱: [
+      "・敗血症 → 高熱と全身の状態悪化が出ることがある",
+      "・髄膜炎 → 高熱と頭痛が続くことがある",
+      "・肺炎 → 咳や息苦しさを伴うことがある",
+      "・尿路感染症 → 排尿時痛や腰痛が出ることがある",
+    ],
+    皮膚症状: [
+      "・蜂窩織炎 → 赤みや腫れが広がることがある",
+      "・丹毒 → 境界がはっきりした赤みが出ることがある",
+      "・アナフィラキシー → 全身のじんましんや呼吸困難が出ることがある",
+      "・薬疹 → 薬の服用後に発疹が出ることがある",
+    ],
+    体調不良: [
+      "・髄膜炎 → 高熱と頭痛が続くことがある",
+      "・敗血症 → 全身の状態が急に悪化することがある",
+      "・心筋梗塞 → 胸の痛みや息切れが出ることがある",
+      "・肺塞栓症 → 突然の胸痛や呼吸困難が出ることがある",
+    ],
   };
   const conditionalFallbacks =
     conditionalFallbacksBySymptom[mainSymptom] || conditionalFallbacksBySymptom.頭痛;
   while (conditional.length < 2 && conditionalFallbacks.length > 0) {
     const next = conditionalFallbacks.shift();
-    if (!conditional.includes(next)) conditional.push(next);
+    const name = (next.match(/^・([^→]+)/) || [])[1]?.trim?.() || "";
+    if (!name || !conditional.some((c) => c.includes(name))) conditional.push(next);
   }
+  conditional = conditional.map((item) => {
+    const arrowIdx = item.indexOf(" → ");
+    if (arrowIdx === -1) return item;
+    const reason = item.slice(arrowIdx + 3).trim();
+    const fixed = stripPainScoreFromReason(reason) || reason;
+    return `${item.slice(0, arrowIdx + 3)}${fixed}`;
+  });
   conditional = conditional.slice(0, 4);
 
   const rareFallbacksBySymptom = {
