@@ -818,6 +818,7 @@ function initConversationState(input = {}) {
       impact: { filled: false, value: null, source: null },
       associated: { filled: false, value: null, source: null },
       cause_category: { filled: false, value: null, source: null },
+      worsening_trend: { filled: false, value: null, source: null },
     },
     noNewInformationTurns: 0,
     askedSlots: {},
@@ -1265,12 +1266,22 @@ function mergePlaces(...lists) {
   return merged;
 }
 
+function getPlacesApiKey() {
+  return (
+    process.env.GOOGLE_PLACES_API_KEY ||
+    process.env.GOOGLE_MAPS_API_KEY ||
+    process.env.GOOGLE_CUSTOM_SEARCH_API_KEY ||
+    process.env.GOOGLE_API_KEY
+  );
+}
+
 async function fetchNearbyPlaces(location, { keyword, type, radius = 1000, rankByDistance = false }) {
-  if (!process.env.GOOGLE_PLACES_API_KEY) return [];
+  const key = getPlacesApiKey();
+  if (!key) return [];
   if (!location?.lat || !location?.lng) return [];
   const params = new URLSearchParams({
     location: `${location.lat},${location.lng}`,
-    key: process.env.GOOGLE_PLACES_API_KEY,
+    key,
   });
   if (rankByDistance) {
     params.set("rankby", "distance");
@@ -1286,12 +1297,30 @@ async function fetchNearbyPlaces(location, { keyword, type, radius = 1000, rankB
   return normalizePlaces(data.results || [], location);
 }
 
+async function fetchPlacesByTextSearch(location, query, { type, radius = 5000 } = {}) {
+  const key = getPlacesApiKey();
+  if (!key) return [];
+  if (!location?.lat || !location?.lng) return [];
+  const params = new URLSearchParams({
+    query: String(query || "clinic").trim(),
+    location: `${location.lat},${location.lng}`,
+    radius: String(radius),
+    key,
+  });
+  if (type) params.set("type", type);
+  const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?${params.toString()}`;
+  const res = await fetch(url);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return normalizePlaces(data.results || [], location);
+}
+
 async function fetchPlaceDetails(placeId) {
-  if (!process.env.GOOGLE_PLACES_API_KEY) return null;
+  if (!getPlacesApiKey()) return null;
   if (!placeId) return null;
   const params = new URLSearchParams({
     place_id: placeId,
-    key: process.env.GOOGLE_PLACES_API_KEY,
+    key: getPlacesApiKey(),
     language: "en",
     fields: "place_id,name,rating,reviews,types,url,user_ratings_total,editorial_summary",
   });
@@ -1400,6 +1429,43 @@ function applySymptomFitFilter(candidates, plan) {
   return filtered.length > 0 ? filtered : list;
 }
 
+async function fetchCarePlacesWithFallbacks(location, plan, state) {
+  const types = ["doctor", "hospital"];
+  const keywords = plan?.searchKeywords || ["clinic", "general practitioner", "medical clinic"];
+  const results = [];
+  for (const type of types) {
+    for (const keyword of keywords) {
+      const places = await fetchNearbyPlaces(location, { keyword, type, radius: 3000 });
+      results.push(...places);
+    }
+  }
+  if (results.length === 0) {
+    for (const type of types) {
+      const fallback = await fetchNearbyPlaces(location, { type, radius: 3000 });
+      results.push(...fallback);
+    }
+  }
+  if (results.length === 0) {
+    for (const type of types) {
+      const rankBy = await fetchNearbyPlaces(location, { type, rankByDistance: true });
+      results.push(...rankBy);
+    }
+  }
+  if (results.length === 0) {
+    const textQueries = ["clinic", "hospital", "doctor", "medical clinic", "GP"];
+    for (const q of textQueries) {
+      const textResults = await fetchPlacesByTextSearch(location, q, { type: "doctor", radius: 5000 });
+      results.push(...textResults);
+      if (results.length >= 4) break;
+    }
+  }
+  if (results.length === 0) {
+    const wider = await fetchPlacesByTextSearch(location, "clinic hospital", { radius: 10000 });
+    results.push(...wider);
+  }
+  return results;
+}
+
 function scoreSingaporePreference(candidate) {
   const text = [
     candidate?.name || "",
@@ -1452,9 +1518,6 @@ function buildHospitalRecommendationReasons(candidate, plan) {
     const count = Number.isFinite(candidate?.userRatingsTotal) ? `（${candidate.userRatingsTotal}件）` : "";
     reasons.push(`・Google評価は ${candidate.rating.toFixed(1)} ${count} で、利用者評価が確認できます`);
   }
-  if (Number.isFinite(candidate?.distanceM)) {
-    reasons.push(`・現在地から${formatDistanceForCare(candidate.distanceM)}で、受診ハードルが比較的低い距離です`);
-  }
   return reasons.slice(0, 3);
 }
 
@@ -1487,7 +1550,7 @@ function buildCareReviewSummary(candidate, plan) {
 }
 
 async function reverseGeocodeLocation(location) {
-  const apiKey = process.env.GOOGLE_GEOCODE_API_KEY || process.env.GOOGLE_PLACES_API_KEY;
+  const apiKey = process.env.GOOGLE_GEOCODE_API_KEY || getPlacesApiKey();
   if (!apiKey || !location?.lat || !location?.lng) return null;
   const params = new URLSearchParams({
     latlng: `${location.lat},${location.lng}`,
@@ -1522,13 +1585,30 @@ async function reverseGeocodeWithRetry(location, retries = 2) {
   return null;
 }
 
+async function geocodeAddress(address) {
+  const apiKey = process.env.GOOGLE_GEOCODE_API_KEY || getPlacesApiKey();
+  if (!apiKey || !address) return null;
+  const params = new URLSearchParams({
+    address: String(address).trim(),
+    key: apiKey,
+  });
+  const url = `https://maps.googleapis.com/maps/api/geocode/json?${params.toString()}`;
+  const res = await fetch(url);
+  if (!res.ok) return null;
+  const data = await res.json();
+  const result = (data.results || [])[0];
+  if (!result?.geometry?.location) return null;
+  const loc = result.geometry.location;
+  return { lat: loc.lat, lng: loc.lng };
+}
+
 async function resolveLocationContext(state, clientMeta) {
   if (!state) return;
   if (state?.locationSnapshot && state.locationContext) {
     return;
   }
   if (state?.locationSnapshot?.lat && state?.locationSnapshot?.lng) {
-    const geo = await reverseGeocodeWithRetry(state.location, 2);
+    const geo = await reverseGeocodeWithRetry(state.locationSnapshot, 2);
     const city = geo?.city || "unknown";
     const country = geo?.country || clientMeta?.country || "JP";
     state.location = {
@@ -1601,12 +1681,19 @@ async function resolveClinicCandidates(state) {
 }
 
 async function resolveHospitalCandidates(state) {
-  if (!canRecommendSpecificPlaceFinal(state)) return [];
-  if (!state?.locationSnapshot?.lat || !state?.locationSnapshot?.lng) return [];
-  const keywords = ["hospital", "medical centre"];
+  let location = state?.locationSnapshot;
+  if (!location?.lat || !location?.lng) {
+    const ctx = state?.locationContext || {};
+    const addr = [ctx.city || ctx.area, ctx.country].filter(Boolean).join(", ") || ctx.country || "Singapore";
+    if (addr) {
+      const geo = await geocodeAddress(addr);
+      if (geo) location = geo;
+    }
+  }
+  if (!location?.lat || !location?.lng) return [];
   const results = [];
-  for (const keyword of keywords) {
-    const places = await fetchNearbyPlaces(state.locationSnapshot, {
+  for (const keyword of ["hospital", "medical centre", "emergency"]) {
+    const places = await fetchNearbyPlaces(location, {
       keyword,
       type: "hospital",
       rankByDistance: true,
@@ -1614,11 +1701,19 @@ async function resolveHospitalCandidates(state) {
     results.push(...places);
   }
   if (results.length === 0) {
-    const fallback = await fetchNearbyPlaces(state.locationSnapshot, {
+    const fallback = await fetchNearbyPlaces(location, {
       type: "hospital",
       rankByDistance: true,
     });
     results.push(...fallback);
+  }
+  if (results.length === 0) {
+    const textResults = await fetchPlacesByTextSearch(
+      location,
+      "hospital medical centre",
+      { type: "hospital", radius: 5000 }
+    );
+    results.push(...textResults);
   }
   return sortPlacesByRatingThenDistance(mergePlaces(results)).slice(0, 2);
 }
@@ -2182,33 +2277,22 @@ function detectCareDestinationFromHistory(historyText) {
 }
 
 async function resolveCareCandidates(state, destination) {
-  if (!canRecommendSpecificPlaceFinal(state)) return [];
-  if (!state?.locationSnapshot?.lat || !state?.locationSnapshot?.lng) return [];
+  let location = state?.locationSnapshot;
+  if (!location?.lat || !location?.lng) {
+    const ctx = state?.locationContext || {};
+    const city = ctx.city || ctx.area;
+    const country = ctx.country || "";
+    const addr = [city, country].filter(Boolean).join(", ") || country || "Singapore";
+    if (addr) {
+      const geo = await geocodeAddress(addr);
+      if (geo) location = geo;
+    }
+  }
+  if (!location?.lat || !location?.lng) return [];
   const historyText = state?.historyTextForCare || "";
   const mainSymptomText = detectCareMainSymptomText(state, historyText);
   const plan = buildCareSearchQueries(mainSymptomText, destination);
-  const types = ["doctor", "hospital"];
-  const keywords = plan.searchKeywords || destination?.places?.keywords || ["clinic"];
-  const results = [];
-  for (const type of types) {
-    for (const keyword of keywords) {
-      const places = await fetchNearbyPlaces(state.locationSnapshot, {
-        keyword,
-        type,
-        radius: 3000,
-      });
-      results.push(...places);
-    }
-  }
-  if (results.length === 0) {
-    for (const type of types) {
-      const fallback = await fetchNearbyPlaces(state.locationSnapshot, {
-        type,
-        radius: 3000,
-      });
-      results.push(...fallback);
-    }
-  }
+  const results = await fetchCarePlacesWithFallbacks(location, plan, state);
   const mergedBase = mergePlaces(results);
   const symptomFitted = applySymptomFitFilter(mergedBase, plan);
   const merged = prioritizeCareCandidates(symptomFitted, state).slice(0, 6);
@@ -2228,15 +2312,14 @@ async function resolveCareCandidates(state, destination) {
   if (finalList.length > 0) return finalList;
   const names = destination?.fallbackNames;
   if (Array.isArray(names) && names.length > 0) {
-    return buildFallbackPlaces(names, state?.locationSnapshot);
+    return buildFallbackPlaces(names, location || state?.locationSnapshot);
   }
-  // 最後の保険（症状カテゴリと国別に具体化）
   const country = String(state?.locationContext?.country || "Japan");
   const gpFallback =
     (FALLBACK_GP_BY_COUNTRY[country] && FALLBACK_GP_BY_COUNTRY[country].length > 0)
       ? FALLBACK_GP_BY_COUNTRY[country]
       : FALLBACK_GP_BY_COUNTRY.Japan;
-  return buildFallbackPlaces(gpFallback.slice(0, 2), state?.locationSnapshot);
+  return buildFallbackPlaces(gpFallback.slice(0, 2), location || state?.locationSnapshot);
 }
 
 function buildHospitalBlock(state, historyText, hospitalRec) {
@@ -2305,14 +2388,6 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
       const normalizedName = String(c?.name || "").trim();
       lines.push("");
       lines.push(`・候補${idx + 1}: ${normalizedName}`);
-      lines.push(`  ${plan?.symptomLabel || "現在の症状"}の初期診療に対応可能な候補です。`);
-      const reviewSummaryLines = buildCareReviewSummary(c, plan);
-      if (Array.isArray(reviewSummaryLines)) {
-        reviewSummaryLines.slice(0, 3).forEach((line) => lines.push(`  ${line}`));
-      } else {
-        lines.push(`  ${String(reviewSummaryLines || "")}`);
-      }
-      lines.push("");
       lines.push("  推薦理由：");
       const reasons = buildHospitalRecommendationReasons(c, plan);
       if (reasons.length > 0) {
@@ -2320,11 +2395,6 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
       } else {
         lines.push("  ・現在地から行きやすく、初期相談先として使いやすい候補です");
       }
-      lines.push(
-        Number.isFinite(c?.distanceM)
-          ? `  距離: ${formatDistanceForCare(c.distanceM)}`
-          : "  距離: 取得不可（現在地ベース候補）"
-      );
     });
   } else {
     lines.push("近くで受診しやすい実在医療機関を優先して案内します。");
@@ -2351,16 +2421,45 @@ function buildRedCushionLine(historyText) {
 }
 
 function buildRedImmediateActionsFallback() {
+  // 1件目ですでに受診を推奨しているため、2件目以降では受診を勧める内容を含めない
   return [
-    {
-      title: "症状が悪化したらすぐ受診する",
-      reason: "変化が早い段階で分かると、対応しやすくなります。",
-    },
     {
       title: "水分をこまめに取り、無理をしない",
       reason: "体の負担を減らすことが、次の判断の土台になります。",
     },
+    {
+      title: "安静にして、刺激を減らして過ごす",
+      reason: "体を回復モードに入れることで、変化が読み取りやすくなります。",
+    },
   ];
+}
+
+const RED_MODAL_CLOSING_LINE =
+  "今動いていること自体が、安全に近づく行動です。今は慌てる段階ではありません。ひとつずつ確認していけば大丈夫です。";
+
+function buildRedModalContent(state, historyText = "") {
+  const cushion = buildRedCushionLine(historyText);
+  const fallbackActions = buildRedImmediateActionsFallback();
+  const safeWaitItems = fallbackActions.slice(0, 2).flatMap((a) => [
+    `・${a.title}`,
+    `→ ${a.reason}`,
+  ]);
+  const parts = [
+    cushion,
+    "",
+    "① 今すぐやること（受診優先）",
+    "・本日中に医療機関へ連絡する",
+    "→ 早い段階で確認することで、重大な問題でないことが分かるケースも多くあります。",
+    "",
+    "② 受診までの過ごし方（安全待機モード）",
+    ...safeWaitItems,
+    "",
+    RED_MODAL_CLOSING_LINE,
+  ];
+  if (shouldAppendMcLinesToModal(state)) {
+    parts.push("", ...MC_4_LINES);
+  }
+  return parts.join("\n");
 }
 
 function buildRedImmediateActionsBlock(state, historyText) {
@@ -2577,6 +2676,11 @@ function ensureActionCount(actions = [], targetCount = 2, context = {}, evidence
         title: "水分をこまめに取り、体調の変化を短時間で見ます",
         reason: "脱水や負荷の重なりを減らすと、症状の推移を判断しやすくなるためです。",
         isOtc: false,
+      },
+      {
+        title: "刺激を1つ減らして静かな環境で過ごし、4〜6時間の変化を見ます",
+        reason: "負荷を分散すると、症状の推移を判断しやすくなります。",
+        isOtc: false,
       }
     );
   } else if (topic === "お腹") {
@@ -2589,6 +2693,11 @@ function ensureActionCount(actions = [], targetCount = 2, context = {}, evidence
       {
         title: "一度に無理をせず、変化を見ながら対応します",
         reason: "負荷を分散すると、悪化サインの有無を見極めやすくなるためです。",
+        isOtc: false,
+      },
+      {
+        title: "経口補水液または水をこまめに取り、変化を見ます",
+        reason: "脱水を防ぐことで、症状の推移を確認しやすくなります。",
         isOtc: false,
       }
     );
@@ -2603,6 +2712,11 @@ function ensureActionCount(actions = [], targetCount = 2, context = {}, evidence
         title: "刺激の強い飲食を控え、静かに過ごします",
         reason: "局所刺激を減らすと、経過の見極めがしやすくなるためです。",
         isOtc: false,
+      },
+      {
+        title: "加湿を心がけ、刺激の強い飲食を控えます",
+        reason: "咽頭の負担を減らすことで、経過の見極めがしやすくなります。",
+        isOtc: false,
       }
     );
   } else if (topic === "皮膚") {
@@ -2614,12 +2728,25 @@ function ensureActionCount(actions = [], targetCount = 2, context = {}, evidence
       },
       {
         title: "保湿を心がけ、乾燥を防ぎます",
-        reason: "バリア機能を保つことで、症状の推移を判断しやすくなるためです。",
+        reason: "バリア機能を保つことで、症状の推移を判断しやすくなります。",
         isOtc: false,
+      },
+      {
+        title: "白色ワセリンを患部に薄く塗り、2〜3時間ごとに塗り直す",
+        reason: "バリアを保つことで、刺激の反復を減らしやすくなります。",
+        isOtc: true,
       }
     );
   } else {
-    supplements.push(buildSafeImmediateFallbackAction(), buildSecondaryImmediateFallbackAction());
+    supplements.push(
+      buildSafeImmediateFallbackAction(),
+      buildSecondaryImmediateFallbackAction(),
+      {
+        title: "刺激を1つ減らして静かな環境で過ごし、4〜6時間の変化を見ます",
+        reason: "負荷を分散すると、症状の推移を判断しやすくなります。",
+        isOtc: false,
+      }
+    );
   }
   for (const item of supplements) {
     const key = String(item.title || "").trim();
@@ -2640,7 +2767,7 @@ function ensureMinimumDoActions(actions = [], minCount = 3, context = {}, eviden
   return out.slice(0, 4);
 }
 
-function pickActionsForBlock(plan, maxCount = 2) {
+function pickActionsForBlock(plan, maxCount = 3) {
   const actions = Array.isArray(plan?.actions) ? plan.actions : [];
   const picked = [];
   let otcUsed = false;
@@ -2686,6 +2813,34 @@ function buildExpectedCourse(context = {}) {
   return templates[Math.floor(Math.random() * templates.length)];
 }
 
+function getOtcActionForYellowModal(category) {
+  const byCategory = {
+    頭: {
+      action: "市販の鎮痛薬（アセトアミノフェン等）を用法通りに使う",
+      reason: "痛みを和らげることで、休息を取りやすくなります。",
+    },
+    お腹: {
+      action: "整腸剤（市販）を用法通りに使う",
+      reason: "腸の調子を整えることで、症状の推移を確認しやすくなります。",
+    },
+    喉: {
+      action: "のど飴やトローチを用法通りに使う",
+      reason: "のどを潤すことで、違和感を和らげやすくなります。",
+    },
+    皮膚: {
+      action: "白色ワセリンを患部に薄く塗り、2〜3時間ごとに塗り直す",
+      reason: "バリアを保つことで、刺激の反復を減らしやすくなります。",
+    },
+  };
+  return byCategory[category] || byCategory.頭;
+}
+
+const PAIN_INFECTION_YELLOW_FIRST_ACTION = {
+  title: "今はベッドに入り、横になって数時間ゆっくり過ごします",
+  reason: "体を休息モードに切り替えることで、自然な回復の流れが働きやすくなります。",
+  isOtc: false,
+};
+
 /** ④ 締めの一文（心理的アンカー） */
 function buildClosingLine() {
   const templates = [
@@ -2715,13 +2870,20 @@ function buildImmediateActionsBlock(level, state, historyText = "", research = n
   const baseActions =
     plannedActions.length > 0
       ? plannedActions
-      : ensureActionCount([], 2, context, research?.evidence || {});
-  const finalActions = ensureActionCount(
+      : ensureActionCount([], 3, context, research?.evidence || {});
+  let finalActions = ensureActionCount(
     baseActions,
-    2,
+    3,
     context,
     research?.evidence || {}
   );
+  const category = resolveQuestionCategoryFromState(state);
+  if (level === "🟡" && (category === "PAIN" || category === "INFECTION")) {
+    const rest = finalActions.filter(
+      (a) => String(a?.title || "").trim() !== PAIN_INFECTION_YELLOW_FIRST_ACTION.title
+    );
+    finalActions = [PAIN_INFECTION_YELLOW_FIRST_ACTION, ...rest].slice(0, 3);
+  }
   finalActions.slice(0, 3).forEach((action, idx) => {
     lines.push(formatActionTitleWithBullet(toConciseActionTitle(action.title)));
     const reason =
@@ -2783,7 +2945,7 @@ function buildImmediateActionFallbackPlanFromState(state, overrides = {}) {
   return {
     actions: ensureActionCount(
       seedActions.length > 0 ? seedActions : [],
-      2,
+      3,
       context,
       overrides.evidence || {}
     ),
@@ -2873,7 +3035,18 @@ function buildDontActionsFromContext(context = {}, evidence = {}) {
   return base.slice(0, 2);
 }
 
-function renderActionDetailMessage(cushion, doActions = [], dontActions = []) {
+const MC_4_LINES = [
+  "休むためにMCが必要な場合は、今の症状であればオンライン診療で容易に取得できます。",
+  "doctor anywhere / white coat",
+];
+
+function shouldAppendMcLinesToModal(state) {
+  const restLevel = resolveRestLevelFromState(state);
+  const category = resolveQuestionCategoryFromState(state);
+  return (restLevel === "LIGHT" || restLevel === "STRONG") && category !== "INFECTION";
+}
+
+function renderActionDetailMessage(cushion, doActions = [], dontActions = [], appendMcLines = false) {
   const lines = [String(cushion || "").trim(), "", "■今すぐやること"];
   doActions.slice(0, 4).forEach((item, idx) => {
     lines.push(`・${String(item.action || "").trim()}`);
@@ -2886,6 +3059,9 @@ function renderActionDetailMessage(cushion, doActions = [], dontActions = []) {
     lines.push(`→ ${String(item.reason || "").trim()}`);
     if (idx < Math.min(dontActions.length, 2) - 1) lines.push("");
   });
+  if (appendMcLines) {
+    lines.push("", ...MC_4_LINES);
+  }
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
@@ -2902,14 +3078,18 @@ async function buildConcreteImmediateActionsDetails(state, actionSection = "") {
   const cushion = buildYellowPsychologicalCushionLine();
 
   try {
+    const isYellow = state?.decisionLevel === "🟡";
     const prompt = [
       "あなたは医療情報を要約して行動を具体化するアシスタントです。",
       "出力はJSONのみ。診断断定は禁止。命令形禁止。",
       "次の形式で返す: {\"cushion\":\"...\",\"do\":[{\"action\":\"...\",\"reason\":\"...\"}],\"dont\":[{\"action\":\"...\",\"reason\":\"...\"}]}",
       "cushionは1文、40〜65文字、保証語・危険語を使わない。",
-      "doは最大4件、dontは最大2件。各reasonは検索要点と整合する確実な理由にする。",
+      "doは最低3件、最大4件。dontは最大2件。各reasonは検索要点と整合する確実な理由にする。",
+      isYellow ? "OTC（市販薬：鎮痛薬・整腸剤・のど飴・ワセリン等）を1件必ず含める。" : "",
       "「症状メモを2時間ごとに1回...」は禁止。",
-    ].join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
@@ -2945,32 +3125,95 @@ async function buildConcreteImmediateActionsDetails(state, actionSection = "") {
         reason: ensureReliableReason(x.reason, plan?.evidence || {}),
       }))
       .slice(0, 4);
-    const ensuredDo = ensureMinimumDoActions(
+    let ensuredDo = ensureMinimumDoActions(
       safeDo.map((x) => ({ title: x.action, reason: x.reason, isOtc: false })),
       3,
       plan?.currentStateContext || {},
       plan?.evidence || {}
     ).map((x) => ({ action: x.title, reason: x.reason }));
+    const category = resolveQuestionCategoryFromState(state);
+    const level = state?.decisionLevel;
+    if (level === "🟡" && (category === "PAIN" || category === "INFECTION")) {
+      const fixedFirst = {
+        action: PAIN_INFECTION_YELLOW_FIRST_ACTION.title,
+        reason: PAIN_INFECTION_YELLOW_FIRST_ACTION.reason,
+      };
+      const rest = ensuredDo.filter((x) => x.action !== fixedFirst.action);
+      ensuredDo = [fixedFirst, ...rest].slice(0, 4);
+    }
+    if (level === "🟡") {
+      const hasOtc = ensuredDo.some(
+        (x) => /ワセリン|鎮痛薬|整腸剤|のど飴|トローチ|市販/.test(x.action || "")
+      );
+      if (!hasOtc) {
+        const topic = normalizeContextLocation(plan?.currentStateContext?.location || "");
+        const otc = getOtcActionForYellowModal(topic);
+        ensuredDo = [...ensuredDo, otc].slice(0, 4);
+      }
+    }
+    if (ensuredDo.length < 3) {
+      const ctx = plan?.currentStateContext || {};
+      const extra = ensureMinimumDoActions(
+        ensuredDo.map((x) => ({ title: x.action, reason: x.reason, isOtc: false })),
+        3,
+        ctx,
+        plan?.evidence || {}
+      )
+        .map((x) => ({ action: x.title, reason: x.reason }))
+        .filter((x) => !ensuredDo.some((e) => e.action === x.action));
+      ensuredDo = [...ensuredDo, ...extra].slice(0, 4);
+    }
     const safeDont = (Array.isArray(outDont) ? outDont : [])
       .filter((x) => x && x.action && x.reason)
       .slice(0, 2);
+    const appendMc = shouldAppendMcLinesToModal(state);
     return {
-      message: renderActionDetailMessage(outCushion, ensuredDo, safeDont.length > 0 ? safeDont : dontActions),
+      message: renderActionDetailMessage(outCushion, ensuredDo, safeDont.length > 0 ? safeDont : dontActions, appendMc),
       query: plan?.searchQuery || "",
       sourceNames: plan?.sourceNames || [],
     };
   } catch (_) {
+    let fallbackDo = ensureMinimumDoActions(
+      doActions.map((x) => ({ title: x.action, reason: x.reason, isOtc: false })),
+      3,
+      plan?.currentStateContext || {},
+      plan?.evidence || {}
+    ).map((x) => ({ action: x.title, reason: x.reason }));
+    const category = resolveQuestionCategoryFromState(state);
+    const level = state?.decisionLevel;
+    if (level === "🟡" && (category === "PAIN" || category === "INFECTION")) {
+      const fixedFirst = {
+        action: PAIN_INFECTION_YELLOW_FIRST_ACTION.title,
+        reason: PAIN_INFECTION_YELLOW_FIRST_ACTION.reason,
+      };
+      const rest = fallbackDo.filter((x) => x.action !== fixedFirst.action);
+      fallbackDo = [fixedFirst, ...rest].slice(0, 4);
+    }
+    if (level === "🟡") {
+      const hasOtc = fallbackDo.some(
+        (x) => /ワセリン|鎮痛薬|整腸剤|のど飴|トローチ|市販/.test(x.action || "")
+      );
+      if (!hasOtc) {
+        const topic = normalizeContextLocation(plan?.currentStateContext?.location || "");
+        const otc = getOtcActionForYellowModal(topic);
+        fallbackDo = [...fallbackDo, otc].slice(0, 4);
+      }
+    }
+    if (fallbackDo.length < 3) {
+      const ctx = plan?.currentStateContext || {};
+      const extra = ensureMinimumDoActions(
+        fallbackDo.map((x) => ({ title: x.action, reason: x.reason, isOtc: false })),
+        3,
+        ctx,
+        plan?.evidence || {}
+      )
+        .map((x) => ({ action: x.title, reason: x.reason }))
+        .filter((x) => !fallbackDo.some((e) => e.action === x.action));
+      fallbackDo = [...fallbackDo, ...extra].slice(0, 4);
+    }
+    const appendMc = shouldAppendMcLinesToModal(state);
     return {
-      message: renderActionDetailMessage(
-        cushion,
-        ensureMinimumDoActions(
-          doActions.map((x) => ({ title: x.action, reason: x.reason, isOtc: false })),
-          3,
-          plan?.currentStateContext || {},
-          plan?.evidence || {}
-        ).map((x) => ({ action: x.title, reason: x.reason })),
-        dontActions
-      ),
+      message: renderActionDetailMessage(cushion, fallbackDo, dontActions, appendMc),
       query: plan?.searchQuery || "",
       sourceNames: plan?.sourceNames || [],
     };
@@ -3229,6 +3472,10 @@ function buildJudgmentSnapshot(state, history = [], decisionType) {
   if (duration) {
     riskFactors.push(`経過: ${duration}`);
   }
+  const worseningTrend = String(answers.worsening_trend || "").trim();
+  if (worseningTrend && /発症時より悪化|悪化している/.test(worseningTrend)) {
+    riskFactors.push(`方向性: ${worseningTrend}`);
+  }
   if (answers.associated_symptoms && !/ない|なし|特にない/.test(answers.associated_symptoms)) {
     riskFactors.push(`付随症状: ${answers.associated_symptoms}`);
   }
@@ -3386,7 +3633,7 @@ function buildFollowUpJudgeMeta(state) {
     confidence: state?.confidence || 0,
     ratio: state?.decisionRatio ?? null,
     shouldJudge: true,
-    slotsFilledCount: countFilledSlots(state?.slotFilled),
+    slotsFilledCount: countFilledSlots(state?.slotFilled, state),
     decisionAllowed: true,
     questionCount: state?.questionCount || 0,
     summaryLine: null,
@@ -3573,6 +3820,9 @@ function detectQuestionType(text) {
   if (normalized.match(/原因|きっかけ|思い当たる|普段と違う|カテゴリ/)) {
     return "cause_category";
   }
+  if (normalized.match(/方向性|回復に向か|変わらない|悪化している/)) {
+    return "worsening_trend";
+  }
   return "other";
 }
 
@@ -3583,7 +3833,10 @@ const SLOT_KEYS = [
   "daily_impact",
   "associated_symptoms",
   "cause_category",
+  "worsening_trend",
 ];
+
+const CONDITIONAL_SLOT_WORSENING_TREND = "worsening_trend";
 
 const SLOT_STATUS_KEY_MAP = {
   pain_score: "severity",
@@ -3592,6 +3845,7 @@ const SLOT_STATUS_KEY_MAP = {
   daily_impact: "impact",
   associated_symptoms: "associated",
   cause_category: "cause_category",
+  worsening_trend: "worsening_trend",
 };
 
 const FIXED_SLOT_ORDER = [
@@ -3602,6 +3856,26 @@ const FIXED_SLOT_ORDER = [
   "associated_symptoms",
   "cause_category",
 ];
+
+function isDurationDayOrMore(state) {
+  const durationRaw = String(
+    getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "")
+  ).trim();
+  const selectedIndex = state?.durationMeta?.selectedIndex;
+  if (selectedIndex === 2) return true;
+  return /(昨日|一日前|数日|ずっと|前から|一昨日|三日前|二日前|数日前|\d+日前|一日以上)/.test(durationRaw);
+}
+
+function getSlotOrderWithConditional(state) {
+  const base = [...FIXED_SLOT_ORDER];
+  if (!isDurationDayOrMore(state)) return base;
+  const durationIdx = base.indexOf("duration");
+  if (durationIdx < 0) return base;
+  const insertIdx = durationIdx + 1;
+  if (base.includes(CONDITIONAL_SLOT_WORSENING_TREND)) return base;
+  base.splice(insertIdx, 0, CONDITIONAL_SLOT_WORSENING_TREND);
+  return base;
+}
 
 const RISK_LEVELS = {
   LOW: "LOW",
@@ -3615,6 +3889,7 @@ const SLOT_RISK_BY_INDEX = {
   daily_impact: [RISK_LEVELS.LOW, RISK_LEVELS.MEDIUM, RISK_LEVELS.HIGH],
   associated_symptoms: [RISK_LEVELS.LOW, RISK_LEVELS.MEDIUM, RISK_LEVELS.HIGH],
   cause_category: [RISK_LEVELS.LOW, RISK_LEVELS.MEDIUM, RISK_LEVELS.HIGH],
+  worsening_trend: [RISK_LEVELS.LOW, RISK_LEVELS.MEDIUM, RISK_LEVELS.HIGH],
 };
 
 const SUBJECTIVE_ALERT_WORDS = ["気になります", "引っかかります", "心配です", "注意が必要です"];
@@ -3762,10 +4037,10 @@ function extractDurationFromText(text) {
     const dValue = Number((dNorm && dNorm[1]) || (dRaw && dRaw[1].match(/(\d+)/)?.[1]) || NaN);
     return { raw_text: raw, normalized: Number.isFinite(dValue) ? `${dValue}d_ago` : "day_or_more", selectedIndex: 2 };
   }
-  if (/(昨日|一日前|数日|ずっと|前から|一昨日)/.test(normalized)) {
+  if (/(昨日|一日前|数日|ずっと|前から|一昨日|三日前|二日前|数日前|〇日前)/.test(normalized)) {
     const raw =
-      (rawText.match(/(昨日|一日前|数日|ずっと|前から|一昨日)/) || [])[0] ||
-      (normalized.match(/(昨日|一日前|数日|ずっと|前から|一昨日)/) || [])[0] ||
+      (rawText.match(/(昨日|一日前|数日|ずっと|前から|一昨日|三日前|二日前|数日前|\d+日前)/) || [])[0] ||
+      (normalized.match(/(昨日|一日前|数日|ずっと|前から|一昨日|三日前|二日前|数日前|\d+日前)/) || [])[0] ||
       "一日以上前";
     return { raw_text: raw, normalized: "day_or_more", selectedIndex: 2 };
   }
@@ -3851,6 +4126,24 @@ function extractCauseCategory(text) {
   return null;
 }
 
+function extractWorseningTrendFromText(text) {
+  const rawText = String(text || "").trim();
+  const normalized = normalizeUserText(text);
+  if (/(発症時より悪化|悪化している|ひどくなって|悪化してきた)/.test(normalized)) {
+    const m = rawText.match(/(発症時より悪化|悪化している|ひどくなって|悪化してきた)[^。！？]*/);
+    return { raw: (m && m[0]) || "発症時より悪化している", selectedIndex: 2 };
+  }
+  if (/(変わらない|横ばい|同じ|変化なし|悪くも良くも)/.test(normalized)) {
+    const m = rawText.match(/(変わらない|横ばい|同じ|変化なし|悪くも良くも)/);
+    return { raw: (m && m[0]) || "変わらない", selectedIndex: 1 };
+  }
+  if (/(回復に向か|良くなって|ましになって|楽になって|改善して)/.test(normalized)) {
+    const m = rawText.match(/(回復に向か|良くなって|ましになって|楽になって|改善して)[^。！？]*/);
+    return { raw: (m && m[0]) || "回復に向かっている", selectedIndex: 0 };
+  }
+  return null;
+}
+
 function markSlotStatus(state, slotKey, source, value = null) {
   if (!state || !slotKey) return;
   ensureSlotStatusShape(state);
@@ -3891,7 +4184,7 @@ function setSlotFromSpontaneous(state, slotKey, payload = {}) {
     state.lastNormalizedAnswer = normalized;
   }
   markSlotStatus(state, slotKey, "user_spontaneous", rawAnswer);
-  state.confidence = computeConfidenceFromSlots(state.slotFilled);
+  state.confidence = computeConfidenceFromSlots(state.slotFilled, state);
   return true;
 }
 
@@ -3975,6 +4268,17 @@ function applySpontaneousSlotFill(state, message) {
     added += 1;
   }
 
+  if (isDurationDayOrMore(state)) {
+    const trend = extractWorseningTrendFromText(text);
+    if (trend && setSlotFromSpontaneous(state, "worsening_trend", {
+      rawAnswer: trend.raw,
+      selectedIndex: trend.selectedIndex,
+      allowOverwrite: correction,
+    })) {
+      added += 1;
+    }
+  }
+
   return added;
 }
 
@@ -4034,17 +4338,55 @@ function countAskedSlots(askedSlots) {
   return SLOT_KEYS.filter((key) => askedSlots && askedSlots[key]).length;
 }
 
-function countFilledSlots(slotFilled) {
-  return SLOT_KEYS.filter((key) => slotFilled && slotFilled[key]).length;
+function countFilledSlots(slotFilled, state = null) {
+  const order = state ? getSlotOrderWithConditional(state) : SLOT_KEYS;
+  return order.filter((key) => slotFilled && slotFilled[key]).length;
 }
 
-function computeConfidenceFromSlots(slotFilled) {
-  const filled = countFilledSlots(slotFilled);
-  return Math.round((filled / SLOT_KEYS.length) * 100);
+function getRequiredSlotCount(state) {
+  return getSlotOrderWithConditional(state).length;
 }
 
-function getMissingSlots(slotFilled) {
-  return SLOT_KEYS.filter((key) => !slotFilled || !slotFilled[key]);
+function computeConfidenceFromSlots(slotFilled, state = null) {
+  const order = state ? getSlotOrderWithConditional(state) : SLOT_KEYS;
+  const filled = order.filter((key) => slotFilled && slotFilled[key]).length;
+  return Math.round((filled / order.length) * 100);
+}
+
+function getMissingSlots(slotFilled, state = null) {
+  const order = state ? getSlotOrderWithConditional(state) : SLOT_KEYS;
+  return order.filter((key) => !slotFilled || !slotFilled[key]);
+}
+
+/** slotFilled と slotAnswers/slotStatus の整合性を保ち、不正な埋まりを解除する */
+function ensureSlotFilledConsistency(state) {
+  if (!state || !state.slotFilled) return;
+  ensureSlotStatusShape(state);
+  for (const slotKey of SLOT_KEYS) {
+    if (slotKey === "worsening_trend" && !isDurationDayOrMore(state)) {
+      state.slotFilled[slotKey] = false;
+      if (state.slotStatus?.worsening_trend) {
+        state.slotStatus.worsening_trend.filled = false;
+        state.slotStatus.worsening_trend.value = null;
+      }
+      continue;
+    }
+    const statusKey = SLOT_STATUS_KEY_MAP[slotKey];
+    const rawAnswer = state.slotAnswers?.[slotKey];
+    const statusVal = state.slotStatus?.[statusKey]?.value;
+    const hasValue = (v) => v != null && String(v).trim().length > 0;
+    const isValid =
+      slotKey === "pain_score"
+        ? Number.isFinite(state.lastPainScore)
+        : hasValue(rawAnswer) || hasValue(statusVal);
+    if (state.slotFilled[slotKey] && !isValid) {
+      state.slotFilled[slotKey] = false;
+      if (state.slotStatus?.[statusKey]) {
+        state.slotStatus[statusKey].filled = false;
+        state.slotStatus[statusKey].value = null;
+      }
+    }
+  }
 }
 
 function detectSymptomCategory(text) {
@@ -4079,6 +4421,10 @@ const FIXED_QUESTIONS = {
   cause_category: {
     q: "何かきっかけで思い当たることはありますか？\n・スマホやパソコンを長時間見た\n・寝不足や疲れが続いている\n・強いストレスや緊張があった",
     options: ["スマホやパソコンを長時間見た", "寝不足や疲れが続いている", "強いストレスや緊張があった"],
+  },
+  worsening_trend: {
+    q: "今の方向性はどうですか？\n・回復に向かっている\n・変わらない\n・発症時より悪化している",
+    options: ["回復に向かっている", "変わらない", "発症時より悪化している"],
   },
 };
 
@@ -4334,7 +4680,7 @@ function getIntroRoleFromTemplateId(id) {
 
 function getAllowedIntroRolesBySlot(slotKey) {
   if (slotKey === "pain_score") return new Set(["EMPATHY"]);
-  if (slotKey === "duration" || slotKey === "worsening") return new Set(["FOCUS"]);
+  if (slotKey === "duration" || slotKey === "worsening" || slotKey === "worsening_trend") return new Set(["FOCUS"]);
   if (slotKey === "daily_impact") return new Set(["PROGRESS", "FOCUS"]);
   if (slotKey === "associated_symptoms") return new Set(["FOCUS"]);
   if (slotKey === "cause_category") return new Set(["PROGRESS", "FOCUS"]);
@@ -4355,7 +4701,7 @@ function buildIntroTemplateIds(state, questionIndex, slotKey) {
   } else {
     let roles = [];
     const progressUsed = (state.introRoleUsage?.PROGRESS || 0) > 0;
-    if (slotKey === "duration" || slotKey === "worsening") {
+    if (slotKey === "duration" || slotKey === "worsening" || slotKey === "worsening_trend") {
       roles = ["FOCUS"];
     } else if (slotKey === "daily_impact") {
       roles = progressUsed ? ["FOCUS"] : ["PROGRESS", "FOCUS"];
@@ -4614,6 +4960,11 @@ function buildStateFactsBullets(state) {
   const duration = val("duration", answers.duration);
   if (duration && !isUnknownLike(duration)) {
     pushIfValid(lines, `・始まりは${duration}`);
+  }
+
+  const worseningTrend = val("worsening_trend", answers.worsening_trend);
+  if (worseningTrend && !isUnknownLike(worseningTrend)) {
+    pushIfValid(lines, `・方向性は${worseningTrend}`);
   }
 
   const impact = val("impact", answers.daily_impact);
@@ -4998,14 +5349,50 @@ function collectSlotFactsForDiseaseSearch(state) {
   return Array.from(new Set(rawSlotFacts)).slice(0, 6);
 }
 
-/** 🤝/📝モーダル用：疾患検索クエリ（病名・説明に特化。6スロット情報を追加） */
+/** 主症状→英語（疾患検索用） */
+const MAIN_SYMPTOM_TO_EN_DISEASE = {
+  頭痛: "headache",
+  腹痛: "stomach pain abdominal pain",
+  "喉の痛み": "sore throat",
+  "唇の痛み": "lip pain chapped lips",
+  発熱: "fever",
+  皮膚症状: "skin rash irritation",
+  体調不良: "symptoms general",
+};
+
+/** 🤝/📝モーダル用：疾患検索クエリ（複数バリアントを返し、並列検索でヒット率を上げる） */
 function buildDiseaseSearchQueries(mainSymptom = "", slotFacts = []) {
   const s = String(mainSymptom || "症状").trim();
   const facts = Array.isArray(slotFacts) ? slotFacts.filter(Boolean).join(" ") : "";
   const suffix = facts ? ` ${facts}` : "";
-  const queryJP = `${s}${suffix} 考えられる疾患 病名 説明`.replace(/\s{2,}/g, " ").trim().slice(0, 260);
-  const queryEN = `${s}${suffix} possible conditions diseases explanation`.replace(/\s{2,}/g, " ").trim().slice(0, 260);
-  return { queryJP, queryEN };
+  const mainEn = MAIN_SYMPTOM_TO_EN_DISEASE[s] || MAIN_SYMPTOM_TO_EN_DISEASE.体調不良;
+  const mandatoryJP = `${s}${suffix} 考えられる疾患 病名 説明`.replace(/\s{2,}/g, " ").trim().slice(0, 260);
+  const mandatoryEN = `${s}${suffix} ${mainEn} possible conditions diseases`.replace(/\s{2,}/g, " ").trim().slice(0, 260);
+  const jaBase = [
+    mandatoryJP,
+    `${s}${suffix} 考えられる疾患`.replace(/\s{2,}/g, " ").trim().slice(0, 200),
+    `${s} 疾患 病名 原因`.replace(/\s{2,}/g, " ").trim().slice(0, 180),
+    `${s} 原因 病名 鑑別`.replace(/\s{2,}/g, " ").trim().slice(0, 180),
+    `${s} 症状 説明 医療`.replace(/\s{2,}/g, " ").trim().slice(0, 160),
+    `${s} 病名 症状 対処`.replace(/\s{2,}/g, " ").trim().slice(0, 160),
+    s === "体調不良" ? "頭痛 腹痛 喉 考えられる疾患 病名" : `${s} 病名`,
+    s === "体調不良" ? "症状 考えられる疾患 病名 説明" : `${s} 医療 説明`,
+  ].filter((q) => q && String(q).trim().length > 0);
+  const enBase = [
+    mandatoryEN,
+    `${mainEn} possible conditions differential diagnosis`.replace(/\s{2,}/g, " ").trim().slice(0, 200),
+    `${mainEn} causes symptoms explanation`.replace(/\s{2,}/g, " ").trim().slice(0, 180),
+    `${mainEn} self care when to see doctor`.replace(/\s{2,}/g, " ").trim().slice(0, 180),
+    `${mainEn} common conditions`,
+    `${mainEn} diagnosis treatment`,
+    `what causes ${mainEn} symptoms`,
+  ].filter((q) => q && String(q).trim().length > 0);
+  return {
+    queryJP: mandatoryJP,
+    queryEN: mandatoryEN,
+    ja: [...new Set(jaBase)],
+    en: [...new Set(enBase)],
+  };
 }
 
 /** 主症状ラベルを疾患検索用に正規化（ユーザー入力は使わない） */
@@ -5031,43 +5418,53 @@ function toMainSymptomForDiseaseSearch(state) {
 /** 🤝/📝モーダル：疾患名2つ＋各2〜3文の説明を生成（ユーザー情報は一切含めない） */
 async function buildDiseaseFocusedModalMessage(searchResults = [], mainSymptom = "", level = "🟢", state = null) {
   const searchText = (searchResults || [])
-    .slice(0, 8)
+    .slice(0, 30)
     .map((r) => `${r?.title || ""} ${r?.snippet || ""}`)
     .join("\n")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 4000);
+    .slice(0, 6000);
   if (!searchText) {
     return buildDiseaseFocusedModalFallback(mainSymptom, level, state);
   }
-  try {
-    const prompt = [
-      "検索結果から、主症状に関連する代表的な疾患を2つ選び、各疾患を2〜3文で説明してください。",
-      "厳守：",
-      "- 疾患名を必ず2つ出す（例：緊張型頭痛、片頭痛 / 口内ヘルペス、口角炎）",
-      "- 各疾患ごとに2〜3文で説明",
-      "- ユーザーの症状・入力内容は一切含めない",
-      "- 「あなたの場合」「この症状は」などの個別化表現は禁止",
-      "- 診断を断定しない（「〜です」→「〜とされる状態です」）",
-      "- 合併症・重篤例の詳細説明は含めない",
-      "- 恐怖を煽る表現は禁止",
-      "JSON形式で返す：{\"diseases\":[{\"name\":\"疾患名\",\"description\":\"2〜3文の説明\"},{\"name\":\"疾患名\",\"description\":\"2〜3文の説明\"}]}",
-    ].join("\n");
+  const fallbackPair = getDiseaseFallbackPair(mainSymptom);
+  const tryExtract = async (simplified = false) => {
+    const prompt = simplified
+      ? "検索結果から主症状に関連する疾患を2つ選び、各2〜3文で説明。JSONのみ返す：{\"diseases\":[{\"name\":\"疾患名\",\"description\":\"説明\"},{\"name\":\"疾患名\",\"description\":\"説明\"}]}"
+      : [
+          "検索結果から、主症状に関連する代表的な疾患を2つ選び、各疾患を2〜3文で説明してください。",
+          "厳守：",
+          "- 疾患名を必ず2つ出す（例：緊張型頭痛、片頭痛 / 口内ヘルペス、口角炎）",
+          "- 各疾患ごとに2〜3文で説明",
+          "- ユーザーの症状・入力内容は一切含めない",
+          "- 「あなたの場合」「この症状は」などの個別化表現は禁止",
+          "- 診断を断定しない（「〜です」→「〜とされる状態です」）",
+          "- 合併症・重篤例の詳細説明は含めない",
+          "- 恐怖を煽る表現は禁止",
+          "JSON形式で返す：{\"diseases\":[{\"name\":\"疾患名\",\"description\":\"2〜3文の説明\"},{\"name\":\"疾患名\",\"description\":\"2〜3文の説明\"}]}",
+        ].join("\n");
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: prompt },
-        {
-          role: "user",
-          content: `主症状: ${mainSymptom}\n\n検索結果:\n${searchText}`,
-        },
+        { role: "user", content: `主症状: ${mainSymptom}\n\n検索結果:\n${searchText}` },
       ],
       temperature: 0.2,
       max_tokens: 800,
     });
     const raw = completion?.choices?.[0]?.message?.content || "";
     const parsed = parseJsonObjectFromText(raw);
-    const diseases = Array.isArray(parsed?.diseases) ? parsed.diseases : [];
+    return Array.isArray(parsed?.diseases) ? parsed.diseases : [];
+  };
+  let diseases = [];
+  try {
+    diseases = await tryExtract(false);
+    if (diseases.length < 2) {
+      diseases = await tryExtract(true);
+    }
+    if (diseases.length === 1 && fallbackPair[1]) {
+      diseases.push({ name: fallbackPair[1].name, description: fallbackPair[1].desc });
+    }
     if (diseases.length >= 2) {
       const lines = ["今の状態は、次のようなパターンと似ています。", ""];
       diseases.slice(0, 2).forEach((d) => {
@@ -5093,7 +5490,7 @@ async function buildDiseaseFocusedModalMessage(searchResults = [], mainSymptom =
   return buildDiseaseFocusedModalFallback(mainSymptom, level, state);
 }
 
-function buildDiseaseFocusedModalFallback(mainSymptom, level, state = null) {
+function getDiseaseFallbackPair(mainSymptom) {
   const fallbacks = {
     頭痛: [
       { name: "緊張型頭痛", desc: "筋肉の緊張やストレスが関係するとされる状態です。頭の周囲が締め付けられるような痛みが特徴です。" },
@@ -5119,8 +5516,16 @@ function buildDiseaseFocusedModalFallback(mainSymptom, level, state = null) {
       { name: "接触皮膚炎", desc: "刺激物への接触により皮膚に炎症が生じるとされる状態です。赤みやかゆみが主な症状です。" },
       { name: "乾燥性皮膚炎", desc: "皮膚のバリア機能低下により乾燥やヒリつきが出るとされる状態です。" },
     ],
+    体調不良: [
+      { name: "感冒", desc: "ウイルス感染による上気道の炎症とされる状態です。発熱、咳、鼻水、倦怠感などを伴うことがあります。" },
+      { name: "自律神経の乱れ", desc: "ストレスや生活習慣の影響で自律神経のバランスが崩れるとされる状態です。だるさや不調の原因になることがあります。" },
+    ],
   };
-  const pair = fallbacks[mainSymptom] || fallbacks.頭痛;
+  return fallbacks[mainSymptom] || fallbacks.頭痛;
+}
+
+function buildDiseaseFocusedModalFallback(mainSymptom, level, state = null) {
+  const pair = getDiseaseFallbackPair(mainSymptom);
   const lines = ["今の状態は、次のようなパターンと似ています。", ""];
   pair.forEach((d) => {
     lines.push(`■ ${d.name}`);
@@ -5446,16 +5851,63 @@ function enforceConcreteModalStructure(message, options = {}) {
     .replace(/場合があります/g, "ことがあります");
 }
 
+function dedupeDiseaseSearchResults(results = []) {
+  const seen = new Set();
+  const out = [];
+  for (const item of results) {
+    const key = `${item?.host || ""}|${String(item?.title || "").toLowerCase().slice(0, 80)}`;
+    if (!item?.link || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out.sort((a, b) => (a.trusted === b.trusted ? 0 : a.trusted ? -1 : 1));
+}
+
 async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], summarySection = "") {
   const mainSymptom = toMainSymptomForDiseaseSearch(state);
-  const slotFacts = collectSlotFactsForDiseaseSearch(state);
-  const { queryJP, queryEN } = buildDiseaseSearchQueries(mainSymptom, slotFacts);
+  const extraTerms = collectConcreteSymptomTerms(state, summaryFacts, summarySection);
+  const slotFacts = [
+    ...collectSlotFactsForDiseaseSearch(state),
+    ...(Array.isArray(summaryFacts) ? summaryFacts.filter(Boolean) : []),
+    ...extraTerms,
+  ].filter((v, i, arr) => arr.indexOf(v) === i).slice(0, 10);
+  const { queryJP, queryEN, ja, en } = buildDiseaseSearchQueries(mainSymptom, slotFacts);
 
-  const [jaResults, enResults] = await Promise.all([
-    fetchGoogleCustomSearchResults(queryJP, "ja"),
-    fetchGoogleCustomSearchResults(queryEN, "en"),
-  ]);
-  const allResults = [...(jaResults || []), ...(enResults || [])];
+  const allQueries = [
+    ...(ja || [queryJP]).map((q) => ({ q, lang: "ja" })),
+    ...(en || [queryEN]).map((q) => ({ q, lang: "en" })),
+  ].filter((x) => x.q && String(x.q).trim().length > 0);
+  const searchPromises = allQueries.map(({ q, lang }) => fetchGoogleCustomSearchResults(q, lang));
+  const searchResults = await Promise.allSettled(searchPromises);
+  let allResults = dedupeDiseaseSearchResults(
+    searchResults.flatMap((r) => (r.status === "fulfilled" && Array.isArray(r.value) ? r.value : []))
+  );
+  if (allResults.length === 0) {
+    const mainEn = MAIN_SYMPTOM_TO_EN_DISEASE[mainSymptom] || "symptoms";
+    const retryQueries = [
+      { q: `${mainSymptom} 病名 症状`.replace(/\s{2,}/g, " ").trim().slice(0, 120), lang: "ja" },
+      { q: `${mainEn} conditions`.trim(), lang: "en" },
+      { q: `${mainSymptom} 疾患`.replace(/\s{2,}/g, " ").trim().slice(0, 80), lang: "ja" },
+      { q: `${mainSymptom} 症状 説明`.replace(/\s{2,}/g, " ").trim().slice(0, 100), lang: "ja" },
+      { q: `${mainEn} causes`.trim(), lang: "en" },
+      { q: `${mainEn} symptoms treatment`.trim(), lang: "en" },
+    ];
+    const retryResults = await Promise.allSettled(
+      retryQueries.map(({ q, lang }) => fetchGoogleCustomSearchResults(q, lang))
+    );
+    const retryItems = retryResults.flatMap((r) =>
+      r.status === "fulfilled" && Array.isArray(r.value) ? r.value : []
+    );
+    allResults = dedupeDiseaseSearchResults([...allResults, ...retryItems]);
+  }
+  if (allResults.length === 0) {
+    const mainEn = MAIN_SYMPTOM_TO_EN_DISEASE[mainSymptom] || "symptoms";
+    const [broadJa, broadEn] = await Promise.all([
+      fetchGoogleCustomSearchResults(`${mainSymptom} 医療`, "ja", 2, true),
+      fetchGoogleCustomSearchResults(`${mainEn} medical`, "en", 2, true),
+    ]);
+    allResults = dedupeDiseaseSearchResults([...(broadJa || []), ...(broadEn || [])]);
+  }
   const sourceNames = Array.from(
     new Set(allResults.filter((r) => r.trusted).map((r) => r.host).filter(Boolean))
   ).slice(0, 4);
@@ -5548,7 +6000,7 @@ function buildExternalActionSearchQuery(concrete, features) {
   return parts.replace(/\s{2,}/g, " ").trim().slice(0, 420);
 }
 
-async function fetchGoogleCustomSearchResults(query, language = "ja", retries = 2) {
+async function fetchGoogleCustomSearchResults(query, language = "ja", retries = 2, skipLanguageRestriction = false) {
   const key =
     process.env.GOOGLE_SEARCH_API_KEY ||
     process.env.GOOGLE_CUSTOM_SEARCH_API_KEY ||
@@ -5564,8 +6016,10 @@ async function fetchGoogleCustomSearchResults(query, language = "ja", retries = 
     num: "10",
     safe: "active",
     hl: language === "ja" ? "ja" : "en",
-    lr: language === "ja" ? "lang_ja" : "lang_en",
   });
+  if (!skipLanguageRestriction) {
+    params.set("lr", language === "ja" ? "lang_ja" : "lang_en");
+  }
   const url = `https://www.googleapis.com/customsearch/v1?${params.toString()}`;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -5978,41 +6432,51 @@ function buildImmediateActionSearchQueries(context) {
     (/(頭|お腹|喉|皮膚|唇)/.test(mainSymptom)
       ? MAIN_SYMPTOM_TO_EN[mainSymptom.match(/(頭|お腹|喉|皮膚|唇)/)?.[0]] || "symptom relief"
       : "symptom relief");
+  const mandatoryQuery = buildMandatoryGoogleQuery(context);
+  const jaBase = [
+    mandatoryQuery,
+    `${mainSymptom} ${facts} ${symptoms} 対処法`.replace(/\s{2,}/g, " ").trim().slice(0, 256),
+    `${mainSymptom} ${symptoms} 対処法 セルフケア`.replace(/\s{2,}/g, " ").trim().slice(0, 256),
+    `${mainSymptom} 対処法`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
+    "体調不良 対処法 自宅",
+    "症状 対処法 自宅 セルフケア",
+  ].filter((q) => q && String(q).trim().length > 0);
+  const enBase = [
+    `${mainEn} ${symptoms} self care home treatment`.replace(/\s{2,}/g, " ").trim().slice(0, 256),
+    `${mainEn} self care`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
+    `${mainEn} home remedy`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
+    "symptom relief self care",
+    "home remedy self care",
+  ].filter((q) => q && String(q).trim().length > 0);
   return {
-    ja: [
-      `${mainSymptom} ${facts} ${symptoms} 対処法`.replace(/\s{2,}/g, " ").trim().slice(0, 256),
-      `${mainSymptom} ${symptoms} 対処法 セルフケア`.replace(/\s{2,}/g, " ").trim().slice(0, 256),
-      `${mainSymptom} 対処法`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
-      "体調不良 対処法 自宅",
-    ],
-    en: [
-      `${mainEn} ${symptoms} self care home treatment`.replace(/\s{2,}/g, " ").trim().slice(0, 256),
-      `${mainEn} self care`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
-      `${mainEn} home remedy`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
-      "symptom relief self care",
-    ],
+    ja: [...new Set(jaBase)],
+    en: [...new Set(enBase)],
   };
 }
 
 function extractTopSearchEvidence(results = []) {
-  const top = (results || []).slice(0, 8);
+  const top = (results || []).slice(0, 12);
   const selfCare = [];
   const observe = [];
   const danger = [];
   for (const item of top) {
     const t = `${item?.title || ""} ${item?.snippet || ""}`.trim();
     if (!t) continue;
-    if (/self|care|home|対処|セルフケア|hydration|rest|保湿|補水/.test(t.toLowerCase()) && selfCare.length < 5) {
+    if (/self|care|home|対処|セルフケア|hydration|rest|保湿|補水|treatment|remedy/.test(t.toLowerCase()) && selfCare.length < 6) {
       selfCare.push(t);
     }
-    if (/observe|monitor|watch|経過|継続|持続|再評価|悪化/.test(t.toLowerCase()) && observe.length < 5) {
+    if (/observe|monitor|watch|経過|継続|持続|再評価|悪化/.test(t.toLowerCase()) && observe.length < 6) {
       observe.push(t);
     }
-    if (/red flag|warning|emergency|救急|受診|激痛|嘔吐|高熱|呼吸/.test(t.toLowerCase()) && danger.length < 5) {
+    if (/red flag|warning|emergency|救急|受診|激痛|嘔吐|高熱|呼吸/.test(t.toLowerCase()) && danger.length < 6) {
       danger.push(t);
     }
   }
-  return { top3, selfCare, observe, danger };
+  const fallbackText = top.slice(0, 6).map((i) => `${i?.title || ""} ${i?.snippet || ""}`.trim()).filter(Boolean);
+  if (selfCare.length === 0 && fallbackText.length > 0) {
+    selfCare.push(...fallbackText.slice(0, 3));
+  }
+  return { top3: top, selfCare, observe, danger };
 }
 
 function parseJsonObjectFromText(text) {
@@ -6070,7 +6534,7 @@ function buildSearchBackedHeuristicActions(context, evidence) {
       isOtc: false,
     });
   }
-  return actions.slice(0, 2);
+  return actions.slice(0, 3);
 }
 
 function normalizeAdviceTopic(topic) {
@@ -6098,22 +6562,21 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
   const queryLevels = buildImmediateActionSearchQueries(currentStateContext);
 
   try {
-    let ranked = [];
-    for (let level = 0; level < Math.max(queryLevels.ja.length, queryLevels.en.length); level++) {
-      const jaQuery = queryLevels.ja[level] || queryLevels.ja[queryLevels.ja.length - 1];
-      const enQuery = queryLevels.en[level] || queryLevels.en[queryLevels.en.length - 1];
-      const [jaResult, enResult] = await Promise.allSettled([
-        fetchGoogleCustomSearchResults(jaQuery, "ja"),
-        fetchGoogleCustomSearchResults(enQuery, "en"),
-      ]);
-      const jaSearch = jaResult.status === "fulfilled" ? jaResult.value : [];
-      const enSearch = enResult.status === "fulfilled" ? enResult.value : [];
-      ranked = dedupeAndRankActionSearchResults(
-        [...jaSearch, ...enSearch],
-        currentStateContext.features || {}
-      );
-      if (ranked && ranked.length > 0) break;
-    }
+    const allQueries = [
+      ...queryLevels.ja.map((q) => ({ q, lang: "ja" })),
+      ...queryLevels.en.map((q) => ({ q, lang: "en" })),
+    ].filter((x) => x.q && String(x.q).trim().length > 0);
+    const searchPromises = allQueries.map(({ q, lang }) =>
+      fetchGoogleCustomSearchResults(q, lang)
+    );
+    const searchResults = await Promise.allSettled(searchPromises);
+    const allItems = searchResults.flatMap((r) =>
+      r.status === "fulfilled" && Array.isArray(r.value) ? r.value : []
+    );
+    const ranked = dedupeAndRankActionSearchResults(
+      allItems,
+      currentStateContext.features || {}
+    );
     if (!ranked || ranked.length === 0) {
       return buildImmediateActionFallbackPlanFromState(state, {
         currentStateContext,
@@ -6134,7 +6597,7 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
         "Use ONLY provided currentStateContext and extractedSearchEvidence.",
         "Do not invent sources. Do not diagnose.",
         "Return strict JSON: {\"topic\":\"...\",\"actions\":[{\"title\":\"...\",\"reason\":\"...\",\"isOtc\":false}]}",
-        "actions max 2, OTC max 1.",
+        "actions max 3, OTC max 1.",
         "Keep Japanese output and preserve existing action writing style.",
       ].join("\n");
       const completion = await openai.chat.completions.create({
@@ -6182,7 +6645,7 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
         title: toConciseActionTitle(a.title),
         reason: ensureReliableReason(a.reason, evidence),
       }))
-      .slice(0, 2);
+      .slice(0, 3);
 
     if (topicMismatch || finalActions.length === 0) {
       finalActions = sanitizeImmediateActions(
@@ -6196,7 +6659,7 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
     }
 
     return buildImmediateActionFallbackPlanFromState(state, {
-      actions: finalActions.slice(0, 2),
+      actions: finalActions.slice(0, 3),
       currentStateContext,
       searchQuery,
       sourceNames,
@@ -6495,6 +6958,12 @@ function mapFreeTextToOptionIndex(answer, options, type) {
       if (/便秘|出ない|硬い便/.test(text)) return 1;
       if (/冷え|冷たい|体が冷え|冷房/.test(text)) return 0;
     }
+    // worsening_trend（3.5・全カテゴリ共通）
+    if (indexOf("発症時より悪化している") >= 0) {
+      if (/発症時より悪化|悪化している|ひどくなって|悪化してきた/.test(text)) return 2;
+      if (/変わらない|横ばい|同じ|変化なし/.test(text)) return 1;
+      if (/回復に向か|良くなって|ましになって|楽になって|改善して/.test(text)) return 0;
+    }
   }
 
   const severe = /強い|激しい|ひどい|高熱|息苦|意識|吐き|ぐったり|動けない|我慢でき|失神/;
@@ -6527,6 +6996,13 @@ function mapFreeTextToOptionIndex(answer, options, type) {
     if (/変わらない|同じ|横ばい/.test(text)) return options.length >= 3 ? 1 : 0;
     if (/良く|和らぎ|軽く/.test(text)) return 0;
     return options.length >= 3 ? 1 : 0;
+  }
+
+  if (type === "worsening_trend") {
+    if (/発症時より悪化|悪化している|ひどくなって|悪化してきた/.test(text)) return 2;
+    if (/変わらない|横ばい|同じ|変化なし|悪くも良くも/.test(text)) return 1;
+    if (/回復に向か|良くなって|ましになって|楽になって|改善して/.test(text)) return 0;
+    return 1;
   }
 
   if (options.length === 2) {
@@ -6625,6 +7101,22 @@ function shouldBlockRedByPainRecentDuration(state) {
 }
 
 function calculateRiskFromState(state) {
+  const worseningTrendVal = getSlotStatusValue(state, "worsening_trend", state?.slotAnswers?.worsening_trend || "");
+  const worseningTrendIndex = state?.slotNormalized?.worsening_trend?.riskLevel === RISK_LEVELS.HIGH
+    ? 2
+    : /発症時より悪化|悪化している/.test(worseningTrendVal)
+      ? 2
+      : null;
+  if (worseningTrendIndex === 2) {
+    const painScoreRaw = Number.isFinite(state?.lastPainScore)
+      ? state.lastPainScore
+      : Number(String(state?.slotAnswers?.pain_score || "").match(/\d+/)?.[0]) || 0;
+    if (painScoreRaw >= 5) {
+      console.log("---- KAIRO URGENCY DEBUG (worsening_trend=発症時より悪化 かつ pain>=5 → RED) ----");
+      return { ratio: 1, level: "🔴", urgency: "red" };
+    }
+  }
+
   const scores = {
     pain: getPainSeverityScore(state),
     quality: mapRiskLevelToSeverityScore(state?.slotNormalized?.worsening?.riskLevel),
@@ -6711,10 +7203,10 @@ function judgeDecision(state) {
   console.log("[DEBUG] judge function entered");
   const { ratio, level } = calculateRiskFromState(state);
   const confidence = state.confidence;
-  const slotsFilledCount = countFilledSlots(state.slotFilled);
+  const slotsFilledCount = countFilledSlots(state.slotFilled, state);
   const askedSlotsCount = countAskedSlots(state.askedSlots);
-  // 強制仕様: 6スロットが全て埋まるまでまとめに遷移しない
-  const decisionCompleted = slotsFilledCount >= 6;
+  const requiredCount = getRequiredSlotCount(state);
+  const decisionCompleted = slotsFilledCount >= requiredCount;
   const shouldJudge = decisionCompleted;
 
   console.log(
@@ -6729,7 +7221,7 @@ function judgeDecision(state) {
     "noNewInformationTurns=",
     state.noNewInformationTurns || 0,
     "missingSlots=",
-    getMissingSlots(state.slotFilled).join(",")
+    getMissingSlots(state.slotFilled, state).join(",")
   );
 
   return { ratio, level, confidence, shouldJudge, slotsFilledCount };
@@ -6838,8 +7330,52 @@ app.post("/api/chat", async (req, res) => {
 
     const locationPromptMessage = null;
     const locationRePromptMessage = null;
-    const filledBeforeTurn = countFilledSlots(conversationState[conversationId].slotFilled);
+    ensureSlotFilledConsistency(conversationState[conversationId]);
+    const filledBeforeTurn = countFilledSlots(conversationState[conversationId].slotFilled, conversationState[conversationId]);
     applySpontaneousSlotFill(conversationState[conversationId], message);
+
+    const userMessageCountBefore = (conversationHistory[conversationId] || []).filter((m) => m.role === "user").length;
+    const isFirstUserMessage = userMessageCountBefore === 0;
+
+    // 絶対防御: 初回ユーザーメッセージではサマリー・フォローを絶対に返さない
+    if (isFirstUserMessage) {
+      conversationHistory[conversationId].push({ role: "user", content: message });
+      const missingSlotsFirst = getMissingSlots(state.slotFilled, state);
+      const firstSlot = missingSlotsFirst[0] || "pain_score";
+      let fixed = buildFixedQuestion(firstSlot, false);
+      const historyText = message;
+      const category = resolveLockedQuestionCategory(state, historyText);
+      applyCategoryQuestionOverride(fixed, firstSlot, category, false);
+      const introTemplateIds = buildIntroTemplateIds(state, state.questionCount || 0, firstSlot);
+      conversationState[conversationId].lastOptions = fixed.options;
+      conversationState[conversationId].lastQuestionType = fixed.type;
+      conversationState[conversationId].expectsPainScore = firstSlot === "pain_score";
+      conversationState[conversationId].askedSlots[firstSlot] = true;
+      conversationHistory[conversationId].push({ role: "assistant", content: fixed.question });
+      return res.json({
+        message: fixed.question,
+        response: fixed.question,
+        judgeMeta: {
+          judgement: "🟢",
+          confidence: 0,
+          ratio: 0,
+          shouldJudge: false,
+          slotsFilledCount: countFilledSlots(state.slotFilled, state),
+          decisionAllowed: false,
+          questionCount: 0,
+          summaryLine: null,
+          questionType: firstSlot,
+          rawScore: null,
+          painScoreRatio: null,
+        },
+        questionPayload: { introTemplateIds, question: fixed.question },
+        normalizedAnswer: null,
+        locationPromptMessage: null,
+        locationRePromptMessage: null,
+        locationSnapshot: state.locationSnapshot,
+        conversationId,
+      });
+    }
 
     const followUpResult = handleFollowUpFlow(message, state);
     if (followUpResult) {
@@ -6880,9 +7416,11 @@ app.post("/api/chat", async (req, res) => {
         else if (rawScore >= 5) weight = 1.5;
         else weight = 1.0;
       }
-      conversationState[conversationId].questionCount += 1;
-      // painWeight が totalScore に加算されることを検証ログで可視化する
-      conversationState[conversationId].totalScore += weight;
+      const isValidPainResponse = rawScore !== null && Number.isFinite(rawScore);
+      if (isValidPainResponse) {
+        conversationState[conversationId].questionCount += 1;
+        conversationState[conversationId].totalScore += weight;
+      }
       console.log("[KAIRO SCORE ADD] painWeight applied", {
         painScoreRaw: rawScore,
         painWeight: weight,
@@ -6899,26 +7437,30 @@ app.post("/api/chat", async (req, res) => {
 
       const type = conversationState[conversationId].lastQuestionType;
       if (type && SLOT_KEYS.includes(type)) {
-        if (!conversationState[conversationId].slotFilled[type]) {
-          conversationState[conversationId].slotFilled[type] = true;
+        if (isValidPainResponse) {
+          if (!conversationState[conversationId].slotFilled[type]) {
+            conversationState[conversationId].slotFilled[type] = true;
+          }
+          const normalized = buildNormalizedAnswer(
+            type,
+            String(rawScore),
+            0,
+            rawScore
+          ) || { slotId: type, rawAnswer: String(rawScore), riskLevel: RISK_LEVELS.MEDIUM };
+          conversationState[conversationId].slotNormalized[type] = normalized;
+          conversationState[conversationId].lastNormalizedAnswer = normalized;
+          conversationState[conversationId].slotAnswers[type] = String(rawScore);
+          markSlotStatus(
+            conversationState[conversationId],
+            type,
+            "question_response",
+            String(rawScore)
+          );
+          conversationState[conversationId].confidence = computeConfidenceFromSlots(
+            conversationState[conversationId].slotFilled,
+            conversationState[conversationId]
+          );
         }
-        const normalized = buildNormalizedAnswer(
-          type,
-          rawScore !== null ? String(rawScore) : "",
-          0,
-          rawScore
-        ) || { slotId: type, rawAnswer: rawScore !== null ? String(rawScore) : "", riskLevel: RISK_LEVELS.MEDIUM };
-        conversationState[conversationId].slotNormalized[type] = normalized;
-        conversationState[conversationId].lastNormalizedAnswer = normalized;
-        markSlotStatus(
-          conversationState[conversationId],
-          type,
-          "question_response",
-          message
-        );
-        conversationState[conversationId].confidence = computeConfidenceFromSlots(
-          conversationState[conversationId].slotFilled
-        );
       }
       conversationState[conversationId].lastQuestionType = null;
     } else if (conversationState[conversationId].lastOptions.length >= 2) {
@@ -6942,50 +7484,48 @@ app.post("/api/chat", async (req, res) => {
         conversationState[conversationId].totalScore += score;
       }
 
-      // 判断スロットの更新（埋まったスロットを記録）
-      if (type && SLOT_KEYS.includes(type)) {
+      // 判断スロットの更新（埋まったスロットを記録）※有効な選択時のみ埋める
+      if (type && SLOT_KEYS.includes(type) && selectedIndex !== null && lastOptionsSnapshot[selectedIndex]) {
         if (!conversationState[conversationId].slotFilled[type]) {
           conversationState[conversationId].slotFilled[type] = true;
         }
-        if (selectedIndex !== null && lastOptionsSnapshot[selectedIndex]) {
-          // 絶対ルール: 表示・検索はユーザーの言葉を第一優先。選択肢全文に置き換えない
-          const valueForDisplay = String(message || "").trim();
-          conversationState[conversationId].slotAnswers[type] =
-            valueForDisplay || lastOptionsSnapshot[selectedIndex];
-          let normalized = buildNormalizedAnswer(
-            type,
-            lastOptionsSnapshot[selectedIndex],
-            selectedIndex
-          );
-          if (!normalized) {
-            normalized = { slotId: type, rawAnswer: lastOptionsSnapshot[selectedIndex], riskLevel: RISK_LEVELS.MEDIUM };
-          }
-          conversationState[conversationId].slotNormalized[type] = normalized;
-          conversationState[conversationId].lastNormalizedAnswer = normalized;
-          markSlotStatus(
-            conversationState[conversationId],
-            type,
-            "question_response",
-            valueForDisplay || lastOptionsSnapshot[selectedIndex]
-          );
-          if (type === "cause_category") {
-            const freeText = classified.usedFreeText ? message : "";
-            if (classified.usedFreeText && hasConcreteCauseDetail(freeText)) {
-              conversationState[conversationId].causeDetailText = freeText.trim();
-            }
+        const valueForDisplay = String(message || "").trim();
+        conversationState[conversationId].slotAnswers[type] =
+          valueForDisplay || lastOptionsSnapshot[selectedIndex];
+        let normalized = buildNormalizedAnswer(
+          type,
+          lastOptionsSnapshot[selectedIndex],
+          selectedIndex
+        );
+        if (!normalized) {
+          normalized = { slotId: type, rawAnswer: lastOptionsSnapshot[selectedIndex], riskLevel: RISK_LEVELS.MEDIUM };
+        }
+        conversationState[conversationId].slotNormalized[type] = normalized;
+        conversationState[conversationId].lastNormalizedAnswer = normalized;
+        markSlotStatus(
+          conversationState[conversationId],
+          type,
+          "question_response",
+          valueForDisplay || lastOptionsSnapshot[selectedIndex]
+        );
+        if (type === "cause_category") {
+          const freeText = classified.usedFreeText ? message : "";
+          if (classified.usedFreeText && hasConcreteCauseDetail(freeText)) {
+            conversationState[conversationId].causeDetailText = freeText.trim();
           }
         }
         conversationState[conversationId].confidence = computeConfidenceFromSlots(
-          conversationState[conversationId].slotFilled
+          conversationState[conversationId].slotFilled,
+          conversationState[conversationId]
         );
       }
       if (selectedIndex !== null) {
         conversationState[conversationId].lastOptions = [];
+        conversationState[conversationId].lastQuestionType = null;
       }
-      conversationState[conversationId].lastQuestionType = null;
     }
 
-    const filledAfterTurn = countFilledSlots(conversationState[conversationId].slotFilled);
+    const filledAfterTurn = countFilledSlots(conversationState[conversationId].slotFilled, conversationState[conversationId]);
     if (filledAfterTurn > filledBeforeTurn) {
       conversationState[conversationId].noNewInformationTurns = 0;
     } else {
@@ -7034,7 +7574,7 @@ app.post("/api/chat", async (req, res) => {
         confidence: conversationState[conversationId].confidence,
         ratio: 0,
         shouldJudge: false,
-        slotsFilledCount: countFilledSlots(conversationState[conversationId].slotFilled),
+        slotsFilledCount: countFilledSlots(conversationState[conversationId].slotFilled, conversationState[conversationId]),
         decisionAllowed: false,
         questionCount: conversationState[conversationId].questionCount,
         summaryLine: null,
@@ -7067,22 +7607,27 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId]
     );
     // 強制仕様: 6スロット充填完了時のみ判定・まとめを許可
-    const decisionAllowed = slotsFilledCount >= 6;
-    // 絶対ルール: 初回ユーザーターンでは絶対にまとめを出さない
+    const decisionAllowed = slotsFilledCount >= getRequiredSlotCount(conversationState[conversationId]);
+    // 絶対ルール: 初回ユーザーターンでは絶対にまとめを出さない（2ターン未満も禁止）
+    const minUserTurnsForSummary = 2;
+    const canShowSummary = !isFirstUserTurn && userTurnCount >= minUserTurnsForSummary;
     const shouldJudgeNow =
       shouldJudge &&
       decisionAllowed &&
-      !isFirstUserTurn;
-    const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled);
+      canShowSummary;
+    const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled, conversationState[conversationId]);
     if (!shouldJudgeNow) {
       const isFirstQuestion =
         conversationState[conversationId].questionCount === 0 &&
         conversationState[conversationId].lastPainScore === null;
-      // 初回で全スロット埋まっても nextSlot を必ず設定（フォールスルー防止）
+      const lastType = conversationState[conversationId].lastQuestionType;
+      const reaskSameSlot = lastType && missingSlots.includes(lastType);
       const nextSlot =
         isFirstQuestion
           ? "pain_score"
-          : missingSlots[0] || (isFirstUserTurn ? SLOT_KEYS[0] : null);
+          : reaskSameSlot
+            ? lastType
+            : missingSlots[0] || (isFirstUserTurn ? SLOT_KEYS[0] : null);
       if (nextSlot) {
         const useFinalPrefix =
           currentQuestionCount >= minQuestions && missingSlots.length === 1;
@@ -7142,7 +7687,7 @@ app.post("/api/chat", async (req, res) => {
     // 絶対防御: 初回ユーザーターンではLLMを呼ばず、必ず質問を返す（まとめ・フォロー禁止）
     if (isFirstUserTurn) {
       const fallbackSlot =
-        getMissingSlots(conversationState[conversationId].slotFilled)[0] || SLOT_KEYS[0];
+        getMissingSlots(conversationState[conversationId].slotFilled, conversationState[conversationId])[0] || SLOT_KEYS[0];
       const fixed = buildFixedQuestion(fallbackSlot, false);
       const historyText = conversationHistory[conversationId]
         .filter((msg) => msg.role === "user")
@@ -7196,7 +7741,7 @@ app.post("/api/chat", async (req, res) => {
     // 最終防御: 初回ユーザーターンでは、まとめ/フォローを絶対に返さない（上で return 済みのため通常到達しない）
     if (isFirstUserTurn && hasAnySummaryBlocks(aiResponse)) {
       const forcedSlot =
-        getMissingSlots(conversationState[conversationId].slotFilled)[0] || "worsening";
+        getMissingSlots(conversationState[conversationId].slotFilled, conversationState[conversationId])[0] || "worsening";
       const fixed = buildFixedQuestion(forcedSlot, false);
       const historyText = conversationHistory[conversationId]
         .filter((msg) => msg.role === "user")
@@ -7268,7 +7813,7 @@ app.post("/api/chat", async (req, res) => {
         conversationState[conversationId].clientMeta
       );
       const locationContext = conversationState[conversationId].locationContext || {};
-      if (level === "🔴" && conversationState[conversationId].location) {
+      if (level === "🔴") {
         // 症状に合わせて受診先候補を選ぶ（歯痛→歯科、耳/鼻/喉→耳鼻科、基本はGP）
         conversationState[conversationId].clinicCandidates = await resolveCareCandidates(
           conversationState[conversationId],
@@ -7529,14 +8074,16 @@ app.post("/api/chat", async (req, res) => {
 
     // 6スロット埋めを保証するため、質問が不適切なら補正する
     if (!shouldJudgeNow) {
-      const missingSlots = FIXED_SLOT_ORDER.filter(
-        (slot) => !conversationState[conversationId].slotFilled?.[slot]
+      const missingSlots = getMissingSlots(
+        conversationState[conversationId].slotFilled,
+        conversationState[conversationId]
       );
       const isFirstQuestion =
         conversationState[conversationId].questionCount === 0 &&
         conversationState[conversationId].lastPainScore === null;
-      // 強制仕様: 未充填スロットを固定順で質問する
-      const nextSlot = isFirstQuestion ? "pain_score" : missingSlots[0];
+      const lastType = conversationState[conversationId].lastQuestionType;
+      const reaskSameSlot = lastType && missingSlots.includes(lastType);
+      const nextSlot = isFirstQuestion ? "pain_score" : (reaskSameSlot ? lastType : missingSlots[0]);
       if (nextSlot) {
         const useFinalPrefix =
           currentQuestionCount >= minQuestions && missingSlots.length === 1;
@@ -7753,8 +8300,8 @@ app.post("/api/chat", async (req, res) => {
     const cid = (req.body && req.body.conversationId) || null;
     const state = cid ? conversationState[cid] : null;
     const history = cid ? conversationHistory[cid] || [] : [];
-    const filled = state ? countFilledSlots(state.slotFilled) : 0;
-    if (state && filled >= 6) {
+    const filled = state ? countFilledSlots(state.slotFilled, state) : 0;
+    if (state && filled >= getRequiredSlotCount(state)) {
       const level = state.decisionLevel || finalizeRiskLevel(state);
       const fallbackSummary = enforceSummaryStructureStrict(
         buildLocalSummaryFallback(level, history, state),
@@ -7878,6 +8425,22 @@ app.post("/api/action-details", async (req, res) => {
   try {
     const { conversationId, actionSection } = req.body || {};
     const state = conversationId ? getOrInitConversationState(conversationId) : initConversationState();
+    const historyText = (conversationHistory[conversationId] || [])
+      .filter((m) => m.role === "user")
+      .map((m) => m.content)
+      .join("\n");
+    if (state?.decisionLevel === "🔴") {
+      const message = buildRedModalContent(state, historyText);
+      return res.status(200).json({
+        message,
+        sourcePolicy: [
+          "公的機関",
+          "大学病院",
+          "国際医療機関",
+          "大手医療情報サイト",
+        ],
+      });
+    }
     const { message, query, sourceNames } = await buildConcreteImmediateActionsDetails(
       state,
       actionSection || ""
@@ -7901,18 +8464,35 @@ app.post("/api/action-details", async (req, res) => {
     return res.status(200).json(basePayload);
   } catch (error) {
     console.error("action-details error:", error);
+    const cid = (req.body && req.body.conversationId) || null;
+    const fallbackState = cid ? getOrInitConversationState(cid) : null;
+    const fallbackHistory = (cid && conversationHistory[cid]) || [];
+    const fallbackHistoryText = fallbackHistory
+      .filter((m) => m.role === "user")
+      .map((m) => m.content)
+      .join("\n");
+    if (fallbackState?.decisionLevel === "🔴") {
+      return res.status(200).json({
+        message: buildRedModalContent(fallbackState, fallbackHistoryText),
+        sourcePolicy: [],
+      });
+    }
+    const fallbackParts = [
+      buildYellowPsychologicalCushionLine(),
+      "",
+      "■今すぐやること",
+      "・刺激を1つ減らして静かな環境で過ごし、水分を150〜200mlとって4〜6時間の変化を見ます",
+      "→ 刺激と脱水の要因を同時に下げると、経過が読み取りやすくなります。",
+      "",
+      "■やらないほうがいいこと",
+      "・つらい状態のまま無理に活動量を上げる",
+      "→ 体への負荷が重なると、症状の変化を見極めにくくなるためです。",
+    ];
+    if (fallbackState && shouldAppendMcLinesToModal(fallbackState)) {
+      fallbackParts.push("", ...MC_4_LINES);
+    }
     return res.status(200).json({
-      message: [
-        buildYellowPsychologicalCushionLine(),
-        "",
-        "■今すぐやること",
-        "・刺激を1つ減らして静かな環境で過ごし、水分を150〜200mlとって4〜6時間の変化を見ます",
-        "→ 刺激と脱水の要因を同時に下げると、経過が読み取りやすくなります。",
-        "",
-        "■やらないほうがいいこと",
-        "・つらい状態のまま無理に活動量を上げる",
-        "→ 体への負荷が重なると、症状の変化を見極めにくくなるためです。",
-      ].join("\n"),
+      message: fallbackParts.join("\n"),
       sourcePolicy: [],
     });
   }

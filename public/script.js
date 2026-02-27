@@ -373,12 +373,21 @@ function parseAIMessage(text) {
 }
 
 function extractStateFactsFromBlock(content) {
-  return String(content || "")
+  const text = String(content || "");
+  const bullets = text
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => /^・/.test(line))
     .map((line) => line.replace(/^・\s*/, ""))
-    .slice(0, 4);
+    .slice(0, 6);
+  const boldMatch = text.match(/\*\*([^*]+)\*\*/);
+  if (boldMatch && boldMatch[1]) {
+    const kw = boldMatch[1].trim();
+    if (kw.length >= 2 && kw.length <= 20 && !bullets.includes(kw)) {
+      return [kw, ...bullets].slice(0, 6);
+    }
+  }
+  return bullets;
 }
 
 function ensureConcreteModal() {
