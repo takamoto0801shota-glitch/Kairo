@@ -430,10 +430,86 @@ function closeConcreteModal() {
   overlay.classList.remove("is-open");
 }
 
-function setConcreteModalBody(text) {
+function setConcreteModalBody(textOrStructured) {
   const body = document.getElementById("concreteModalBody");
   if (!body) return;
-  body.textContent = text || "";
+  body.innerHTML = "";
+  if (typeof textOrStructured === "string") {
+    const pre = document.createElement("pre");
+    pre.style.whiteSpace = "pre-wrap";
+    pre.style.fontFamily = "inherit";
+    pre.style.margin = "0";
+    pre.textContent = textOrStructured || "";
+    body.appendChild(pre);
+    return;
+  }
+  if (textOrStructured && typeof textOrStructured === "object" && textOrStructured.structured) {
+    renderStructuredStateModal(body, textOrStructured);
+    return;
+  }
+}
+
+function renderStructuredStateModal(body, { structured, message, triageLevel }) {
+  const s = structured;
+  if (!s) {
+    body.textContent = message || "";
+    return;
+  }
+  const showRareByDefault = triageLevel === "🔴";
+  const lines = [];
+  lines.push("🟢 よくある原因");
+  (s.common || []).forEach((c) => lines.push(c.startsWith("・") ? c : `・${c}`));
+  lines.push("");
+  lines.push("🟡 状況によっては確認が必要");
+  (s.conditional || []).forEach((c) => lines.push(c.startsWith("・") ? c : `・${c}`));
+  lines.push("");
+  lines.push(s.reassuranceCommon || "");
+  if (triageLevel === "🟢" || triageLevel === "🟡") {
+    lines.push("");
+    lines.push("現時点の安心材料");
+    (s.reassuranceBullets || []).forEach((b) => lines.push(b));
+    lines.push("");
+    lines.push("こんな変化があれば受診を検討");
+    (s.consultChangeBullets || []).forEach((b) => lines.push(b));
+  }
+  const rareItems = s.rare_emergency || [];
+  const hasRare = rareItems.length > 0;
+
+  body.innerHTML = "";
+  const pre = document.createElement("pre");
+  pre.style.whiteSpace = "pre-wrap";
+  pre.style.fontFamily = "inherit";
+  pre.style.margin = "0";
+  pre.textContent = lines.join("\n");
+
+  if (hasRare) {
+    const rareSection = document.createElement("div");
+    rareSection.style.marginTop = "12px";
+    rareSection.style.borderTop = "1px solid #e0e0e0";
+    rareSection.style.paddingTop = "12px";
+    const toggleBtn = document.createElement("button");
+    toggleBtn.type = "button";
+    toggleBtn.className = "block-header-action";
+    toggleBtn.style.marginBottom = "8px";
+    toggleBtn.textContent = showRareByDefault ? "🔴 すぐ受診が必要なサイン（表示中）" : "強い症状がある場合はこちら";
+    const rarePre = document.createElement("pre");
+    rarePre.style.whiteSpace = "pre-wrap";
+    rarePre.style.fontFamily = "inherit";
+    rarePre.style.margin = "0";
+    rarePre.textContent = "🔴 すぐ受診が必要なサイン\n" + rareItems.map((r) => (r.startsWith("・") ? r : `・${r}`)).join("\n");
+    rarePre.style.display = showRareByDefault ? "block" : "none";
+    toggleBtn.addEventListener("click", () => {
+      const isHidden = rarePre.style.display === "none";
+      rarePre.style.display = isHidden ? "block" : "none";
+      toggleBtn.textContent = isHidden ? "🔴 すぐ受診が必要なサイン（表示中）" : "強い症状がある場合はこちら";
+    });
+    rareSection.appendChild(toggleBtn);
+    rareSection.appendChild(rarePre);
+    body.appendChild(pre);
+    body.appendChild(rareSection);
+  } else {
+    body.appendChild(pre);
+  }
 }
 
 async function fetchStatePatterns(blockContent) {
@@ -454,17 +530,25 @@ async function fetchStatePatterns(blockContent) {
     throw new Error(`state-patterns status=${response.status}`);
   }
   const data = await response.json();
-  return data?.message || "このような症状では、情報を追加で整理すると判断の見通しが立てやすくなります。";
+  return {
+    message: data?.message || "このような症状では、情報を追加で整理すると判断の見通しが立てやすくなります。",
+    structured: data?.structured || null,
+    triageLevel: data?.triageLevel || null,
+  };
 }
 
 async function showConcreteStateDetails(blockContent) {
   if (appState.concreteModalBusy) return;
   appState.concreteModalBusy = true;
   openConcreteModal();
-  setConcreteModalBody("いまの状態を、断定せずに具体化しています…");
+  setConcreteModalBody("原因を整理しています…");
   try {
-    const detailText = await fetchStatePatterns(blockContent);
-    setConcreteModalBody(detailText);
+    const data = await fetchStatePatterns(blockContent);
+    if (data.structured) {
+      setConcreteModalBody({ message: data.message, structured: data.structured, triageLevel: data.triageLevel });
+    } else {
+      setConcreteModalBody(data.message);
+    }
   } catch (error) {
     console.error("具体化モーダル生成エラー:", error);
     setConcreteModalBody(
@@ -524,7 +608,7 @@ async function showConcreteActionDetails(blockContent) {
         "いまの経過であれば、少し力を抜いて体の負担を整える時間として受け止められます。",
         "",
         "■今すぐやること",
-        "・刺激を1つ減らし、水分を150〜200mlとって4〜6時間の変化を見ます",
+        "・刺激を1つ減らし、水分を150〜200mlとって4〜6時間の変化を見てください",
         "→ 体への負荷要因を減らすと、症状のぶれを把握しやすくなります。",
         "",
         "■やらないほうがいいこと",
@@ -857,7 +941,7 @@ function addMessage(text, isUser = false, save = true) {
         detailButton = document.createElement("button");
         detailButton.type = "button";
         detailButton.className = "block-header-action";
-        detailButton.textContent = "具体的に";
+        detailButton.textContent = isStateBlock ? "原因を整理して見る" : "具体的に";
         detailButton.disabled = true;
         detailButton.addEventListener("click", () => {
           if (isActionBlock) {
@@ -1134,18 +1218,18 @@ async function handleUserInput() {
         ? renderQuestionPayload(aiResponse.questionPayload)
         : aiResponse.message;
 
-      console.log("[DEBUG] judgeMeta", aiResponse.judgeMeta);
-      if (aiResponse.judgeMeta && aiResponse.judgeMeta.shouldJudge === true && appState.userHasSubmitted) {
-        const judgement = aiResponse.judgeMeta.judgement;
-        appState.riskLevel = judgement === "🔴" ? "RED" : judgement === "🟡" ? "YELLOW" : "GREEN";
-        renderSummary();
-      } else if (appState.riskLevel === null) {
+      const triageState = aiResponse.triage_state || { is_final: false, triage_level: null, required_fields_filled: 0 };
+      if (!triageState.is_final) {
         hideSummaryCard();
+        appState.riskLevel = null;
+      } else {
+        const level = triageState.triage_level || (aiResponse.judgeMeta?.judgement === "🔴" ? "red" : aiResponse.judgeMeta?.judgement === "🟡" ? "yellow" : "green");
+        appState.riskLevel = level === "red" ? "RED" : level === "yellow" ? "YELLOW" : "GREEN";
+        renderSummary();
       }
 
       const sections = Array.isArray(aiResponse.sections) ? aiResponse.sections.filter(Boolean) : [];
-      const shouldShowSections =
-        aiResponse.judgeMeta && aiResponse.judgeMeta.shouldJudge === true && sections.length > 0;
+      const shouldShowSections = triageState.is_final && sections.length > 0;
       if (shouldShowSections) {
         const firstDelay = 600;
         const interval = 800;

@@ -2424,11 +2424,11 @@ function buildRedImmediateActionsFallback() {
   // 1件目ですでに受診を推奨しているため、2件目以降では受診を勧める内容を含めない
   return [
     {
-      title: "水分をこまめに取り、無理をしない",
+      title: "水分をこまめに取り、無理をしないでください",
       reason: "体の負担を減らすことが、次の判断の土台になります。",
     },
     {
-      title: "安静にして、刺激を減らして過ごす",
+      title: "安静にして、刺激を減らして過ごしてください",
       reason: "体を回復モードに入れることで、変化が読み取りやすくなります。",
     },
   ];
@@ -2595,7 +2595,7 @@ function ensureOutlookBlock(text, state) {
 
 function formatActionTitleWithBullet(title) {
   const raw = String(title || "").trim();
-  if (!raw) return "・まずは無理をせず安静を優先しましょう";
+  if (!raw) return "・まずは無理をせず安静を優先してください";
   return raw.startsWith("・") ? raw : `・${raw}`;
 }
 
@@ -2607,7 +2607,7 @@ function formatActionReasonLine(reason) {
 
 function toConciseActionTitle(title) {
   const raw = String(title || "").replace(/^・\s*/, "").trim();
-  if (!raw) return "刺激を減らして体への負担を軽くします";
+  if (!raw) return "刺激を減らして体への負担を軽くしてください";
   const firstSentence = raw.split(/[。!?！？]/)[0].trim();
   const compact = (firstSentence || raw).replace(/\s{2,}/g, " ");
   return compact.length > 68 ? `${compact.slice(0, 68).trim()}…` : compact;
@@ -2646,7 +2646,7 @@ function ensureReliableReason(reason, evidence = {}) {
 
 function buildSecondaryImmediateFallbackAction() {
   return {
-    title: "強い刺激を避けて、体調の変化だけを短時間で確認します",
+    title: "強い刺激を避けて、体調の変化を短時間で確認するといいです",
     reason: "刺激負荷を減らすと、症状の推移を見極めやすくなるためです。",
     isOtc: false,
   };
@@ -2668,17 +2668,17 @@ function ensureActionCount(actions = [], targetCount = 2, context = {}, evidence
   if (topic === "頭") {
     supplements.push(
       {
-        title: "画面や強い光を避けて、静かな環境で過ごします",
+        title: "画面や強い光を避けて、静かな環境で過ごしてください",
         reason: "視覚刺激を減らすことで、悪化要因を抑えやすくなります。",
         isOtc: false,
       },
       {
-        title: "水分をこまめに取り、体調の変化を短時間で見ます",
+        title: "水分をこまめに取り、体調の変化を短時間で確認するといいです",
         reason: "脱水や負荷の重なりを減らすと、症状の推移を判断しやすくなるためです。",
         isOtc: false,
       },
       {
-        title: "刺激を1つ減らして静かな環境で過ごし、4〜6時間の変化を見ます",
+        title: "刺激を1つ減らして静かな環境で過ごし、4〜6時間の変化を見てください",
         reason: "負荷を分散すると、症状の推移を判断しやすくなります。",
         isOtc: false,
       }
@@ -2686,17 +2686,17 @@ function ensureActionCount(actions = [], targetCount = 2, context = {}, evidence
   } else if (topic === "お腹") {
     supplements.push(
       {
-        title: "胃腸に負担の少ない過ごし方に切り替えます",
+        title: "胃腸に負担の少ない過ごし方に切り替えてください",
         reason: "刺激要因を減らすことで、症状の持続を抑えやすくなります。",
         isOtc: false,
       },
       {
-        title: "一度に無理をせず、変化を見ながら対応します",
+        title: "一度に無理をせず、変化を見ながら対応するといいです",
         reason: "負荷を分散すると、悪化サインの有無を見極めやすくなるためです。",
         isOtc: false,
       },
       {
-        title: "経口補水液または水をこまめに取り、変化を見ます",
+        title: "経口補水液または水をこまめに取り、変化を確認してください",
         reason: "脱水を防ぐことで、症状の推移を確認しやすくなります。",
         isOtc: false,
       }
@@ -2704,17 +2704,17 @@ function ensureActionCount(actions = [], targetCount = 2, context = {}, evidence
   } else if (topic === "喉") {
     supplements.push(
       {
-        title: "乾燥を避けて、こまめに水分を取ります",
+        title: "乾燥を避けて、こまめに水分を取ってください",
         reason: "咽頭の乾燥を抑えることで、症状の持続を抑えやすくなります。",
         isOtc: false,
       },
       {
-        title: "刺激の強い飲食を控え、静かに過ごします",
+        title: "刺激の強い飲食を控え、静かに過ごしてください",
         reason: "局所刺激を減らすと、経過の見極めがしやすくなるためです。",
         isOtc: false,
       },
       {
-        title: "加湿を心がけ、刺激の強い飲食を控えます",
+        title: "加湿を心がけ、刺激の強い飲食を控えるといいです",
         reason: "咽頭の負担を減らすことで、経過の見極めがしやすくなります。",
         isOtc: false,
       }
@@ -2722,12 +2722,12 @@ function ensureActionCount(actions = [], targetCount = 2, context = {}, evidence
   } else if (topic === "皮膚") {
     supplements.push(
       {
-        title: "患部をこすらず、刺激を避けて過ごします",
+        title: "患部をこすらず、刺激を避けて過ごしてください",
         reason: "刺激の反復を減らすことで、悪化要因を抑えやすくなります。",
         isOtc: false,
       },
       {
-        title: "保湿を心がけ、乾燥を防ぎます",
+        title: "保湿を心がけ、乾燥を防いでください",
         reason: "バリア機能を保つことで、症状の推移を判断しやすくなります。",
         isOtc: false,
       },
@@ -2742,7 +2742,7 @@ function ensureActionCount(actions = [], targetCount = 2, context = {}, evidence
       buildSafeImmediateFallbackAction(),
       buildSecondaryImmediateFallbackAction(),
       {
-        title: "刺激を1つ減らして静かな環境で過ごし、4〜6時間の変化を見ます",
+        title: "刺激を1つ減らして静かな環境で過ごし、4〜6時間の変化を見てください",
         reason: "負荷を分散すると、症状の推移を判断しやすくなります。",
         isOtc: false,
       }
@@ -2816,19 +2816,19 @@ function buildExpectedCourse(context = {}) {
 function getOtcActionForYellowModal(category) {
   const byCategory = {
     頭: {
-      action: "市販の鎮痛薬（アセトアミノフェン等）を用法通りに使う",
+      action: "市販の鎮痛薬（アセトアミノフェン等）を用法通りに使ってください",
       reason: "痛みを和らげることで、休息を取りやすくなります。",
     },
     お腹: {
-      action: "整腸剤（市販）を用法通りに使う",
+      action: "整腸剤（市販）を用法通りに使ってください",
       reason: "腸の調子を整えることで、症状の推移を確認しやすくなります。",
     },
     喉: {
-      action: "のど飴やトローチを用法通りに使う",
+      action: "のど飴やトローチを用法通りに使ってください",
       reason: "のどを潤すことで、違和感を和らげやすくなります。",
     },
     皮膚: {
-      action: "白色ワセリンを患部に薄く塗り、2〜3時間ごとに塗り直す",
+      action: "白色ワセリンを患部に薄く塗り、2〜3時間ごとに塗り直してください",
       reason: "バリアを保つことで、刺激の反復を減らしやすくなります。",
     },
   };
@@ -2836,7 +2836,7 @@ function getOtcActionForYellowModal(category) {
 }
 
 const PAIN_INFECTION_YELLOW_FIRST_ACTION = {
-  title: "今はベッドに入り、横になって数時間ゆっくり過ごします",
+  title: "今はベッドに入り、横になって数時間ゆっくり過ごしてください",
   reason: "体を休息モードに切り替えることで、自然な回復の流れが働きやすくなります。",
   isOtc: false,
 };
@@ -2933,15 +2933,24 @@ function ensureImmediateActionsBlock(text, level, state, historyText = "", resea
   );
 }
 
-function buildImmediateActionFallbackPlanFromState(state, overrides = {}) {
+async function buildImmediateActionFallbackPlanFromState(state, overrides = {}) {
   const context =
     overrides.currentStateContext ||
     buildCurrentStateContext(state, "", state?.lastConcreteDetailsText || "");
   const fallbackPrimary = buildSafeImmediateFallbackAction();
-  const seedActions =
+  let seedActions =
     Array.isArray(overrides.actions) && overrides.actions.length > 0
       ? sanitizeImmediateActions(overrides.actions, fallbackPrimary)
       : [];
+  if (seedActions.length === 0) {
+    let contextOnlyActions = await generateImmediateActionsFromContextOnly(state, context);
+    if (!contextOnlyActions || contextOnlyActions.length === 0) {
+      contextOnlyActions = await generateImmediateActionsFromContextOnly(state, context);
+    }
+    if (contextOnlyActions && contextOnlyActions.length > 0) {
+      seedActions = sanitizeImmediateActions(contextOnlyActions, fallbackPrimary);
+    }
+  }
   return {
     actions: ensureActionCount(
       seedActions.length > 0 ? seedActions : [],
@@ -2960,7 +2969,7 @@ function buildImmediateActionFallbackPlanFromState(state, overrides = {}) {
 function buildSafeImmediateFallbackAction() {
   return {
     title:
-      "刺激（画面・強い光・空腹）を1つ減らし、水分を150〜200mlとって静かな環境で4〜6時間様子を見ましょう",
+      "刺激（画面・強い光・空腹）を1つ減らし、水分を150〜200mlとって静かな環境で4〜6時間様子を見てください",
     reason:
       "刺激負荷と脱水要因を同時に下げることで、症状のぶれを抑えやすくなります。",
     isOtc: false,
@@ -2982,7 +2991,7 @@ function sanitizeImmediateActions(actions = [], fallbackAction = null) {
   const safe = (Array.isArray(actions) ? actions : [])
     .filter((a) => a && a.title && a.reason)
     .filter((a) => !isForbiddenImmediateAction(a));
-  if (safe.length > 0) return safe.slice(0, 2);
+  if (safe.length > 0) return safe.slice(0, 3);
   return fallbackAction ? [fallbackAction] : [];
 }
 
@@ -3081,7 +3090,8 @@ async function buildConcreteImmediateActionsDetails(state, actionSection = "") {
     const isYellow = state?.decisionLevel === "🟡";
     const prompt = [
       "あなたは医療情報を要約して行動を具体化するアシスタントです。",
-      "出力はJSONのみ。診断断定は禁止。命令形禁止。",
+      "出力はJSONのみ。診断断定は禁止。",
+      "行動は勧める口調で（〜してください／〜するといいです）。「〜します」は避ける。",
       "次の形式で返す: {\"cushion\":\"...\",\"do\":[{\"action\":\"...\",\"reason\":\"...\"}],\"dont\":[{\"action\":\"...\",\"reason\":\"...\"}]}",
       "cushionは1文、40〜65文字、保証語・危険語を使わない。",
       "doは最低3件、最大4件。dontは最大2件。各reasonは検索要点と整合する確実な理由にする。",
@@ -5415,7 +5425,265 @@ function toMainSymptomForDiseaseSearch(state) {
   return "体調不良";
 }
 
-/** 🤝/📝モーダル：疾患名2つ＋各2〜3文の説明を生成（ユーザー情報は一切含めない） */
+/** 危険ワード：common/conditional に含めてはいけない。rare_emergency のみ可 */
+const DANGER_WORDS_INITIAL_HIDDEN = ["腫瘍", "出血", "致死", "がん", "破裂"];
+
+/** 「→」理由に含まれがちな「ユーザーが言ったと仮定される」語。言っていなければ置換対象 */
+const ASSUMABLE_PHRASES_IN_REASON = [
+  "肩こり",
+  "ストレス",
+  "寝不足",
+  "睡眠不足",
+  "脱水",
+  "水分不足",
+  "光",
+  "音",
+  "疲労",
+  "疲れ",
+  "目の疲れ",
+  "筋肉の緊張",
+  "乾燥",
+  "緊張",
+  "冷え",
+  "食べ過ぎ",
+  "飲み過ぎ",
+  "アルコール",
+  "カフェイン",
+  "運動不足",
+  "姿勢",
+  "パソコン",
+  "スマホ",
+  "眼精疲労",
+];
+
+/**
+ * 「→」理由文中の、ユーザーが言っていない語を検出する。
+ * @param {string} reason - 「→」の後の理由文
+ * @param {string[]} userWords - ユーザーが実際に言った語の配列
+ * @returns {{ phrase: string, index: number }[]} 言っていない語とその出現位置
+ */
+function checkReasonForUnsaidPhrases(reason, userWords) {
+  const normalized = String(reason || "").trim();
+  const userSet = new Set(
+    (userWords || []).map((w) => String(w || "").toLowerCase().trim()).filter(Boolean)
+  );
+  const userText = (userWords || []).join(" ");
+  const found = [];
+  for (const phrase of ASSUMABLE_PHRASES_IN_REASON) {
+    if (!phrase || phrase.length < 2) continue;
+    if (!normalized.includes(phrase)) continue;
+    const userSaid =
+      userSet.has(phrase) ||
+      userText.includes(phrase) ||
+      (phrase.length >= 2 && userText.split(/\s+/).some((w) => w.includes(phrase) || phrase.includes(w)));
+    if (!userSaid) {
+      const idx = normalized.indexOf(phrase);
+      found.push({ phrase, index: idx });
+    }
+  }
+  return found.sort((a, b) => a.index - b.index);
+}
+
+/**
+ * 「→」理由文中の、ユーザーが言っていない語をユーザーの言った語にピンポイントで置換する。
+ * @param {string} reason - 「→」の後の理由文
+ * @param {string[]} userWords - ユーザーが実際に言った語の配列
+ * @returns {string} 置換後の理由文
+ */
+function replaceUnsaidPhrasesInReason(reason, userWords) {
+  let result = String(reason || "").trim();
+  const unsaid = checkReasonForUnsaidPhrases(result, userWords);
+  if (unsaid.length === 0) return result;
+
+  const usable = (userWords || []).filter((w) => w && String(w).trim().length >= 2 && String(w).trim().length <= 24);
+  const replacement = usable.length > 0 ? usable[0] : "このような症状";
+
+  for (const { phrase } of unsaid) {
+    const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const patterns = [
+      new RegExp(`${escaped}や`, "g"),
+      new RegExp(`や${escaped}`, "g"),
+      new RegExp(`${escaped}、`, "g"),
+      new RegExp(`、${escaped}`, "g"),
+      new RegExp(`${escaped}が`, "g"),
+      new RegExp(`${escaped}で`, "g"),
+      new RegExp(`${escaped}による`, "g"),
+      new RegExp(`${escaped}の`, "g"),
+      new RegExp(escaped, "g"),
+    ];
+    for (const re of patterns) {
+      const before = result;
+      result = result.replace(re, replacement);
+      if (result !== before) break;
+    }
+  }
+  const esc = replacement.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return result
+    .replace(/\s{2,}/g, " ")
+    .replace(new RegExp(`${esc}や${esc}`, "g"), replacement)
+    .replace(new RegExp(`${esc}、${esc}`, "g"), replacement)
+    .trim();
+}
+
+/** 🤝/📝モーダル：LLM安全フィルタ＋頻度順再構成（SEO順・生検索結果の表示は廃止） */
+async function buildDiseaseSafetyFilteredMessage(
+  searchResults = [],
+  mainSymptom = "",
+  level = "🟢",
+  state = null,
+  summaryFacts = [],
+  summarySection = ""
+) {
+  const searchText = (searchResults || [])
+    .slice(0, 30)
+    .map((r) => `${r?.title || ""} ${r?.snippet || ""}`)
+    .join("\n")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 6000);
+
+  const bulletLines = extractBulletLinesFromText(summarySection || "");
+  const rawFacts = [
+    ...(Array.isArray(summaryFacts) ? summaryFacts : []),
+    ...bulletLines,
+    ...(state ? collectSlotFactsForDiseaseSearch(state) : []),
+  ]
+    .filter(Boolean)
+    .map((l) => String(l).replace(/^[・\s]+/, "").replace(/^→\s*/, "").trim())
+    .filter((l) => l.length > 0)
+    .filter((l) => l.length <= 80);
+  const userSummary = Array.from(new Set(rawFacts)).slice(0, 12).join("\n");
+
+  const fallbackPair = getDiseaseFallbackPair(mainSymptom);
+  const category = state ? (state.triageCategory || resolveQuestionCategoryFromState(state)) : "PAIN";
+  const reassurance = state ? buildReassuranceBulletsForPatterns(state) : ["・強い緊急サインは今のところはっきりしていません"];
+  const consultChanges = buildConsultChangeBulletsForPatterns(category);
+
+  const tryExtract = async () => {
+    const prompt = [
+      "検索結果と「今の状態について」のユーザー言動を参照し、原因を頻度順に3カテゴリに分類してください。",
+      "厳守：",
+      "- 出力は必ずJSONのみ：{\"common\":[],\"conditional\":[],\"rare_emergency\":[]}",
+      "- common = 一般的に頻度が高い原因（2〜4件）。各項目は「・<原因名> → <短い理由>」形式",
+      "- 「→」の理由は**ユーザーの言動を要約**して記載。ユーザーが言っていないことは書かない。固定文（例：肩こりやストレスで）は使わず、ユーザーが実際に言った内容に合わせる。",
+      "- conditional = 条件付きで考慮すべき状況（2〜4件）。**本当の病名・疾患名**を記載する（例：群発頭痛、髄膜炎、副鼻腔炎）。症状の一般表現ではなく医学的に正しい病名を使う。検索結果＋ユーザー症状から要約。煽らない表現。固定テンプレート禁止。",
+      "- rare_emergency = 稀だが緊急性あり。**2件のみ**（強制）。検索結果＋ユーザー症状から要約。腫瘍・出血・致死・がん・破裂などの重篤疾患はここにのみ入れる。固定テンプレート禁止。",
+      "- common/conditional に腫瘍・出血・致死・がん・破裂を含めない",
+      "- 「あなたの場合」「この症状は」などの個別化表現は禁止。恐怖を煽る表現は禁止",
+    ].join("\n");
+
+    const userContent = [
+      `主症状: ${mainSymptom}`,
+      userSummary ? `\n【今の状態について（ユーザー言動）】\n${userSummary}` : "",
+      `\n【検索結果（タイトル・スニペットのみ）】\n${searchText}`,
+    ].join("");
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: prompt },
+        { role: "user", content: userContent },
+      ],
+      temperature: 0.2,
+      max_tokens: 1200,
+    });
+    const raw = completion?.choices?.[0]?.message?.content || "";
+    return parseJsonObjectFromText(raw);
+  };
+
+  let parsed = null;
+  try {
+    parsed = await tryExtract();
+  } catch (_) {
+    /* fallback */
+  }
+
+  const hasDanger = (text) =>
+    DANGER_WORDS_INITIAL_HIDDEN.some((w) => String(text || "").includes(w));
+
+  const sanitize = (arr, allowDanger) =>
+    (Array.isArray(arr) ? arr : [])
+      .map((x) => (typeof x === "string" ? x : x?.text || x?.name || String(x)))
+      .filter((t) => t && String(t).trim().length > 0)
+      .filter((t) => allowDanger || !hasDanger(t));
+
+  let common = sanitize(parsed?.common, false).slice(0, 4);
+  let conditional = sanitize(parsed?.conditional, false).slice(0, 4);
+  let rare_emergency = sanitize(parsed?.rare_emergency, true).slice(0, 2);
+
+  const userWords = rawFacts;
+  common = common.map((item) => {
+    const arrowIdx = item.indexOf(" → ");
+    if (arrowIdx === -1) return item;
+    const reason = item.slice(arrowIdx + 3).trim();
+    const fixed = replaceUnsaidPhrasesInReason(reason, userWords);
+    return `${item.slice(0, arrowIdx + 3)}${fixed}`;
+  });
+
+  if (common.length < 2) {
+    const fallbackItems = fallbackPair.map((d) => {
+      const reason = d.desc.replace(/とされる状態です。?$/, "").trim();
+      const fixed = replaceUnsaidPhrasesInReason(reason, userWords);
+      return `・${d.name} → ${fixed}`;
+    });
+    for (const item of fallbackItems) {
+      if (common.length >= 4) break;
+      const name = (item.match(/^・([^→]+)/) || [])[1]?.trim?.() || "";
+      if (!name || !common.some((c) => c.includes(name))) common.push(item);
+    }
+  }
+  common = common.slice(0, 4);
+
+  const conditionalFallbacksBySymptom = {
+    頭痛: ["・群発頭痛", "・髄膜炎", "・副鼻腔炎", "・高血圧性頭痛"],
+    腹痛: ["・虫垂炎", "・胆嚢炎", "・腸閉塞", "・膵炎"],
+    "喉の痛み": ["・扁桃周囲膿瘍", "・咽頭後膿瘍", "・急性喉頭蓋炎", "・伝染性単核球症"],
+    "唇の痛み": ["・口唇ヘルペス", "・口角炎", "・アレルギー性接触皮膚炎", "・血管性浮腫"],
+    発熱: ["・敗血症", "・髄膜炎", "・肺炎", "・尿路感染症"],
+    皮膚症状: ["・蜂窩織炎", "・丹毒", "・アナフィラキシー", "・薬疹"],
+    体調不良: ["・髄膜炎", "・敗血症", "・心筋梗塞", "・肺塞栓症"],
+  };
+  const conditionalFallbacks =
+    conditionalFallbacksBySymptom[mainSymptom] || conditionalFallbacksBySymptom.頭痛;
+  while (conditional.length < 2 && conditionalFallbacks.length > 0) {
+    const next = conditionalFallbacks.shift();
+    if (!conditional.includes(next)) conditional.push(next);
+  }
+  conditional = conditional.slice(0, 4);
+
+  const rareFallbacksBySymptom = {
+    頭痛: ["・くも膜下出血", "・脳出血"],
+    腹痛: ["・消化管穿孔", "・腹部大動脈瘤破裂"],
+    "喉の痛み": ["・急性喉頭蓋炎", "・気道閉塞"],
+    "唇の痛み": ["・蜂窩織炎", "・血管性浮腫"],
+    発熱: ["・敗血症性ショック", "・髄膜炎"],
+    皮膚症状: ["・アナフィラキシー", "・壊死性筋膜炎"],
+    体調不良: ["・心筋梗塞", "・肺塞栓症"],
+  };
+  const rareFallbacks = rareFallbacksBySymptom[mainSymptom] || rareFallbacksBySymptom.頭痛;
+  while (rare_emergency.length < 2 && rareFallbacks.length > 0) {
+    const next = rareFallbacks.shift();
+    if (!rare_emergency.includes(next)) rare_emergency.push(next);
+  }
+  rare_emergency = rare_emergency.slice(0, 2);
+
+  const reassuranceCommon =
+    level === "🔴"
+      ? "今のあなたは🟡の可能性もないとは言えません。なので、確認をするためにも受診をおすすめします。"
+      : `${mainSymptom}のほとんどは命に関わるものではありません。特に、急激な悪化や神経症状がなければ、よくあるタイプの可能性が高いです。`;
+
+  return {
+    common,
+    conditional,
+    rare_emergency,
+    reassuranceCommon,
+    reassuranceBullets: reassurance.slice(0, 3),
+    consultChangeBullets: consultChanges.slice(0, 3),
+    triageLevel: level,
+  };
+}
+
+/** 🤝/📝モーダル：疾患名2つ＋各2〜3文の説明を生成（ユーザー情報は一切含めない）※旧仕様・フォールバック用 */
 async function buildDiseaseFocusedModalMessage(searchResults = [], mainSymptom = "", level = "🟢", state = null) {
   const searchText = (searchResults || [])
     .slice(0, 30)
@@ -5913,7 +6181,46 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
   ).slice(0, 4);
 
   const level = state?.decisionLevel || finalizeRiskLevel(state);
-  let message = await buildDiseaseFocusedModalMessage(allResults, mainSymptom, level, state);
+  let structured = null;
+  try {
+    structured = await buildDiseaseSafetyFilteredMessage(
+      allResults,
+      mainSymptom,
+      level,
+      state,
+      summaryFacts,
+      summarySection
+    );
+  } catch (_) {
+    /* fallback to plain message */
+  }
+
+  const lines = [];
+  if (structured) {
+    lines.push("あなたの状態の理解を深める", "");
+    lines.push("🟢 よくある原因");
+    structured.common.forEach((c) => lines.push(c.startsWith("・") ? c : `・${c}`));
+    lines.push("");
+    lines.push("🟡 状況によっては確認が必要");
+    structured.conditional.forEach((c) => lines.push(c.startsWith("・") ? c : `・${c}`));
+    lines.push("");
+    lines.push("🔴 すぐ受診が必要なサイン（折りたたみ・初期非表示）");
+    structured.rare_emergency.forEach((r) => lines.push(r.startsWith("・") ? r : `・${r}`));
+    lines.push("");
+    lines.push(structured.reassuranceCommon);
+    lines.push("");
+    if (level === "🟢" || level === "🟡") {
+      lines.push("現時点の安心材料");
+      structured.reassuranceBullets.forEach((b) => lines.push(b));
+      lines.push("");
+      lines.push("こんな変化があれば受診を検討");
+      structured.consultChangeBullets.forEach((b) => lines.push(b));
+    }
+  }
+
+  let message = lines.length > 0
+    ? lines.join("\n").trim()
+    : await buildDiseaseFocusedModalMessage(allResults, mainSymptom, level, state);
 
   message = String(message || "")
     .replace(/このような症状では/g, "今回の経過では")
@@ -5931,6 +6238,8 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
 
   return {
     message,
+    structured: structured ? { ...structured, triageLevel: level } : null,
+    triageLevel: level,
     query: `${queryJP} || ${queryEN}`,
     queryJP,
     queryEN,
@@ -5973,7 +6282,7 @@ function compactConcreteMessageForQuery(detailMessage) {
     .filter((line) => line.length > 0)
     .filter(
       (line) =>
-        !/^(あなたの状態の理解を深める|今の状態は、次のようなパターンと似ています。|現時点の安心材料|こんな変化があれば受診を検討|■)/.test(
+        !/^(あなたの状態の理解を深める|今の状態は、次のようなパターンと似ています。|現時点の安心材料|こんな変化があれば受診を検討|■|🟢 よくある原因|🟡 状況によっては確認が必要|🔴 すぐ受診が必要なサイン)/.test(
           line
         )
     )
@@ -6427,6 +6736,8 @@ function buildImmediateActionSearchQueries(context) {
   const mainSymptom = String(context?.mainSymptom || context?.location || "症状").trim();
   const facts = Array.isArray(context?.summaryFacts) ? context.summaryFacts.join(" ") : "";
   const symptoms = (Array.isArray(context?.symptoms) ? context.symptoms : []).join(" ").trim();
+  const features = context?.features || {};
+  const painType = features?.painType || "";
   const mainEn =
     MAIN_SYMPTOM_TO_EN[mainSymptom] ||
     (/(頭|お腹|喉|皮膚|唇)/.test(mainSymptom)
@@ -6437,14 +6748,19 @@ function buildImmediateActionSearchQueries(context) {
     mandatoryQuery,
     `${mainSymptom} ${facts} ${symptoms} 対処法`.replace(/\s{2,}/g, " ").trim().slice(0, 256),
     `${mainSymptom} ${symptoms} 対処法 セルフケア`.replace(/\s{2,}/g, " ").trim().slice(0, 256),
+    `${mainSymptom} 対処法 自宅`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
     `${mainSymptom} 対処法`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
+    painType ? `${mainSymptom} ${painType} 対処法`.replace(/\s{2,}/g, " ").trim().slice(0, 200) : null,
+    `${mainSymptom} 自宅 ケア 方法`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
     "体調不良 対処法 自宅",
     "症状 対処法 自宅 セルフケア",
   ].filter((q) => q && String(q).trim().length > 0);
   const enBase = [
     `${mainEn} ${symptoms} self care home treatment`.replace(/\s{2,}/g, " ").trim().slice(0, 256),
+    `${mainEn} self care at home`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
     `${mainEn} self care`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
     `${mainEn} home remedy`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
+    `${mainEn} treatment`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
     "symptom relief self care",
     "home remedy self care",
   ].filter((q) => q && String(q).trim().length > 0);
@@ -6501,35 +6817,35 @@ function buildSearchBackedHeuristicActions(context, evidence) {
   const selfCareText = (evidence?.selfCare || []).join(" ").toLowerCase();
   if (topic === "皮膚" && /(petroleum|ワセリン|barrier|保湿)/.test(selfCareText)) {
     actions.push({
-      title: "白色ワセリンを米粒2〜3粒ぶん、患部に白く残る厚さで塗り、2〜3時間ごとに半日続けて再評価しましょう",
+      title: "白色ワセリンを米粒2〜3粒ぶん、患部に白く残る厚さで塗り、2〜3時間ごとに半日続けて再評価してください",
       reason: "保護ケアで刺激の反復を減らし、バリアを保つためです。",
       isOtc: true,
     });
   }
   if (topic === "お腹") {
     actions.push({
-      title: "経口補水液または水を100〜150mlずつ15〜20分ごとに2〜3時間続け、悪化時は受診に切り替えましょう",
+      title: "経口補水液または水を100〜150mlずつ15〜20分ごとに2〜3時間続け、悪化時は受診に切り替えてください",
       reason: "脱水と症状推移を同時に管理するためです。",
       isOtc: false,
     });
   }
   if (topic === "頭") {
     actions.push({
-      title: "画面作業を45分ごとに10分休止し、同時に150〜200mlの水分を30〜60分ごとに4回補給して半日評価しましょう",
+      title: "画面作業を45分ごとに10分休止し、同時に150〜200mlの水分を30〜60分ごとに4回補給して半日評価してください",
       reason: "刺激負荷と体調要因を同時に下げることで、症状の推移を判断しやすくするためです。",
       isOtc: false,
     });
   }
   if (topic === "喉") {
     actions.push({
-      title: "乾燥を避けて水分をこまめに取り、刺激の強い飲食を控えて2〜3時間様子を見ましょう",
+      title: "乾燥を避けて水分をこまめに取り、刺激の強い飲食を控えて2〜3時間様子を見てください",
       reason: "咽頭の乾燥と刺激を減らすことで、症状の持続を抑えやすくなります。",
       isOtc: false,
     });
   }
   if (actions.length === 0) {
     actions.push({
-      title: "刺激を1つ減らして静かな環境で休み、水分を150〜200mlとって4〜6時間の変化を確認しましょう",
+      title: "刺激を1つ減らして静かな環境で休み、水分を150〜200mlとって4〜6時間の変化を確認してください",
       reason: "刺激負荷と脱水要因を減らすことで、症状のぶれを抑えやすくなります。",
       isOtc: false,
     });
@@ -6548,6 +6864,33 @@ function normalizeAdviceTopic(topic) {
 
 function normalizeContextLocation(location) {
   return normalizeAdviceTopic(location);
+}
+
+async function generateImmediateActionsFromContextOnly(state, context) {
+  if (!context) return [];
+  try {
+    const llmPrompt = [
+      "Generate 3 immediate self-care actions based on the user's symptom context. No search results available.",
+      "Use ONLY currentStateContext. Do not diagnose.",
+      "Return strict JSON: {\"actions\":[{\"title\":\"...\",\"reason\":\"...\",\"isOtc\":false}]}",
+      "Use recommending tone: 〜してください or 〜するといいです. Avoid 〜します.",
+      "Make actions specific to the symptom (head/stomach/throat/skin). OTC max 1.",
+    ].join("\n");
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: llmPrompt },
+        { role: "user", content: JSON.stringify({ currentStateContext: context }) },
+      ],
+      temperature: 0.3,
+      max_tokens: 500,
+    });
+    const parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
+    const actions = Array.isArray(parsed?.actions) ? parsed.actions : [];
+    return actions.filter((a) => a && a.title && a.reason).slice(0, 3);
+  } catch (_) {
+    return [];
+  }
 }
 
 async function buildImmediateActionHypothesisPlan(state, historyText = "", summarySection = "") {
@@ -6573,12 +6916,33 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
     const allItems = searchResults.flatMap((r) =>
       r.status === "fulfilled" && Array.isArray(r.value) ? r.value : []
     );
-    const ranked = dedupeAndRankActionSearchResults(
+    let ranked = dedupeAndRankActionSearchResults(
       allItems,
       currentStateContext.features || {}
     );
     if (!ranked || ranked.length === 0) {
-      return buildImmediateActionFallbackPlanFromState(state, {
+      const mainSymptom = String(currentStateContext?.mainSymptom || currentStateContext?.location || "症状").trim();
+      const fallbackQueries = [
+        { q: `${mainSymptom} 対処法 セルフケア`, lang: "ja" },
+        { q: `${mainSymptom} 自宅 ケア`, lang: "ja" },
+        { q: `${MAIN_SYMPTOM_TO_EN[mainSymptom] || "symptom"} self care home`, lang: "en" },
+      ];
+      const fallbackPromises = fallbackQueries.map(({ q, lang }) =>
+        fetchGoogleCustomSearchResults(q, lang, 1)
+      );
+      const fallbackResults = await Promise.allSettled(fallbackPromises);
+      const fallbackItems = fallbackResults.flatMap((r) =>
+        r.status === "fulfilled" && Array.isArray(r.value) ? r.value : []
+      );
+      ranked = dedupeAndRankActionSearchResults(
+        fallbackItems,
+        currentStateContext.features || {}
+      );
+    }
+    if (!ranked || ranked.length === 0) {
+      const contextOnlyActions = await generateImmediateActionsFromContextOnly(state, currentStateContext);
+      return await buildImmediateActionFallbackPlanFromState(state, {
+        actions: contextOnlyActions && contextOnlyActions.length > 0 ? contextOnlyActions : undefined,
         currentStateContext,
         searchQuery,
         concreteMessage: concrete.message,
@@ -6598,7 +6962,7 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
         "Do not invent sources. Do not diagnose.",
         "Return strict JSON: {\"topic\":\"...\",\"actions\":[{\"title\":\"...\",\"reason\":\"...\",\"isOtc\":false}]}",
         "actions max 3, OTC max 1.",
-        "Keep Japanese output and preserve existing action writing style.",
+        "Keep Japanese output. Use recommending tone: 〜してください or 〜するといいです. Avoid 〜します.",
       ].join("\n");
       const completion = await openai.chat.completions.create({
         model: "gpt-4o-mini",
@@ -6658,7 +7022,7 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
       }));
     }
 
-    return buildImmediateActionFallbackPlanFromState(state, {
+    return await buildImmediateActionFallbackPlanFromState(state, {
       actions: finalActions.slice(0, 3),
       currentStateContext,
       searchQuery,
@@ -6667,10 +7031,17 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
       concreteMessage: concrete.message,
     });
   } catch (error) {
-    return buildImmediateActionFallbackPlanFromState(state, {
-      currentStateContext,
-      searchQuery,
-      concreteMessage: concrete.message,
+    const errContext = buildCurrentStateContext(
+      state,
+      historyText || "",
+      [state?.lastConcreteDetailsText || ""].filter(Boolean).join("\n")
+    );
+    const contextOnlyActions = await generateImmediateActionsFromContextOnly(state, errContext);
+    return await buildImmediateActionFallbackPlanFromState(state, {
+      actions: contextOnlyActions && contextOnlyActions.length > 0 ? contextOnlyActions : undefined,
+      currentStateContext: errContext,
+      searchQuery: buildMandatoryGoogleQuery(errContext),
+      concreteMessage: "",
     });
   }
 }
@@ -7227,6 +7598,15 @@ function judgeDecision(state) {
   return { ratio, level, confidence, shouldJudge, slotsFilledCount };
 }
 
+function buildTriageState(isFinal, judgement, slotsFilledCount) {
+  const levelMap = { "🔴": "red", "🟡": "yellow", "🟢": "green" };
+  return {
+    triage_level: isFinal && judgement ? (levelMap[judgement] || null) : null,
+    is_final: Boolean(isFinal),
+    required_fields_filled: Number(slotsFilledCount) || 0,
+  };
+}
+
 function shouldAvoidSummary(text, shouldJudge) {
   if (shouldJudge) {
     return false;
@@ -7277,6 +7657,7 @@ app.post("/api/chat", async (req, res) => {
         message: "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。",
         response: "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。",
         judgeMeta: { judgement: null, confidence: 0, ratio: null, shouldJudge: false, slotsFilledCount: 0, decisionAllowed: false, questionCount: 0, summaryLine: null, questionType: null, rawScore: null, painScoreRatio: null },
+        triage_state: buildTriageState(false, null, 0),
         questionPayload: null,
         normalizedAnswer: null,
       });
@@ -7289,6 +7670,7 @@ app.post("/api/chat", async (req, res) => {
         message: fallback.question,
         response: fallback.question,
         judgeMeta: { judgement: null, confidence: 0, ratio: null, shouldJudge: false, slotsFilledCount: 0, decisionAllowed: false, questionCount: 0, summaryLine: null, questionType: null, rawScore: null, painScoreRatio: null },
+        triage_state: buildTriageState(false, null, 0),
         questionPayload: { introTemplateIds: buildIntroTemplateIds(initConversationState({ conversationId }), 0, "pain_score"), question: fallback.question },
         normalizedAnswer: null,
       });
@@ -7352,6 +7734,7 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].expectsPainScore = firstSlot === "pain_score";
       conversationState[conversationId].askedSlots[firstSlot] = true;
       conversationHistory[conversationId].push({ role: "assistant", content: fixed.question });
+      const slotsFilledFirst = countFilledSlots(state.slotFilled, state);
       return res.json({
         message: fixed.question,
         response: fixed.question,
@@ -7360,7 +7743,7 @@ app.post("/api/chat", async (req, res) => {
           confidence: 0,
           ratio: 0,
           shouldJudge: false,
-          slotsFilledCount: countFilledSlots(state.slotFilled, state),
+          slotsFilledCount: slotsFilledFirst,
           decisionAllowed: false,
           questionCount: 0,
           summaryLine: null,
@@ -7368,6 +7751,7 @@ app.post("/api/chat", async (req, res) => {
           rawScore: null,
           painScoreRatio: null,
         },
+        triage_state: buildTriageState(false, null, slotsFilledFirst),
         questionPayload: { introTemplateIds, question: fixed.question },
         normalizedAnswer: null,
         locationPromptMessage: null,
@@ -7392,6 +7776,7 @@ app.post("/api/chat", async (req, res) => {
         message: followUpResult.message,
         response: followUpResult.message,
         judgeMeta,
+        triage_state: buildTriageState(true, judgeMeta.judgement, judgeMeta.slotsFilledCount),
         questionPayload: null,
         normalizedAnswer: state.lastNormalizedAnswer || null,
         locationPromptMessage,
@@ -7569,12 +7954,13 @@ app.post("/api/chat", async (req, res) => {
         content: fixed.question,
       });
 
+      const slotsFilledExp = countFilledSlots(conversationState[conversationId].slotFilled, conversationState[conversationId]);
       const judgeMeta = {
         judgement: "🟢",
         confidence: conversationState[conversationId].confidence,
         ratio: 0,
         shouldJudge: false,
-        slotsFilledCount: countFilledSlots(conversationState[conversationId].slotFilled, conversationState[conversationId]),
+        slotsFilledCount: slotsFilledExp,
         decisionAllowed: false,
         questionCount: conversationState[conversationId].questionCount,
         summaryLine: null,
@@ -7594,6 +7980,7 @@ app.post("/api/chat", async (req, res) => {
         message: fixed.question,
         response: fixed.question,
         judgeMeta,
+        triage_state: buildTriageState(false, null, slotsFilledExp),
         questionPayload,
         normalizedAnswer,
       });
@@ -7676,6 +8063,7 @@ app.post("/api/chat", async (req, res) => {
           message: aiResponse,
           response: aiResponse,
           judgeMeta,
+          triage_state: buildTriageState(false, null, slotsFilledCount),
           questionPayload,
           normalizedAnswer: conversationState[conversationId].lastNormalizedAnswer || null,
           locationSnapshot: conversationState[conversationId].locationSnapshot,
@@ -7724,6 +8112,7 @@ app.post("/api/chat", async (req, res) => {
         message: aiResponseForced,
         response: aiResponseForced,
         judgeMeta,
+        triage_state: buildTriageState(false, null, slotsFilledCount),
         questionPayload: {
           introTemplateIds: buildIntroTemplateIds(
             conversationState[conversationId],
@@ -7919,7 +8308,7 @@ app.post("/api/chat", async (req, res) => {
           );
         } catch (immediateActionError) {
           console.error("[ImmediateActionPlan Error]", immediateActionError?.message || immediateActionError);
-          immediateActionPlan = buildImmediateActionFallbackPlanFromState(
+          immediateActionPlan = await buildImmediateActionFallbackPlanFromState(
             conversationState[conversationId]
           );
         }
@@ -8268,6 +8657,7 @@ app.post("/api/chat", async (req, res) => {
       ratio: conversationState[conversationId].decisionRatio ?? Number(ratio.toFixed(2)),
       shouldJudge: shouldJudgeNow,
     };
+    const triage_state = buildTriageState(shouldJudgeNow, finalRisk, slotsFilledCount);
     const sections =
       shouldJudgeNow
         ? extractSectionsBySpecs(
@@ -8280,6 +8670,7 @@ app.post("/api/chat", async (req, res) => {
       response: aiResponse,
       judgeMeta,
       triage,
+      triage_state,
       sections,
       questionPayload,
       normalizedAnswer,
@@ -8315,6 +8706,7 @@ app.post("/api/chat", async (req, res) => {
         ratio: state.decisionRatio ?? null,
         shouldJudge: true,
       };
+      const triage_state = buildTriageState(true, level, filled);
       const sections = extractSectionsBySpecs(
         fallbackSummary,
         getSummarySectionSpecsByJudgement(level)
@@ -8324,6 +8716,7 @@ app.post("/api/chat", async (req, res) => {
         message: fallbackSummary,
         response: fallbackSummary,
         triage,
+        triage_state,
         sections,
         judgeMeta: {
           judgement: level,
@@ -8343,10 +8736,12 @@ app.post("/api/chat", async (req, res) => {
       });
     }
     const safeMessage = "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。";
+    const errFilled = cid && state ? countFilledSlots(state.slotFilled, state) : 0;
     return res.status(200).json({
       conversationId: cid,
       message: safeMessage,
       response: safeMessage,
+      triage_state: buildTriageState(false, null, errFilled),
       judgeMeta: {
         judgement: "🟡",
         confidence: 0,
@@ -8370,16 +8765,19 @@ app.post("/api/state-patterns", async (req, res) => {
   try {
     const { conversationId, summaryFacts, summarySection } = req.body || {};
     const state = conversationId ? getOrInitConversationState(conversationId) : initConversationState();
-    const { message, query, queryJP, queryEN, sourceNames } = await buildConcreteStateDetailsFromSearch(
-      state,
-      Array.isArray(summaryFacts) ? summaryFacts : [],
-      summarySection || ""
-    );
+    const { message, structured, triageLevel, query, queryJP, queryEN, sourceNames } =
+      await buildConcreteStateDetailsFromSearch(
+        state,
+        Array.isArray(summaryFacts) ? summaryFacts : [],
+        summarySection || ""
+      );
     state.lastConcreteDetailsText = message;
     state.lastConcreteQueryJP = queryJP || null;
     state.lastConcreteQueryEN = queryEN || null;
     const basePayload = {
       message,
+      structured: structured || undefined,
+      triageLevel: triageLevel || undefined,
       sourcePolicy: [
         "公的機関",
         "大学病院",
@@ -8481,7 +8879,7 @@ app.post("/api/action-details", async (req, res) => {
       buildYellowPsychologicalCushionLine(),
       "",
       "■今すぐやること",
-      "・刺激を1つ減らして静かな環境で過ごし、水分を150〜200mlとって4〜6時間の変化を見ます",
+      "・刺激を1つ減らして静かな環境で過ごし、水分を150〜200mlとって4〜6時間の変化を見てください",
       "→ 刺激と脱水の要因を同時に下げると、経過が読み取りやすくなります。",
       "",
       "■やらないほうがいいこと",
