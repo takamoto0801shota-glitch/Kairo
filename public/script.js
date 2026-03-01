@@ -941,7 +941,7 @@ function addMessage(text, isUser = false, save = true) {
         detailButton = document.createElement("button");
         detailButton.type = "button";
         detailButton.className = "block-header-action";
-        detailButton.textContent = isStateBlock ? "原因を整理して見る" : "具体的に";
+        detailButton.textContent = "具体的に";
         detailButton.disabled = true;
         detailButton.addEventListener("click", () => {
           if (isActionBlock) {

@@ -2410,14 +2410,17 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
   return lines.join("\n");
 }
 
+const RED_GP_JUDGMENT_SENTENCES = [
+  "今の症状の出方をふまえると、念のため医療機関で確認しておくと安心できる状態です。",
+  "現在の症状からは、自己判断で様子を見るよりも、一度医療機関で確認しておく方が安心できそうです。",
+];
+
 function buildHospitalConcernPoint(historyText) {
-  const destination = detectCareDestinationFromHistory(historyText || "");
-  return `今の症状の出方を整理すると、薬で様子を見るより、一度${destination.label}で確認した方が安心できる状態です。`;
+  return RED_GP_JUDGMENT_SENTENCES[Math.floor(Math.random() * RED_GP_JUDGMENT_SENTENCES.length)];
 }
 
 function buildRedCushionLine(historyText) {
-  const destination = detectCareDestinationFromHistory(historyText || "");
-  return `今の症状の出方を整理すると、一度${destination.label}で確認した方が安心できる状態です。`;
+  return RED_GP_JUDGMENT_SENTENCES[Math.floor(Math.random() * RED_GP_JUDGMENT_SENTENCES.length)];
 }
 
 function buildRedImmediateActionsFallback() {
@@ -3050,6 +3053,7 @@ const MC_4_LINES = [
 ];
 
 function shouldAppendMcLinesToModal(state) {
+  if (state?.decisionLevel === "🔴") return false;
   const restLevel = resolveRestLevelFromState(state);
   const category = resolveQuestionCategoryFromState(state);
   return (restLevel === "LIGHT" || restLevel === "STRONG") && category !== "INFECTION";
@@ -3876,9 +3880,19 @@ function isDurationDayOrMore(state) {
   return /(昨日|一日前|数日|ずっと|前から|一昨日|三日前|二日前|数日前|\d+日前|一日以上)/.test(durationRaw);
 }
 
+/** さっき以外（数時間前・半日・昨日・一日以上前など）なら true。悪化傾向質問の挿入条件 */
+function isDurationNotJustNow(state) {
+  const durationRaw = String(
+    getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "")
+  ).trim();
+  if (!durationRaw) return false;
+  if (/(さっき|今さっき|たった今)/.test(durationRaw)) return false;
+  return true;
+}
+
 function getSlotOrderWithConditional(state) {
   const base = [...FIXED_SLOT_ORDER];
-  if (!isDurationDayOrMore(state)) return base;
+  if (!isDurationNotJustNow(state)) return base;
   const durationIdx = base.indexOf("duration");
   if (durationIdx < 0) return base;
   const insertIdx = durationIdx + 1;
@@ -4278,7 +4292,7 @@ function applySpontaneousSlotFill(state, message) {
     added += 1;
   }
 
-  if (isDurationDayOrMore(state)) {
+  if (isDurationNotJustNow(state)) {
     const trend = extractWorseningTrendFromText(text);
     if (trend && setSlotFromSpontaneous(state, "worsening_trend", {
       rawAnswer: trend.raw,
@@ -4373,7 +4387,7 @@ function ensureSlotFilledConsistency(state) {
   if (!state || !state.slotFilled) return;
   ensureSlotStatusShape(state);
   for (const slotKey of SLOT_KEYS) {
-    if (slotKey === "worsening_trend" && !isDurationDayOrMore(state)) {
+    if (slotKey === "worsening_trend" && !isDurationNotJustNow(state)) {
       state.slotFilled[slotKey] = false;
       if (state.slotStatus?.worsening_trend) {
         state.slotStatus.worsening_trend.filled = false;
