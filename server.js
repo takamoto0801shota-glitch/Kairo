@@ -5038,15 +5038,34 @@ const PRE_SUMMARY_ADD_MORE_PHRASES = [
   "他に伝えたいことがあれば教えてください。",
 ];
 
-function buildPreSummaryConfirmationMessage(state, historyText) {
+// まとめ前確認用の判断文（🤝 今の状態についてとは別生成・丸かぶり禁止）
+// 断定避け、安心・確認・念のためを含む。恐怖喚起ワード禁止。
+function buildPreSummaryConfirmationJudgment(state, level) {
+  const templates = {
+    "🟢": [
+      "この整理でいけそうなら、様子を見つつ念のため確認できると安心ですね。",
+      "今の情報だと、落ち着いて様子を見ながら、必要に応じて確認できると安心できそうです。",
+      "この内容でまとめるなら、様子を見つつ念のため確認のタイミングを逃さないようにすると安心です。",
+    ],
+    "🟡": [
+      "この出方だと、念のため一度確認しておくと安心できそうです。",
+      "症状の強さや経過をふまえると、念のため確認しておく方が安心できそうです。",
+      "この整理でまとめるなら、念のため確認できると安心できそうです。",
+    ],
+    "🔴": [
+      "この出方だと、念のため早めに確認しておくと安心できそうです。",
+      "今の症状をふまえると、一度確認しておく方が安心できそうです。",
+      "この整理だと、念のため確認できると安心できそうです。",
+    ],
+  };
+  const list = templates[level] || templates["🟢"];
+  return list[Math.floor(Math.random() * list.length)];
+}
+
+function buildPreSummaryConfirmationMessage(state) {
   const bullets = buildStateFactsBullets(state);
   const level = finalizeRiskLevel(state);
-  let judgmentLine;
-  if (level === "🔴") {
-    judgmentLine = buildHospitalConcernPoint(historyText);
-  } else {
-    judgmentLine = buildStateAboutLine(state, level);
-  }
+  const judgmentLine = buildPreSummaryConfirmationJudgment(state, level);
   const phrase = PRE_SUMMARY_CONFIRMATION_PHRASES[
     Math.floor(Math.random() * PRE_SUMMARY_CONFIRMATION_PHRASES.length)
   ];
@@ -8297,13 +8316,8 @@ app.post("/api/chat", async (req, res) => {
 
     // 6スロット完了時: まとめの前に確認を取る（🟢🟡🔴共通）
     if (shouldJudgeNow && !conversationState[conversationId].confirmationShown && !conversationState[conversationId].summaryShown) {
-      const historyTextForConfirm = conversationHistory[conversationId]
-        .filter((m) => m.role === "user")
-        .map((m) => m.content)
-        .join("\n");
       const confirmMsg = buildPreSummaryConfirmationMessage(
-        conversationState[conversationId],
-        historyTextForConfirm
+        conversationState[conversationId]
       );
       conversationHistory[conversationId].push({ role: "assistant", content: confirmMsg });
       conversationState[conversationId].confirmationPending = true;
