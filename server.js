@@ -3895,13 +3895,20 @@ function isDurationNotJustNow(state) {
 }
 
 function getSlotOrderWithConditional(state) {
-  const base = [...FIXED_SLOT_ORDER];
-  if (!isDurationNotJustNow(state)) return base;
-  const durationIdx = base.indexOf("duration");
-  if (durationIdx < 0) return base;
-  const insertIdx = durationIdx + 1;
-  if (base.includes(CONDITIONAL_SLOT_WORSENING_TREND)) return base;
-  base.splice(insertIdx, 0, CONDITIONAL_SLOT_WORSENING_TREND);
+  let base = [...FIXED_SLOT_ORDER];
+  if (isDurationNotJustNow(state)) {
+    const durationIdx = base.indexOf("duration");
+    if (durationIdx >= 0 && !base.includes(CONDITIONAL_SLOT_WORSENING_TREND)) {
+      base.splice(durationIdx + 1, 0, CONDITIONAL_SLOT_WORSENING_TREND);
+    }
+  }
+  const category = state?.triageCategory || "PAIN";
+  if (category === "SKIN") {
+    base = base.filter((k) => k !== "cause_category");
+  }
+  if (category === "GI") {
+    base = base.filter((k) => k !== "daily_impact");
+  }
   return base;
 }
 
@@ -4594,12 +4601,6 @@ function getCategoryQuestionOverride(category, slotKey) {
         options: ["特に思い当たらない", "紫外線や乾燥が強かった", "新しい製品や刺激物を使った"],
       };
     }
-    if (slotKey === "cause_category") {
-      return {
-        question: "症状の状況はどうですか？",
-        options: ["触っても痛くない", "触ると痛い", "触ると激痛が走る"],
-      };
-    }
   }
   if (category === "INFECTION") {
     if (slotKey === "daily_impact") {
@@ -4622,12 +4623,6 @@ function getCategoryQuestionOverride(category, slotKey) {
     }
   }
   if (category === "GI") {
-    if (slotKey === "daily_impact") {
-      return {
-        question: "お腹のどのあたりが痛みますか？",
-        options: ["わからない", "全体的", "みぞおち付近"],
-      };
-    }
     if (slotKey === "associated_symptoms") {
       return {
         question: "便や吐き気はどうですか？",
@@ -8203,8 +8198,7 @@ app.post("/api/chat", async (req, res) => {
             ? lastType
             : missingSlots[0] || (isFirstUserTurn ? SLOT_KEYS[0] : null);
       if (nextSlot) {
-        const useFinalPrefix =
-          currentQuestionCount >= minQuestions && missingSlots.length === 1;
+        const useFinalPrefix = missingSlots.length === 1;
         const fixed = buildFixedQuestion(nextSlot, useFinalPrefix);
         const historyText = conversationHistory[conversationId]
           .filter((msg) => msg.role === "user")
@@ -8698,8 +8692,7 @@ app.post("/api/chat", async (req, res) => {
       const reaskSameSlot = lastType && missingSlots.includes(lastType);
       const nextSlot = isFirstQuestion ? "pain_score" : (reaskSameSlot ? lastType : missingSlots[0]);
       if (nextSlot) {
-        const useFinalPrefix =
-          currentQuestionCount >= minQuestions && missingSlots.length === 1;
+        const useFinalPrefix = missingSlots.length === 1;
         const fixed = buildFixedQuestion(nextSlot, useFinalPrefix);
         const historyText = conversationHistory[conversationId]
           .filter((msg) => msg.role === "user")
