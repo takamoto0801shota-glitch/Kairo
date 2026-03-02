@@ -19,7 +19,32 @@ const appState = {
   slots: {},
   sectionTimers: [],
   concreteModalBusy: false,
+  conversationStep: 0,
+  triageCompleted: false,
+  triageLevel: null,
+  summaryGenerated: false,
+  collectedAnswers: {},
+  symptomDuration: null,
+  painLevel: null,
+  location: null,
+  redFlagDetected: false,
 };
+
+function resetConversation() {
+  appState.conversationStep = 0;
+  appState.triageCompleted = false;
+  appState.triageLevel = null;
+  appState.summaryGenerated = false;
+  appState.collectedAnswers = {};
+  appState.symptomDuration = null;
+  appState.painLevel = null;
+  appState.location = null;
+  appState.redFlagDetected = false;
+  appState.riskLevel = null;
+  appState.userHasSubmitted = false;
+  appState.painScore = null;
+  appState.slots = {};
+}
 
 const INTRO_TEMPLATE_TEXTS = {
   TEMPLATE_EMPATHY_1: "それはつらいですよね。体の不調があると、どうしても気になりますよね。",
@@ -255,26 +280,29 @@ function loadHistory() {
   return;
 }
 
-// Clear conversation history
+// Clear conversation history（完全初期化。部分リセット禁止）
 function clearHistory() {
+  resetConversation();
+  const conversationIdToClear = localStorage.getItem(CONVERSATION_ID_KEY) || getConversationId();
   localStorage.removeItem(HISTORY_KEY);
   localStorage.removeItem(CONVERSATION_ID_KEY);
   localStorage.removeItem(FIRST_QUESTION_KEY);
   sessionStorage.removeItem("kairo_location");
   sessionStorage.removeItem(LOCATION_PROMPT_KEY);
   sessionStorage.removeItem(LOCATION_SNAPSHOT_KEY);
+  sessionStorage.removeItem(LOCATION_RETRY_KEY);
   sessionStorage.setItem("kairo_force_location_prompt", "true");
-  // Clear server-side history, then reload to reset UI without DOM再生成
   fetch(CLEAR_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ conversationId: getConversationId() }),
+    body: JSON.stringify({ conversationId: conversationIdToClear }),
   })
     .catch((err) => console.error("履歴クリアエラー:", err))
     .finally(() => {
       hideSummaryCard();
+      clearSectionTimers();
       window.location.reload();
     });
 }
@@ -1219,17 +1247,23 @@ async function handleUserInput() {
         : aiResponse.message;
 
       const triageState = aiResponse.triage_state || { is_final: false, triage_level: null, required_fields_filled: 0 };
+      const isFirstResponse = appState.conversationStep === 0;
+      if (isFirstResponse) {
+        hideSummaryCard();
+        appState.riskLevel = null;
+        appState.conversationStep = 1;
+      }
       if (!triageState.is_final) {
         hideSummaryCard();
         appState.riskLevel = null;
-      } else {
+      } else if (!isFirstResponse) {
         const level = triageState.triage_level || (aiResponse.judgeMeta?.judgement === "🔴" ? "red" : aiResponse.judgeMeta?.judgement === "🟡" ? "yellow" : "green");
         appState.riskLevel = level === "red" ? "RED" : level === "yellow" ? "YELLOW" : "GREEN";
         renderSummary();
       }
 
       const sections = Array.isArray(aiResponse.sections) ? aiResponse.sections.filter(Boolean) : [];
-      const shouldShowSections = triageState.is_final && sections.length > 0;
+      const shouldShowSections = !isFirstResponse && triageState.is_final && sections.length > 0;
       if (shouldShowSections) {
         const firstDelay = 600;
         const interval = 800;
@@ -1279,7 +1313,7 @@ async function handleUserInput() {
 
 // Initialize
 function init() {
-  // Start fresh without re-rendering history
+  resetConversation();
   clearSectionTimers();
   appState.riskLevel = null;
   appState.userHasSubmitted = false;

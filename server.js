@@ -862,6 +862,10 @@ function initConversationState(input = {}) {
     lastPainScore: null,
     lastPainWeight: null,
     lastNormalizedAnswer: null,
+    confirmationPending: false,
+    expectsCorrectionReason: false,
+    confirmationExtraFacts: [],
+    confirmationShown: false,
   };
 }
 
@@ -5010,7 +5014,46 @@ function buildStateFactsBullets(state) {
     pushIfValid(lines, `・きっかけは${cause}`);
   }
 
+  const extra = (state?.confirmationExtraFacts || []).filter(Boolean);
+  extra.forEach((f) => {
+    const s = String(f).trim();
+    if (!s) return;
+    pushIfValid(lines, s.startsWith("・") ? s : `・${s}`);
+  });
+
   return lines.slice(0, 6);
+}
+
+const PRE_SUMMARY_CONFIRMATION_PHRASES = [
+  "この整理で合っていますか？",
+  "合っていますか？",
+  "これでよろしいですか？",
+  "こちらの理解で合っていますか？",
+  "この内容で問題ないでしょうか？",
+];
+
+function buildPreSummaryConfirmationMessage(state, historyText) {
+  const bullets = buildStateFactsBullets(state);
+  const level = finalizeRiskLevel(state);
+  let judgmentLine;
+  if (level === "🔴") {
+    judgmentLine = buildHospitalConcernPoint(historyText);
+  } else {
+    judgmentLine = buildStateAboutLine(state, level);
+  }
+  const phrase = PRE_SUMMARY_CONFIRMATION_PHRASES[
+    Math.floor(Math.random() * PRE_SUMMARY_CONFIRMATION_PHRASES.length)
+  ];
+  const parts = [
+    "今のところ整理できているのは、",
+    ...bullets,
+    "という点です。",
+    "",
+    judgmentLine,
+    "",
+    phrase,
+  ];
+  return parts.join("\n");
 }
 
 function buildStateAboutLine(state, level) {
@@ -7852,6 +7895,55 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
+    // Pre-summary confirmation: 6 slots filled, waiting for user response
+    if (conversationState[conversationId].confirmationPending || conversationState[conversationId].expectsCorrectionReason) {
+      const msg = String(message || "").trim();
+      const isRejection = /違う|間違っている|違います|違ってる|違ってます/.test(msg);
+      const isOk = /^(はい|うん|ええ|大丈夫|OK|ok|よろしい|合ってる|あってる|いいです|問題ない|それでいい|それでいいです|大丈夫です|合っています|あっています)$/i.test(msg);
+
+      if (conversationState[conversationId].confirmationPending && isRejection) {
+        conversationState[conversationId].confirmationPending = false;
+        conversationState[conversationId].expectsCorrectionReason = true;
+        const reply = "他に気になることがあれば、なんでも言ってください。";
+        conversationHistory[conversationId].push({ role: "user", content: message });
+        conversationHistory[conversationId].push({ role: "assistant", content: reply });
+        const slotsFilledCount = countFilledSlots(state.slotFilled, state);
+        const level = finalizeRiskLevel(state);
+        return res.json({
+          message: reply,
+          response: reply,
+          judgeMeta: {
+            judgement: level,
+            confidence: state.confidence,
+            ratio: state.decisionRatio || 0,
+            shouldJudge: true,
+            slotsFilledCount,
+            decisionAllowed: true,
+            questionCount: state.questionCount,
+            summaryLine: null,
+            questionType: null,
+            rawScore: state.lastPainScore,
+            painScoreRatio: state.lastPainWeight,
+          },
+          triage_state: buildTriageState(true, level, slotsFilledCount),
+          questionPayload: null,
+          normalizedAnswer: state.lastNormalizedAnswer || null,
+          locationPromptMessage,
+          locationRePromptMessage,
+          locationSnapshot: state.locationSnapshot,
+          conversationId,
+        });
+      }
+
+      conversationState[conversationId].confirmationPending = false;
+      conversationState[conversationId].expectsCorrectionReason = false;
+      if (!isOk && msg.length > 2) {
+        (conversationState[conversationId].confirmationExtraFacts =
+          conversationState[conversationId].confirmationExtraFacts || []).push(msg);
+      }
+      // user message will be pushed below in normal flow
+    }
+
     // ユーザー回答のスコアを集計
     // 毎ターン先頭で自然発話解析を実施済み
     if (conversationState[conversationId].expectsCauseDetail) {
@@ -8188,6 +8280,48 @@ app.post("/api/chat", async (req, res) => {
           question: fixed.question,
         },
         normalizedAnswer: conversationState[conversationId].lastNormalizedAnswer || null,
+        locationSnapshot: conversationState[conversationId].locationSnapshot,
+        conversationId,
+      });
+    }
+
+    // 6スロット完了時: まとめの前に確認を取る（🟢🟡🔴共通）
+    if (shouldJudgeNow && !conversationState[conversationId].confirmationShown && !conversationState[conversationId].summaryShown) {
+      const historyTextForConfirm = conversationHistory[conversationId]
+        .filter((m) => m.role === "user")
+        .map((m) => m.content)
+        .join("\n");
+      const confirmMsg = buildPreSummaryConfirmationMessage(
+        conversationState[conversationId],
+        historyTextForConfirm
+      );
+      conversationHistory[conversationId].push({ role: "assistant", content: confirmMsg });
+      conversationState[conversationId].confirmationPending = true;
+      conversationState[conversationId].confirmationShown = true;
+      conversationState[conversationId].lastOptions = [];
+      conversationState[conversationId].lastQuestionType = null;
+      const finalLevel = finalizeRiskLevel(conversationState[conversationId]);
+      return res.json({
+        message: confirmMsg,
+        response: confirmMsg,
+        judgeMeta: {
+          judgement: finalLevel,
+          confidence,
+          ratio: Number(ratio.toFixed(2)),
+          shouldJudge: true,
+          slotsFilledCount,
+          decisionAllowed: true,
+          questionCount: conversationState[conversationId].questionCount,
+          summaryLine: null,
+          questionType: null,
+          rawScore: conversationState[conversationId].lastPainScore,
+          painScoreRatio: conversationState[conversationId].lastPainWeight,
+        },
+        triage_state: buildTriageState(true, finalLevel, slotsFilledCount),
+        questionPayload: null,
+        normalizedAnswer: conversationState[conversationId].lastNormalizedAnswer || null,
+        locationPromptMessage,
+        locationRePromptMessage,
         locationSnapshot: conversationState[conversationId].locationSnapshot,
         conversationId,
       });
