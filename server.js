@@ -5032,6 +5032,12 @@ const PRE_SUMMARY_CONFIRMATION_PHRASES = [
   "この内容で問題ないでしょうか？",
 ];
 
+const PRE_SUMMARY_ADD_MORE_PHRASES = [
+  "もしまだ足りないことがあれば教えてください。",
+  "足りないことがあれば、なんでも教えてください。",
+  "他に伝えたいことがあれば教えてください。",
+];
+
 function buildPreSummaryConfirmationMessage(state, historyText) {
   const bullets = buildStateFactsBullets(state);
   const level = finalizeRiskLevel(state);
@@ -5044,6 +5050,9 @@ function buildPreSummaryConfirmationMessage(state, historyText) {
   const phrase = PRE_SUMMARY_CONFIRMATION_PHRASES[
     Math.floor(Math.random() * PRE_SUMMARY_CONFIRMATION_PHRASES.length)
   ];
+  const addMore = PRE_SUMMARY_ADD_MORE_PHRASES[
+    Math.floor(Math.random() * PRE_SUMMARY_ADD_MORE_PHRASES.length)
+  ];
   const parts = [
     "今のところ整理できているのは、",
     ...bullets,
@@ -5052,6 +5061,7 @@ function buildPreSummaryConfirmationMessage(state, historyText) {
     judgmentLine,
     "",
     phrase,
+    addMore,
   ];
   return parts.join("\n");
 }
