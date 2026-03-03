@@ -11,6 +11,7 @@ const FIRST_QUESTION_KEY = "kairo_first_question";
 
 const SUBJECTIVE_ALERT_WORDS = ["気になります", "引っかかります", "心配です", "注意が必要です"];
 const FEATURE_SHOW_LOCATION_EXPLANATION = false;
+const QUESTION_DELAY_MS = 500;
 
 const appState = {
   riskLevel: null,
@@ -1117,8 +1118,7 @@ function renderSummary() {
 // Show initial message
 function showInitialMessage() {
   const initialMessage = `あなたの不安と体調を一番に、一緒に考えます`;
-
-  addMessage(initialMessage);
+  setTimeout(() => addMessage(initialMessage), QUESTION_DELAY_MS);
 }
 
 
@@ -1265,7 +1265,7 @@ async function handleUserInput() {
       const sections = Array.isArray(aiResponse.sections) ? aiResponse.sections.filter(Boolean) : [];
       const shouldShowSections = !isFirstResponse && triageState.is_final && sections.length > 0;
       if (shouldShowSections) {
-        const firstDelay = 600;
+        const firstDelay = QUESTION_DELAY_MS + 600;
         const interval = 800;
         sections.forEach((sectionText, idx) => {
           const timerId = setTimeout(() => {
@@ -1283,13 +1283,15 @@ async function handleUserInput() {
           appState.sectionTimers.push(timerId);
         }
       } else {
-        addMessage(aiMessage);
-        if (aiResponse.followUpMessage) {
-          addMessage(aiResponse.followUpMessage);
-        }
-        if (aiResponse.followUpQuestion) {
-          addMessage(aiResponse.followUpQuestion);
-        }
+        setTimeout(() => {
+          addMessage(aiMessage);
+          if (aiResponse.followUpMessage) {
+            addMessage(aiResponse.followUpMessage);
+          }
+          if (aiResponse.followUpQuestion) {
+            addMessage(aiResponse.followUpQuestion);
+          }
+        }, QUESTION_DELAY_MS);
       }
     } catch (error) {
         // Show fallback message and keep conversation moving
@@ -1302,7 +1304,7 @@ async function handleUserInput() {
         }
         
         // Show fallback message (no retry prompt)
-        addMessage(errorMessage);
+        setTimeout(() => addMessage(errorMessage), QUESTION_DELAY_MS);
       } finally {
     // Re-enable input
     input.disabled = false;

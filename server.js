@@ -5033,24 +5033,48 @@ const PRE_SUMMARY_ADD_MORE_PHRASES = [
   "他に伝えたいことがあれば教えてください。",
 ];
 
-// まとめ前確認用の判断文（🤝 今の状態についてとは別生成・丸かぶり禁止）
-// 断定避け、安心・確認・念のためを含む。恐怖喚起ワード禁止。
+// 共感テンプレ（経過時間で選択）。判断文の前に必ず挿入。
+const EMPATHY_SASAKI_TEMPLATES = [
+  "急に症状が出ると、「何か大きなことかも」と不安になりますよね。",
+  "突然の変化だと、悪い方向を想像してしまいますよね。",
+];
+const EMPATHY_LONGER_TEMPLATES = [
+  "なかなか良くならないと、「何か隠れているのでは」と心配になりますよね。",
+  "なかなか良くならないと、何か深刻なのではと心配になりますよね。",
+  "ずっと続いていると、だんだん不安が大きくなりますよね。",
+];
+
+function isDurationSasakiLike(state) {
+  const durationRaw = String(
+    getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "")
+  ).trim();
+  if (!durationRaw) return true;
+  return /(さっき|今さっき|たった今|数分|数十分)/.test(durationRaw);
+}
+
+function pickEmpathyForConfirmation(state) {
+  const templates = isDurationSasakiLike(state)
+    ? EMPATHY_SASAKI_TEMPLATES
+    : EMPATHY_LONGER_TEMPLATES;
+  return templates[Math.floor(Math.random() * templates.length)];
+}
+
+// まとめ前確認用の判断文（緊急度別テンプレ・ランダム）
 function buildPreSummaryConfirmationJudgment(state, level) {
   const templates = {
     "🟢": [
-      "この整理でいけそうなら、様子を見つつ念のため確認できると安心ですね。",
-      "今の情報だと、落ち着いて様子を見ながら、必要に応じて確認できると安心できそうです。",
-      "この内容でまとめるなら、様子を見つつ念のため確認のタイミングを逃さないようにすると安心です。",
+      "今の症状の出方からは、ひとまず大きな心配をしなくてもよさそうです。",
+      "今お聞きしている範囲では、過度に不安になる必要はなさそうに見えます。",
+      "今の状態からは、急いで何かをしなければならない状況ではなさそうです。",
     ],
     "🟡": [
-      "この出方だと、念のため一度確認しておくと安心できそうです。",
-      "症状の強さや経過をふまえると、念のため確認しておく方が安心できそうです。",
-      "この整理でまとめるなら、念のため確認できると安心できそうです。",
+      "大きく慌てる状況ではなさそうですが、念のため体調の変化には気をつけておきたい状態です。",
+      "今のところ深刻なサインは見えていませんが、無理をせず経過を見ていくことが大切そうです。",
     ],
     "🔴": [
-      "この出方だと、念のため早めに確認しておくと安心できそうです。",
-      "今の症状をふまえると、一度確認しておく方が安心できそうです。",
-      "この整理だと、念のため確認できると安心できそうです。",
+      "今の症状の出方からは、念のため早めに医療機関で確認しておいた方がよさそうです。落ち着いて行動すれば大丈夫です。",
+      "強い心配をしすぎる必要はありませんが、安心のためにも今日中の受診を考えておきたい状態です。",
+      "今すぐ慌てる状況ではありませんが、このまま様子を見るよりは一度専門家に確認してもらう方が安心につながりそうです。",
     ],
   };
   const list = templates[level] || templates["🟢"];
@@ -5060,7 +5084,11 @@ function buildPreSummaryConfirmationJudgment(state, level) {
 function buildPreSummaryConfirmationMessage(state) {
   const bullets = buildStateFactsBullets(state);
   const level = finalizeRiskLevel(state);
+  const empathy = pickEmpathyForConfirmation(state);
   const judgmentLine = buildPreSummaryConfirmationJudgment(state, level);
+  const connector =
+    level === "🟢" ? "ただ、" : level === "🔴" ? "なので、" : "";
+  const judgmentWithConnector = connector ? `${connector}${judgmentLine}` : judgmentLine;
   const phrase = PRE_SUMMARY_CONFIRMATION_PHRASES[
     Math.floor(Math.random() * PRE_SUMMARY_CONFIRMATION_PHRASES.length)
   ];
@@ -5072,7 +5100,8 @@ function buildPreSummaryConfirmationMessage(state) {
     ...bullets,
     "という点です。",
     "",
-    judgmentLine,
+    empathy,
+    judgmentWithConnector,
     "",
     phrase,
     addMore,
