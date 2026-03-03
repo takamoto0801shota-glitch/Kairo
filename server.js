@@ -2860,7 +2860,7 @@ function buildClosingLine() {
 
 function buildImmediateActionsBlock(level, state, historyText = "", research = null) {
   const context = research?.currentStateContext || buildCurrentStateContext(state, historyText || "", state?.lastConcreteDetailsText || "");
-  const lines = ["✅ 今すぐやること", ""];
+  const lines = ["✅ 今すぐやること"];
 
   // ① なぜそれでいいのか
   lines.push(buildWhySection(context));
@@ -5016,7 +5016,7 @@ function buildStateFactsBullets(state) {
     pushIfValid(lines, s.startsWith("・") ? s : `・${s}`);
   });
 
-  return lines.slice(0, 6);
+  return lines.slice(0, 8);
 }
 
 const PRE_SUMMARY_CONFIRMATION_PHRASES = [
@@ -5466,7 +5466,7 @@ function collectSlotFactsForDiseaseSearch(state) {
     .map((v) => String(v || "").trim())
     .filter((v) => v.length > 0)
     .filter((v) => !/^(ない|なし|特にない|特になし|わからない|分からない|不明|思い当たらない|特に思い当たらない)$/.test(v));
-  return Array.from(new Set(rawSlotFacts)).slice(0, 6);
+  return Array.from(new Set(rawSlotFacts)).slice(0, 8);
 }
 
 /** 主症状→英語（疾患検索用） */
@@ -6847,7 +6847,7 @@ function buildCurrentStateContext(state, historyText = "", concreteMessage = "")
     .filter((v) => !/^(ない|なし|特にない|特になし|わからない|分からない|不明|思い当たらない|特に思い当たらない)$/.test(v));
   const summaryFacts =
     rawSlotFacts.length > 0
-      ? Array.from(new Set(rawSlotFacts)).slice(0, 6)
+      ? Array.from(new Set(rawSlotFacts)).slice(0, 8)
       : buildStateFactsBullets(state).map((line) => toBulletText(line));
   const mainSymptom = normalizeMainSymptomLabel([
     state?.primarySymptom || "",

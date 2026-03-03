@@ -408,12 +408,12 @@ function extractStateFactsFromBlock(content) {
     .map((line) => line.trim())
     .filter((line) => /^・/.test(line))
     .map((line) => line.replace(/^・\s*/, ""))
-    .slice(0, 6);
+    .slice(0, 8);
   const boldMatch = text.match(/\*\*([^*]+)\*\*/);
   if (boldMatch && boldMatch[1]) {
     const kw = boldMatch[1].trim();
     if (kw.length >= 2 && kw.length <= 20 && !bullets.includes(kw)) {
-      return [kw, ...bullets].slice(0, 6);
+      return [kw, ...bullets].slice(0, 8);
     }
   }
   return bullets;
