@@ -2582,7 +2582,13 @@ function replaceSummaryBlock(text, header, block) {
   if (!text) return text;
   const lines = text.split("\n");
   const startIndex = lines.findIndex((line) => line.startsWith(header));
-  if (startIndex === -1) return text;
+  if (startIndex === -1) {
+    const altHeader = "✅ 今すぐやること（これだけでOK）";
+    if (header === "✅ 今すぐやること" && lines.some((l) => l.startsWith(altHeader))) {
+      return replaceSummaryBlock(text, altHeader, block);
+    }
+    return text;
+  }
   const nextIndex = lines.findIndex((line, idx) => {
     if (idx <= startIndex) return false;
     return /^(🟢|🟡|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(line);
@@ -2884,7 +2890,7 @@ function buildImmediateActionsBlock(level, state, historyText = "", research = n
     context,
     research?.evidence || {}
   );
-  const category = resolveQuestionCategoryFromState(state);
+  const category = resolveLockedQuestionCategory(state, historyText || "");
   if (level === "🟡" && (category === "PAIN" || category === "INFECTION")) {
     const rest = finalActions.filter(
       (a) => String(a?.title || "").trim() !== PAIN_INFECTION_YELLOW_FIRST_ACTION.title
@@ -3548,89 +3554,156 @@ function patchSnapshotField(snapshot, field, value) {
   return freezeJudgmentSnapshot(next);
 }
 
+function formatDurationForScript(duration) {
+  if (!duration) return "";
+  const d = String(duration).trim();
+  if (/から/.test(d)) return d;
+  const dayMatch = d.match(/(\d+)\s*日/);
+  if (dayMatch) return `${dayMatch[1]}日前から`;
+  if (/数日/.test(d)) return "数日前から";
+  if (/昨日|一昨日/.test(d)) return d;
+  return `${d}から`;
+}
+
+function formatSeverityForScript(severity) {
+  if (!severity) return "";
+  const s = String(severity).trim();
+  if (/中程度|中くらい|中等度|\d+\/10/.test(s)) return "中くらい";
+  if (/強い|かなり|ひどい|高め/.test(s)) return "かなりつらい";
+  if (/軽い|弱い|軽め/.test(s)) return "軽め";
+  return s;
+}
+
 function buildCommunicationScript(state, destinationName, decisionType) {
   const snapshot = state?.judgmentSnapshot || {};
-  const facts = [];
-  if (snapshot.main_symptom) facts.push(`${snapshot.main_symptom}`);
-  if (snapshot.severity) facts.push(`つらさは${snapshot.severity}`);
-  if (snapshot.duration) facts.push(`${snapshot.duration}から続いています`);
-  const factsSentence = facts.length > 0 ? `症状は${facts.join("、")}。` : "症状について相談したいです。";
+  const symptom = snapshot.main_symptom || "症状";
+  const durationRaw = snapshot.duration || "";
+  const severityRaw = snapshot.severity || "";
+  const durationJp = formatDurationForScript(durationRaw);
+  const severityJp = formatSeverityForScript(severityRaw);
+
+  const reassurance = "今の症状なら、病院で直接確認してもらうのが安心につながります。";
+  const intro = "受付でそのまま使える言い方を用意しました。";
+
+  let jpLine1 = "";
+  if (durationRaw && severityRaw && durationJp) {
+    jpLine1 = `${durationJp}${symptom}が続いていて、つらさは${severityJp}です。`;
+  } else if (severityRaw && symptom) {
+    jpLine1 = `${symptom}が続いていて、つらさは${severityJp}です。`;
+  } else if (symptom) {
+    jpLine1 = `${symptom}について相談したいです。`;
+  } else {
+    jpLine1 = "症状について相談したいです。";
+  }
+
   const jp = [
-    `こんにちは。${destinationName}で症状の相談をしたくて来ました。`,
-    factsSentence,
-    "今の状態を見てもらいたいです。",
+    "こんにちは。",
+    jpLine1,
+    "念のため、今の状態を診ていただきたいです。",
   ].join("\n");
+
+  let durationEn = "";
+  if (durationRaw) {
+    const m = durationRaw.match(/(\d+)\s*日/);
+    durationEn = m ? `about ${m[1]} days` : /数日/.test(durationRaw) ? "a few days" : durationRaw;
+  }
+  const severityEn = /中程度|中くらい|中等度|\d+\/10/.test(severityRaw)
+    ? "moderate"
+    : /強い|かなり|高め/.test(severityRaw)
+      ? "quite severe"
+      : /軽い|軽め/.test(severityRaw)
+        ? "mild"
+        : severityRaw || "moderate";
+  let enLine1 = "";
+  if (durationRaw && severityRaw && durationEn) {
+    enLine1 = `I've had ${symptom} for ${durationEn}. The pain is ${severityEn}.`;
+  } else if (durationRaw && severityRaw) {
+    enLine1 = `I have ${symptom}. The pain is ${severityEn}.`;
+  } else if (symptom) {
+    enLine1 = `I'd like to consult about ${symptom}.`;
+  } else {
+    enLine1 = "I want to consult about my symptoms.";
+  }
+
   const en = [
-    `Hello. I'd like to consult about my symptoms at ${destinationName}.`,
-    facts.length > 0 ? `My symptoms are: ${facts.join(", ")}.` : "I want to consult about my symptoms.",
-    "I'd like you to check my current condition.",
+    "Hello.",
+    enLine1,
+    "I'd like to have my condition checked, just to be safe.",
   ].join("\n");
-  const label = decisionType === "A_HOSPITAL" ? "病院" : "薬局";
-  return `【日本語】\n${jp}\n\n【English】\n${en}\n\n(${label}向け)`;
+
+  const smartphoneLine = "そのままスマホを見せても大丈夫です。";
+  const nextQuestion = `診察までの間にできることも、今ここで整理できます。${FOLLOW_UP_SUFFIX}`;
+
+  return [
+    reassurance,
+    intro,
+    "",
+    "【日本語】",
+    jp,
+    "",
+    "【English】",
+    en,
+    "",
+    smartphoneLine,
+    nextQuestion,
+  ].join("\n");
 }
 
 function buildImmediateActionsWithReasons(state, decisionType) {
+  const snapshot = state?.judgmentSnapshot || {};
   if (decisionType === "A_HOSPITAL") {
     return [
-      "・今の症状の要点をメモする：短く伝えられると受付がスムーズになります。",
-      "・無理な移動は避ける：体力を温存した方が負担が少ないです。",
-      "・水分を少しずつとる：喉や体の負担が軽くなります。",
+      "診察までの間に、できることを簡単にまとめます。",
+      "",
+      "・体温を測る",
+      "　→ 数字があると説明が早くなります",
+      "",
+      "・マスクを用意する",
+      "　→ 感染症の対策はしておきましょう",
+      "",
+      "・無理に動き回らない",
+      "　→ 体力を残しておきましょう",
+      "",
+      "・水分を少しずつとる",
+      "　→ 体の負担を減らせます",
     ].join("\n");
   }
-  return [
-    "・症状の要点をそのまま伝える：相談が短時間でまとまります。",
-    "・薬名は例として確認する：体質に合うか相談しやすくなります。",
-    "・今の状態を無理なく保つ：体力の消耗を抑えられます。",
-  ].join("\n");
+  return buildWatchfulActions(state);
 }
 
 function buildNextFlow(decisionType) {
   if (decisionType === "A_HOSPITAL") {
     return [
-      "今すぐ：病院へ連絡または受付へ行く。",
-      "今日中：症状の要点を伝えて診てもらう。",
-      "その後：指示があればその内容に沿って動く。",
+      "今は、病院に向かう準備を優先してください。",
+      "迷ったら、この画面をそのまま見せて大丈夫です。",
     ].join("\n");
   }
-  return [
-    "今すぐ：薬局で症状を相談する。",
-    "今日中：提案された範囲で様子を見る。",
-    "数日以内：変化がなければ受診を検討する。",
-  ].join("\n");
+  return "";
 }
 
+const FOLLOW_UP_SUFFIX = "\n\n他にも気になることがあればなんでも言ってください";
+
 function buildFollowUpQuestion1(destinationName) {
-  return `もしよろしければ、${destinationName}でどう伝えればいいか、一緒に考えましょうか？`;
+  return `もしよろしければ、${destinationName}でどう伝えればいいか、一緒に考えましょうか？${FOLLOW_UP_SUFFIX}`;
 }
 
 function buildWatchfulActions(state) {
   const snapshot = state?.judgmentSnapshot || {};
-  const painLevel = snapshot.severity || "不明";
   const mobility = state?.slotAnswers?.daily_impact || "普通に動ける";
-  const historyText = [snapshot.main_symptom, ...(snapshot.user_original_phrases || [])].join(" ");
-  const category = detectSymptomCategory(historyText || Object.values(state?.slotAnswers || {}).join(" "));
-  const symptomLine =
-    category === "stomach"
-      ? "お腹の張りが主症状のため、消化管への刺激を避ける目的"
-      : category === "head"
-        ? "頭の重さや痛みが主症状のため、刺激を避ける目的"
-        : category === "throat"
-          ? "喉の違和感が主症状のため、刺激を避ける目的"
-          : "体の違和感が主症状のため、刺激を避ける目的";
+  const symptom = snapshot.main_symptom || "症状";
+  const reason1 = `「${mobility}」な状態なので、悪化させないことが最優先です`;
+  const reason3 = `「${symptom}が急に強くなる」などがあれば、その時に判断できます`;
   return [
-    "今の情報を踏まえると、以下が現実的です。",
+    "今の状態なら、やることは多くありません。",
     "",
-    "・無理に動かず、安静にする",
-    `　→ 痛みが「${painLevel}」で「${mobility}」なため、体への負荷を増やさない方がよい`,
+    "・今日は無理をしない",
+    `　→ ${reason1}`,
     "",
     "・水分を少しずつとる",
-    "　→ 1回100〜150mlを目安に、1〜2時間おきに補給するため",
+    "　→ 体を回復モードに保ちやすくなります",
     "",
-    "・食事や刺激物は控える",
-    `　→ ${symptomLine}`,
-    "",
-    "・症状の変化をメモしておく",
-    "　→ 受診時に「いつ・どう変わったか」を正確に伝えやすくなる",
+    "・変化があれば気づけるようにしておく",
+    `　→ ${reason3}`,
   ].join("\n");
 }
 
@@ -3674,7 +3747,6 @@ function handleFollowUpFlow(message, state) {
       ? state?.hospitalRecommendation?.name
       : state?.pharmacyRecommendation?.name);
   const destinationName = formatDestinationName(rawDestinationName, decisionType);
-  const q2 = "今できることを、理由と一緒に整理しますか？";
 
   // 最低限の行動生成に必要な情報が不足している場合のみ、1問だけ確認する
   if (state.followUpSnapshotPendingField) {
@@ -3694,17 +3766,17 @@ function handleFollowUpFlow(message, state) {
     state.followUpSnapshotResume = null;
     if (resume === "watchful_actions") {
       state.followUpPhase = "closed";
-      return { message: `${buildWatchfulActions(state)}\n\n${buildClosingMessage()}` };
+      return { message: buildWatchfulActions(state) };
     }
     if (resume === "communication_script") {
       state.followUpStep = 2;
       const script = buildCommunicationScript(state, destinationName, decisionType);
-      return { message: `${script}\n\n${q2}` };
+      return { message: script };
     }
   }
 
   if (decisionType === "C_WATCHFUL_WAITING") {
-    const qWatchful = "今できることを、理由と一緒に整理しますか？";
+    const qWatchful = `今できることを、理由と一緒に整理しますか？${FOLLOW_UP_SUFFIX}`;
     if (state.followUpStep <= 1) {
       if (isAffirmative(trimmed)) {
         const missing = getMissingFieldForFollowUp(state.judgmentSnapshot);
@@ -3714,7 +3786,7 @@ function handleFollowUpFlow(message, state) {
           return { message: missing.question };
         }
         state.followUpPhase = "closed";
-        return { message: `${buildWatchfulActions(state)}\n\n${buildClosingMessage()}` };
+        return { message: buildWatchfulActions(state) };
       }
       if (isDecline(trimmed)) {
         state.followUpPhase = "closed";
@@ -3727,7 +3799,7 @@ function handleFollowUpFlow(message, state) {
   }
 
   const q1 = buildFollowUpQuestion1(destinationName);
-  const q3 = "今後の目安も含めて整理しますか？";
+  const q2Hospital = `診察までの間にできることも、今ここで整理できます。${FOLLOW_UP_SUFFIX}`;
 
   if (state.followUpPhase === "closed") {
     return { message: buildClosingMessage() };
@@ -3743,7 +3815,7 @@ function handleFollowUpFlow(message, state) {
       }
       state.followUpStep = 2;
       const script = buildCommunicationScript(state, destinationName, decisionType);
-      return { message: `${script}\n\n${q2}` };
+      return { message: script };
     }
     if (isDecline(trimmed)) {
       state.followUpPhase = "closed";
@@ -3754,28 +3826,16 @@ function handleFollowUpFlow(message, state) {
 
   if (state.followUpStep === 2) {
     if (isAffirmative(trimmed)) {
-      state.followUpStep = 3;
+      state.followUpPhase = "closed";
       const actions = buildImmediateActionsWithReasons(state, decisionType);
-      return { message: `${actions}\n\n${q3}` };
-    }
-    if (isDecline(trimmed)) {
-      state.followUpPhase = "closed";
-      return { message: buildClosingMessage() };
-    }
-    return { message: q2 };
-  }
-
-  if (state.followUpStep === 3) {
-    if (isAffirmative(trimmed)) {
-      state.followUpPhase = "closed";
       const flow = buildNextFlow(decisionType);
-      return { message: `${flow}\n\n${buildClosingMessage()}` };
+      return { message: `${actions}\n\n${flow}` };
     }
     if (isDecline(trimmed)) {
       state.followUpPhase = "closed";
       return { message: buildClosingMessage() };
     }
-    return { message: q3 };
+    return { message: q2Hospital };
   }
 
   return { message: buildClosingMessage() };
@@ -4432,6 +4492,22 @@ function detectSymptomCategory(text) {
   return "other";
 }
 
+const FIRST_QUESTION_SAFETY_TEMPLATES = [
+  (symptom) => `慌てなくて大丈夫です。多くの${symptom}は命に関わるものではありません。一緒に安全を固めていきましょう。`,
+  (symptom) => `まず安心してください。${symptom}のほとんどは深刻なものではありません。まず落ち着いて、ひとつずつ安全を確認していきましょう。`,
+];
+
+function toMainSymptomLabelForSafety(text) {
+  const s = String(text || "").trim();
+  if (/(頭が痛|頭痛|こめかみ|後頭部|頭が重)/.test(s)) return "頭痛";
+  if (/(お腹が痛|腹痛|胃痛|みぞおち|下腹|下痢|便秘|吐き気|嘔吐)/.test(s)) return "腹痛";
+  if (/(喉が痛|のどが痛|喉の痛み|咽頭痛|咳|せき)/.test(s)) return "喉の痛み";
+  if (/(唇が痛|唇|口唇|ヒリヒリ|乾燥)/.test(s)) return "唇の痛み";
+  if (/(発熱|熱|だるい|寒気)/.test(s)) return "体調不良";
+  if (/(かゆい|赤い|発疹|水ぶくれ)/.test(s)) return "皮膚症状";
+  return "症状";
+}
+
 const FIXED_QUESTIONS = {
   pain_score: {
     q: "今の痛みを、1から10であらわすと何点ですか？",
@@ -4711,11 +4787,14 @@ function getAllowedIntroRolesBySlot(slotKey) {
 }
 
 function buildIntroTemplateIds(state, questionIndex, slotKey) {
+  if (questionIndex === 0 && slotKey === "pain_score") {
+    return [];
+  }
   const used = new Set(state.introTemplateUsedIds || []);
   let introIds = [];
   const progressUsedBefore = (state?.introRoleUsage?.PROGRESS || 0) > 0;
 
-  if (questionIndex === 0 || slotKey === "pain_score") {
+  if (slotKey === "pain_score") {
     const empathyId = pickUniqueTemplateId(EMPATHY_OPEN_IDS, used);
     if (empathyId) {
       introIds.push(empathyId);
@@ -7826,14 +7905,18 @@ app.post("/api/chat", async (req, res) => {
     }
 
     if (!process.env.OPENAI_API_KEY) {
-      const fallback = buildFixedQuestion("pain_score", true);
+      const fallback = buildFixedQuestion("pain_score", false);
+      const symptomLabel = toMainSymptomLabelForSafety(message || "");
+      const safetyTemplate = FIRST_QUESTION_SAFETY_TEMPLATES[Math.floor(Math.random() * FIRST_QUESTION_SAFETY_TEMPLATES.length)];
+      const safetyLine = safetyTemplate(symptomLabel);
+      const fullResponse = `${safetyLine}\n\n${fallback.question}`;
       return res.status(200).json({
         conversationId,
-        message: fallback.question,
-        response: fallback.question,
+        message: fullResponse,
+        response: fullResponse,
         judgeMeta: { judgement: null, confidence: 0, ratio: null, shouldJudge: false, slotsFilledCount: 0, decisionAllowed: false, questionCount: 0, summaryLine: null, questionType: null, rawScore: null, painScoreRatio: null },
         triage_state: buildTriageState(false, null, 0),
-        questionPayload: { introTemplateIds: buildIntroTemplateIds(initConversationState({ conversationId }), 0, "pain_score"), question: fallback.question },
+        questionPayload: { introTemplateIds: [], question: fallback.question, safetyLine },
         normalizedAnswer: null,
       });
     }
@@ -7890,16 +7973,20 @@ app.post("/api/chat", async (req, res) => {
       const historyText = message;
       const category = resolveLockedQuestionCategory(state, historyText);
       applyCategoryQuestionOverride(fixed, firstSlot, category, false);
-      const introTemplateIds = buildIntroTemplateIds(state, state.questionCount || 0, firstSlot);
+      const symptomLabel = toMainSymptomLabelForSafety(message);
+      const safetyTemplate = FIRST_QUESTION_SAFETY_TEMPLATES[Math.floor(Math.random() * FIRST_QUESTION_SAFETY_TEMPLATES.length)];
+      const safetyLine = safetyTemplate(symptomLabel);
+      const fullResponse = `${safetyLine}\n\n${fixed.question}`;
+      const introTemplateIds = [];
       conversationState[conversationId].lastOptions = fixed.options;
       conversationState[conversationId].lastQuestionType = fixed.type;
       conversationState[conversationId].expectsPainScore = firstSlot === "pain_score";
       conversationState[conversationId].askedSlots[firstSlot] = true;
-      conversationHistory[conversationId].push({ role: "assistant", content: fixed.question });
+      conversationHistory[conversationId].push({ role: "assistant", content: fullResponse });
       const slotsFilledFirst = countFilledSlots(state.slotFilled, state);
       return res.json({
-        message: fixed.question,
-        response: fixed.question,
+        message: fullResponse,
+        response: fullResponse,
         judgeMeta: {
           judgement: "🟢",
           confidence: 0,
@@ -7914,7 +8001,7 @@ app.post("/api/chat", async (req, res) => {
           painScoreRatio: null,
         },
         triage_state: buildTriageState(false, null, slotsFilledFirst),
-        questionPayload: { introTemplateIds, question: fixed.question },
+        questionPayload: { introTemplateIds, question: fixed.question, safetyLine },
         normalizedAnswer: null,
         locationPromptMessage: null,
         locationRePromptMessage: null,
@@ -8631,15 +8718,12 @@ app.post("/api/chat", async (req, res) => {
       );
       aiResponse = stripHospitalMapLinks(aiResponse);
       const decisionType =
-        level === "🔴"
-          ? "A_HOSPITAL"
-          : level === "🟡"
-            ? "B_PHARMACY"
-            : "C_WATCHFUL_WAITING";
+        level === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING";
       conversationState[conversationId].summaryShown = true;
       conversationState[conversationId].hasSummaryBlockGenerated = true;
       conversationState[conversationId].decisionType = decisionType;
-      conversationState[conversationId].decisionLevel = level;
+      conversationState[conversationId].decisionLevel =
+        level === "🔴" ? "🔴" : "🟢";
       if (!conversationState[conversationId].judgmentSnapshot) {
         conversationState[conversationId].judgmentSnapshot = buildJudgmentSnapshot(
           conversationState[conversationId],
@@ -8652,17 +8736,10 @@ app.post("/api/chat", async (req, res) => {
         conversationState[conversationId].decisionRatio = computed.ratio;
       }
       conversationState[conversationId].finalQuestionPending = false;
-      if (decisionType === "C_WATCHFUL_WAITING") {
+      if (decisionType === "A_HOSPITAL") {
         conversationState[conversationId].followUpPhase = "questioning";
         conversationState[conversationId].followUpStep = 1;
-        followUpQuestion = "今できることを、理由と一緒に整理しますか？";
-      } else {
-        conversationState[conversationId].followUpPhase = "questioning";
-        conversationState[conversationId].followUpStep = 1;
-        const destinationName =
-          decisionType === "A_HOSPITAL"
-            ? conversationState[conversationId].hospitalRecommendation?.name
-            : conversationState[conversationId].pharmacyRecommendation?.name;
+        const destinationName = conversationState[conversationId].hospitalRecommendation?.name;
         conversationState[conversationId].followUpDestinationName = formatDestinationName(
           destinationName,
           decisionType
@@ -8670,6 +8747,10 @@ app.post("/api/chat", async (req, res) => {
         followUpQuestion = buildFollowUpQuestion1(
           conversationState[conversationId].followUpDestinationName
         );
+      } else {
+        conversationState[conversationId].followUpPhase = "questioning";
+        conversationState[conversationId].followUpStep = 1;
+        followUpQuestion = `今できることを、理由と一緒に整理しますか？${FOLLOW_UP_SUFFIX}`;
       }
     }
 

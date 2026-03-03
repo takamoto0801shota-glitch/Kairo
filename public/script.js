@@ -76,13 +76,21 @@ const LOCATION_RETRY_KEY = "kairo_location_retry_count";
 const LOCATION_SNAPSHOT_KEY = "kairo_location_snapshot";
 
 function renderQuestionPayload(payload) {
-  if (!payload || !payload.question || !Array.isArray(payload.introTemplateIds)) {
+  if (!payload || !payload.question) {
     return payload?.question || "";
   }
-  const introLines = payload.introTemplateIds
-    .map((id) => INTRO_TEMPLATE_TEXTS[id])
-    .filter(Boolean);
-  return introLines.concat(payload.question).join("\n");
+  const parts = [];
+  if (payload.safetyLine) {
+    parts.push(payload.safetyLine);
+  }
+  if (Array.isArray(payload.introTemplateIds) && payload.introTemplateIds.length > 0) {
+    const introLines = payload.introTemplateIds
+      .map((id) => INTRO_TEMPLATE_TEXTS[id])
+      .filter(Boolean);
+    parts.push(...introLines);
+  }
+  parts.push(payload.question);
+  return parts.join("\n");
 }
 
 function splitHeaderIconAndName(headerText = "") {
