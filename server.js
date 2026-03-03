@@ -3385,6 +3385,18 @@ function isDecline(text) {
   return /(今はいい|大丈夫|結構です|いりません|不要|いいえ|やめて)/.test((text || "").trim());
 }
 
+function isRestChoice(text) {
+  const t = (text || "").trim();
+  return /^(休む|休みます|少し休む|休みたい|そっち|前者|1|一つ目|左|上の方)/.test(t) ||
+    /休む|休みたい|ゆっくりする/.test(t);
+}
+
+function isDetailChoice(text) {
+  const t = (text || "").trim();
+  return /^(詳しく|確認|もう少し|詳しく確認|そっち|後者|2|二つ目|右|下の方)/.test(t) ||
+    /詳しく|確認したい|確認します|教えて/.test(t);
+}
+
 function buildClosingMessage() {
   return [
     "わかりました。",
@@ -3707,6 +3719,74 @@ function buildWatchfulActions(state) {
   ].join("\n");
 }
 
+function buildWatchfulRestResponse() {
+  return [
+    "わかりました。",
+    "今は体を回復モードに入れる時間です。",
+    "数時間ゆっくりしてみてください。",
+    "",
+    "変化があれば、いつでもここに戻れます。",
+  ].join("\n");
+}
+
+function buildWatchfulCheckboxQuestion(state) {
+  const snapshot = state?.judgmentSnapshot || {};
+  const symptom = snapshot.main_symptom || "頭痛";
+  const item3 = `${symptom}が強くなったら気づけるようにする`;
+  return [
+    "念のため確認しますね。",
+    "",
+    "☐ 今日は無理をしない",
+    "☐ 水分を少しずつとる",
+    `☐ ${item3}`,
+    "",
+    `この3つ、できそうですか？${FOLLOW_UP_SUFFIX}`,
+  ].join("\n");
+}
+
+function buildWatchfulAffirmation() {
+  return [
+    "わかりました。",
+    "今はそれで十分です。",
+    "体を回復モードに入れることを優先してください。",
+    "",
+    "変化があれば、いつでもここで確認できます。",
+  ].join("\n");
+}
+
+function buildWatchfulDifficultyOptions() {
+  return [
+    "どれが難しそうですか？",
+    "",
+    "・無理せず休むのが難しい",
+    "・水分をとるのがつらい",
+    "・変化を見ておくのが不安",
+  ].join("\n") + FOLLOW_UP_SUFFIX;
+}
+
+function buildWatchfulIndividualResponse(choice) {
+  const t = (choice || "").trim();
+  if (/水分|とる|つらい/.test(t)) {
+    return [
+      "一気に飲まなくて大丈夫です。",
+      "ひと口ずつでも十分です。",
+    ].join("\n");
+  }
+  if (/無理|休む|難しい/.test(t)) {
+    return [
+      "無理に休もうとしなくて大丈夫です。",
+      "できる範囲で、体を楽にする姿勢をとるだけでも十分です。",
+    ].join("\n");
+  }
+  if (/変化|見ておく|不安/.test(t)) {
+    return [
+      "いまは気にしなくて大丈夫です。",
+      "「何かおかしい」と感じたときだけ、ここに戻ってきてください。",
+    ].join("\n");
+  }
+  return buildWatchfulAffirmation();
+}
+
 function formatDestinationName(name, decisionType) {
   if (!name) return decisionType === "A_HOSPITAL" ? "病院" : "薬局";
   if (decisionType === "A_HOSPITAL") {
@@ -3764,9 +3844,9 @@ function handleFollowUpFlow(message, state) {
     const resume = state.followUpSnapshotResume;
     state.followUpSnapshotPendingField = null;
     state.followUpSnapshotResume = null;
-    if (resume === "watchful_actions") {
-      state.followUpPhase = "closed";
-      return { message: buildWatchfulActions(state) };
+    if (resume === "watchful_actions" || resume === "watchful_checkbox") {
+      state.followUpStep = 2;
+      return { message: buildWatchfulCheckboxQuestion(state) };
     }
     if (resume === "communication_script") {
       state.followUpStep = 2;
@@ -3776,17 +3856,23 @@ function handleFollowUpFlow(message, state) {
   }
 
   if (decisionType === "C_WATCHFUL_WAITING") {
-    const qWatchful = `今できることを、理由と一緒に整理しますか？${FOLLOW_UP_SUFFIX}`;
+    const qWatchful = `このまま少し休みますか？\nそれとも、もう少し詳しく確認しますか？${FOLLOW_UP_SUFFIX}`;
+    const qCheckbox = buildWatchfulCheckboxQuestion(state);
+
     if (state.followUpStep <= 1) {
-      if (isAffirmative(trimmed)) {
+      if (isRestChoice(trimmed)) {
+        state.followUpPhase = "closed";
+        return { message: buildWatchfulRestResponse() };
+      }
+      if (isDetailChoice(trimmed)) {
         const missing = getMissingFieldForFollowUp(state.judgmentSnapshot);
         if (missing) {
           state.followUpSnapshotPendingField = missing.field;
-          state.followUpSnapshotResume = "watchful_actions";
+          state.followUpSnapshotResume = "watchful_checkbox";
           return { message: missing.question };
         }
-        state.followUpPhase = "closed";
-        return { message: buildWatchfulActions(state) };
+        state.followUpStep = 2;
+        return { message: qCheckbox };
       }
       if (isDecline(trimmed)) {
         state.followUpPhase = "closed";
@@ -3794,6 +3880,24 @@ function handleFollowUpFlow(message, state) {
       }
       return { message: qWatchful };
     }
+
+    if (state.followUpStep === 2) {
+      if (isAffirmative(trimmed)) {
+        state.followUpPhase = "closed";
+        return { message: buildWatchfulAffirmation() };
+      }
+      if (isDecline(trimmed)) {
+        state.followUpStep = 3;
+        return { message: buildWatchfulDifficultyOptions() };
+      }
+      return { message: qCheckbox };
+    }
+
+    if (state.followUpStep === 3) {
+      state.followUpPhase = "closed";
+      return { message: buildWatchfulIndividualResponse(trimmed) };
+    }
+
     state.followUpPhase = "closed";
     return { message: buildClosingMessage() };
   }
@@ -4493,8 +4597,8 @@ function detectSymptomCategory(text) {
 }
 
 const FIRST_QUESTION_SAFETY_TEMPLATES = [
-  (symptom) => `慌てなくて大丈夫です。多くの${symptom}は命に関わるものではありません。一緒に安全を固めていきましょう。`,
-  (symptom) => `まず安心してください。${symptom}のほとんどは深刻なものではありません。まず落ち着いて、ひとつずつ安全を確認していきましょう。`,
+  (symptom) => `慌てなくて大丈夫です。\n多くの${symptom}は命に関わるものではありません。\n一緒に安全を固めていきましょう。`,
+  (symptom) => `まず安心してください。\n${symptom}のほとんどは深刻なものではありません。\nまず落ち着いて、ひとつずつ安全を確認していきましょう。`,
 ];
 
 function toMainSymptomLabelForSafety(text) {
@@ -4788,6 +4892,12 @@ function getAllowedIntroRolesBySlot(slotKey) {
 
 function buildIntroTemplateIds(state, questionIndex, slotKey) {
   if (questionIndex === 0 && slotKey === "pain_score") {
+    return [];
+  }
+  // 最後の質問：何があってもPROGRESS／FOCUS禁止。質問文のみ。
+  const requiredCount = getRequiredSlotCount(state);
+  const filledCount = countFilledSlots(state?.slotFilled, state);
+  if (requiredCount > 0 && requiredCount - filledCount === 1) {
     return [];
   }
   const used = new Set(state.introTemplateUsedIds || []);
@@ -8750,7 +8860,7 @@ app.post("/api/chat", async (req, res) => {
       } else {
         conversationState[conversationId].followUpPhase = "questioning";
         conversationState[conversationId].followUpStep = 1;
-        followUpQuestion = `今できることを、理由と一緒に整理しますか？${FOLLOW_UP_SUFFIX}`;
+        followUpQuestion = `このまま少し休みますか？\nそれとも、もう少し詳しく確認しますか？${FOLLOW_UP_SUFFIX}`;
       }
     }
 
