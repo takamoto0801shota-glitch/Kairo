@@ -2427,6 +2427,11 @@ function buildRedCushionLine(historyText) {
   return RED_GP_JUDGMENT_SENTENCES[Math.floor(Math.random() * RED_GP_JUDGMENT_SENTENCES.length)];
 }
 
+const RED_PAIN_INFECTION_SAFE_WAIT_FIRST = {
+  title: "今すぐ受診が難しい場合は、今はベッドに入り、横になって数時間ゆっくり過ごしてください",
+  reason: "体を休息モードに切り替えることで、自然な回復の流れが働きやすくなります。",
+};
+
 function buildRedImmediateActionsFallback() {
   // 1件目ですでに受診を推奨しているため、2件目以降では受診を勧める内容を含めない
   return [
@@ -2446,11 +2451,22 @@ const RED_MODAL_CLOSING_LINE =
 
 function buildRedModalContent(state, historyText = "") {
   const cushion = buildRedCushionLine(historyText);
+  const category = resolveQuestionCategoryFromState(state);
   const fallbackActions = buildRedImmediateActionsFallback();
-  const safeWaitItems = fallbackActions.slice(0, 2).flatMap((a) => [
-    `・${a.title}`,
-    `→ ${a.reason}`,
-  ]);
+  let safeWaitItems = [];
+  if (category === "PAIN" || category === "INFECTION") {
+    safeWaitItems = [
+      `・${RED_PAIN_INFECTION_SAFE_WAIT_FIRST.title}`,
+      `→ ${RED_PAIN_INFECTION_SAFE_WAIT_FIRST.reason}`,
+    ];
+  }
+  const fallbackLimit = safeWaitItems.length > 0 ? 1 : 2;
+  safeWaitItems = safeWaitItems.concat(
+    fallbackActions.slice(0, fallbackLimit).flatMap((a) => [
+      `・${a.title}`,
+      `→ ${a.reason}`,
+    ])
+  );
   const parts = [
     cushion,
     "",
@@ -2475,11 +2491,22 @@ function buildRedImmediateActionsBlock(state, historyText) {
     "・本日中に医療機関へ連絡する",
     "→ 早い段階で確認することで、重大な問題でないことが分かるケースも多くあります。",
   ];
+  const category = resolveQuestionCategoryFromState(state);
   const fallbackActions = buildRedImmediateActionsFallback();
-  const extra = fallbackActions.slice(0, 2).flatMap((a) => [
-    `・${a.title}`,
-    `→ ${a.reason}`,
-  ]);
+  let extra = [];
+  if (category === "PAIN" || category === "INFECTION") {
+    extra = [
+      `・${RED_PAIN_INFECTION_SAFE_WAIT_FIRST.title}`,
+      `→ ${RED_PAIN_INFECTION_SAFE_WAIT_FIRST.reason}`,
+    ];
+  }
+  const extraLimit = extra.length > 0 ? 1 : 2;
+  extra = extra.concat(
+    fallbackActions.slice(0, extraLimit).flatMap((a) => [
+      `・${a.title}`,
+      `→ ${a.reason}`,
+    ])
+  );
   return [
     "✅ 今すぐやること",
     cushion,
@@ -3378,23 +3405,34 @@ function enforceSummaryIntroTemplate(text) {
 }
 
 function isAffirmative(text) {
-  return /^(はい|お願いします|お願いします|いいですね|やります|頼みます)/.test((text || "").trim());
+  const t = (text || "").trim();
+  return /^(はい|うん|ええ|お願いします|いいですね|やります|頼みます|できます|できそうです|いいです|大丈夫です|わかりました|OK|ok)$/i.test(t) ||
+    /^(はい|うん|ええ)[。、！]?\s*$/.test(t) ||
+    /^できます?[。、]?$/.test(t);
 }
 
 function isDecline(text) {
-  return /(今はいい|大丈夫|結構です|いりません|不要|いいえ|やめて)/.test((text || "").trim());
+  const t = (text || "").trim();
+  return /^(今はいい|大丈夫|結構です|いりません|不要|いいえ|やめて)/.test(t) ||
+    /(今はいい|大丈夫です|結構です|いりません|不要|いいえ|やめて)/.test(t);
 }
 
 function isRestChoice(text) {
   const t = (text || "").trim();
-  return /^(休む|休みます|少し休む|休みたい|そっち|前者|1|一つ目|左|上の方)/.test(t) ||
-    /休む|休みたい|ゆっくりする/.test(t);
+  return (
+    /^(休む|休みます|少し休みます|休みたい|休みたいです|そっち|前者|1|一つ目|左|上の方|休憩)/.test(t) ||
+    /休む|休みたい|ゆっくりする|ゆっくりします|休みます/.test(t) ||
+    /^(うん|はい)[、。]?\s*(休む|休みます)/.test(t)
+  );
 }
 
 function isDetailChoice(text) {
   const t = (text || "").trim();
-  return /^(詳しく|確認|もう少し|詳しく確認|そっち|後者|2|二つ目|右|下の方)/.test(t) ||
-    /詳しく|確認したい|確認します|教えて/.test(t);
+  return (
+    /^(詳しく|確認|もう少し|詳しく確認|詳しく確認します|そっち|後者|2|二つ目|右|下の方)/.test(t) ||
+    /詳しく|確認したい|確認します|教えて|もう少し/.test(t) ||
+    /^(うん|はい)[、。]?\s*(詳しく|確認)/.test(t)
+  );
 }
 
 function buildClosingMessage() {
@@ -3517,9 +3555,9 @@ function buildJudgmentSnapshot(state, history = [], decisionType) {
   }
 
   return freezeJudgmentSnapshot({
-    main_symptom: mainSymptom,
-    duration,
-    severity,
+    main_symptom: mainSymptom || "症状",
+    duration: duration || "数日",
+    severity: severity || "中くらい",
     red_flags: redFlags.slice(0, 3),
     risk_factors: riskFactors.slice(0, 4),
     user_original_phrases: mergedPhrases.slice(0, 10),
@@ -3673,11 +3711,8 @@ function buildImmediateActionsWithReasons(state, decisionType) {
       "・マスクを用意する",
       "　→ 感染症の対策はしておきましょう",
       "",
-      "・無理に動き回らない",
-      "　→ 体力を残しておきましょう",
-      "",
-      "・水分を少しずつとる",
-      "　→ 体の負担を減らせます",
+      "今は、病院に向かう準備を優先してください。",
+      "迷ったら、この画面をそのまま見せて大丈夫です。",
     ].join("\n");
   }
   return buildWatchfulActions(state);
@@ -3685,10 +3720,7 @@ function buildImmediateActionsWithReasons(state, decisionType) {
 
 function buildNextFlow(decisionType) {
   if (decisionType === "A_HOSPITAL") {
-    return [
-      "今は、病院に向かう準備を優先してください。",
-      "迷ったら、この画面をそのまま見せて大丈夫です。",
-    ].join("\n");
+    return ""; // A_HOSPITALはbuildImmediateActionsWithReasonsに含む
   }
   return "";
 }
@@ -3933,7 +3965,7 @@ function handleFollowUpFlow(message, state) {
       state.followUpPhase = "closed";
       const actions = buildImmediateActionsWithReasons(state, decisionType);
       const flow = buildNextFlow(decisionType);
-      return { message: `${actions}\n\n${flow}` };
+      return { message: flow ? `${actions}\n\n${flow}` : actions };
     }
     if (isDecline(trimmed)) {
       state.followUpPhase = "closed";
@@ -5222,7 +5254,7 @@ const PRE_SUMMARY_ADD_MORE_PHRASES = [
   "他に伝えたいことがあれば教えてください。",
 ];
 
-// 共感テンプレ（経過時間で選択）。判断文の前に必ず挿入。
+// 共感テンプレ（経過時間で選択）。判断文の前に必ず挿入。固定のみ。生成禁止。
 const EMPATHY_SASAKI_TEMPLATES = [
   "急に症状が出ると、「何か大きなことかも」と不安になりますよね。",
   "突然の変化だと、悪い方向を想像してしまいますよね。",
@@ -5248,7 +5280,7 @@ function pickEmpathyForConfirmation(state) {
   return templates[Math.floor(Math.random() * templates.length)];
 }
 
-// まとめ前確認用の判断文（緊急度別テンプレ・ランダム）
+// まとめ前確認用の判断文（緊急度別テンプレ・ランダム。固定のみ。生成禁止）
 function buildPreSummaryConfirmationJudgment(state, level) {
   const templates = {
     "🟢": [
@@ -5261,9 +5293,9 @@ function buildPreSummaryConfirmationJudgment(state, level) {
       "今のところ深刻なサインは見えていませんが、無理をせず経過を見ていくことが大切そうです。",
     ],
     "🔴": [
-      "今の症状の出方からは、念のため早めに医療機関で確認しておいた方がよさそうです。落ち着いて行動すれば大丈夫です。",
-      "強い心配をしすぎる必要はありませんが、安心のためにも今日中の受診を考えておきたい状態です。",
-      "今すぐ慌てる状況ではありませんが、このまま様子を見るよりは一度専門家に確認してもらう方が安心につながりそうです。",
+      "念のため早めに医療機関で確認しておいた方がよさそうです。落ち着いて行動すれば大丈夫です。",
+      "安心のためにも今日中の受診を考えておきたい状態です。",
+      "一度専門家に確認してもらう方が安心につながりそうです。",
     ],
   };
   const list = templates[level] || templates["🟢"];
@@ -8136,6 +8168,12 @@ app.post("/api/chat", async (req, res) => {
         response: followUpResult.message,
         judgeMeta,
         triage_state: buildTriageState(true, judgeMeta.judgement, judgeMeta.slotsFilledCount),
+        triage: {
+          judgement: judgeMeta.judgement,
+          confidence: judgeMeta.confidence,
+          ratio: judgeMeta.ratio,
+        },
+        sections: [],
         questionPayload: null,
         normalizedAnswer: state.lastNormalizedAnswer || null,
         locationPromptMessage,

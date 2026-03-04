@@ -1267,7 +1267,6 @@ async function handleUserInput() {
       } else if (!isFirstResponse) {
         const level = triageState.triage_level || (aiResponse.judgeMeta?.judgement === "🔴" ? "red" : aiResponse.judgeMeta?.judgement === "🟡" ? "yellow" : "green");
         appState.riskLevel = level === "red" ? "RED" : level === "yellow" ? "YELLOW" : "GREEN";
-        renderSummary();
       }
 
       const sections = Array.isArray(aiResponse.sections) ? aiResponse.sections.filter(Boolean) : [];
@@ -1277,6 +1276,7 @@ async function handleUserInput() {
         const interval = 800;
         sections.forEach((sectionText, idx) => {
           const timerId = setTimeout(() => {
+            if (idx === 0) renderSummary();
             renderSection(sectionText);
           }, firstDelay + idx * interval);
           appState.sectionTimers.push(timerId);
@@ -1292,6 +1292,7 @@ async function handleUserInput() {
         }
       } else {
         setTimeout(() => {
+          if (triageState.is_final && !isFirstResponse) renderSummary();
           addMessage(aiMessage);
           if (aiResponse.followUpMessage) {
             addMessage(aiResponse.followUpMessage);
