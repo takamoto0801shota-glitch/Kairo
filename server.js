@@ -3420,9 +3420,10 @@ function isDecline(text) {
 function isRestChoice(text) {
   const t = (text || "").trim();
   return (
-    /^(休む|休みます|少し休みます|休みたい|休みたいです|そっち|前者|1|一つ目|左|上の方|休憩)/.test(t) ||
+    /^(休む|休みます|少し休みます|休みたい|休みたいです|そっち|前者|1|一つ目|左|上の方|休憩)$/.test(t) ||
     /休む|休みたい|ゆっくりする|ゆっくりします|休みます/.test(t) ||
-    /^(うん|はい)[、。]?\s*(休む|休みます)/.test(t)
+    /^(うん|はい)[、。]?\s*(休む|休みます)/.test(t) ||
+    /^(はい|うん|ええ)[。、！]?\s*$/.test(t)
   );
 }
 
@@ -3910,7 +3911,7 @@ function handleFollowUpFlow(message, state) {
         state.followUpPhase = "closed";
         return { message: buildClosingMessage() };
       }
-      return { message: qWatchful };
+      return { message: "どちらにしますか？「休む」か「詳しく確認」か、どちらか教えてください。" };
     }
 
     if (state.followUpStep === 2) {
@@ -3957,7 +3958,7 @@ function handleFollowUpFlow(message, state) {
       state.followUpPhase = "closed";
       return { message: buildClosingMessage() };
     }
-    return { message: q1 };
+    return { message: "伝え方を一緒に考えますか？「はい」か「今はいいです」か、どちらか教えてください。" };
   }
 
   if (state.followUpStep === 2) {
@@ -3971,7 +3972,7 @@ function handleFollowUpFlow(message, state) {
       state.followUpPhase = "closed";
       return { message: buildClosingMessage() };
     }
-    return { message: q2Hospital };
+    return { message: "診察までの準備を整理しますか？「はい」か「今はいいです」か、どちらか教えてください。" };
   }
 
   return { message: buildClosingMessage() };

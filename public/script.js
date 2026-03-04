@@ -1292,7 +1292,7 @@ async function handleUserInput() {
         }
       } else {
         setTimeout(() => {
-          if (triageState.is_final && !isFirstResponse) renderSummary();
+          if (triageState.is_final && !isFirstResponse && sections.length > 0) renderSummary();
           addMessage(aiMessage);
           if (aiResponse.followUpMessage) {
             addMessage(aiResponse.followUpMessage);
