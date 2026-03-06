@@ -1443,6 +1443,14 @@ function applySymptomFitFilter(candidates, plan) {
 }
 
 async function fetchCarePlacesWithFallbacks(location, plan, state) {
+  if (!getPlacesApiKey()) {
+    console.warn("[Places] APIキー未設定のため検索をスキップ");
+    return [];
+  }
+  if (!location?.lat || !location?.lng) {
+    console.warn("[Places] 位置情報がないため検索をスキップ", { location });
+    return [];
+  }
   const types = ["doctor", "hospital", "health"];
   const baseKeywords = plan?.searchKeywords || ["clinic", "general practitioner", "medical clinic"];
   const country = String(state?.locationContext?.country || "").trim();
@@ -8778,6 +8786,12 @@ app.post("/api/chat", async (req, res) => {
       );
       const locationContext = conversationState[conversationId].locationContext || {};
       if (level === "🔴") {
+        const state = conversationState[conversationId];
+        console.log("[Places] 🔴 受診先検索開始", {
+          hasLocationSnapshot: !!(state?.locationSnapshot?.lat && state?.locationSnapshot?.lng),
+          hasPlacesKey: !!getPlacesApiKey(),
+          locationSnapshot: state?.locationSnapshot ? { lat: state.locationSnapshot.lat, lng: state.locationSnapshot.lng } : null,
+        });
         // 症状に合わせて受診先候補を選ぶ（歯痛→歯科、耳/鼻/喉→耳鼻科、基本はGP）
         conversationState[conversationId].clinicCandidates = await resolveCareCandidates(
           conversationState[conversationId],
@@ -8787,6 +8801,9 @@ app.post("/api/chat", async (req, res) => {
         conversationState[conversationId].hospitalCandidates = await resolveHospitalCandidates(
           conversationState[conversationId]
         );
+        const clinicLen = (conversationState[conversationId].clinicCandidates || []).length;
+        const hospLen = (conversationState[conversationId].hospitalCandidates || []).length;
+        console.log("[Places] 🔴 受診先検索結果", { clinicCandidates: clinicLen, hospitalCandidates: hospLen });
       }
       conversationState[conversationId].pharmacyCandidates = await resolvePharmacyCandidates(
         conversationState[conversationId]
