@@ -1512,13 +1512,18 @@ function formatDistanceForCare(distanceM) {
 function buildHospitalRecommendationReasons(candidate, plan) {
   const reasons = [];
   const infoText = [candidate?.name || "", candidate?.vicinity || "", ...(candidate?.types || [])].join(" ");
-  if (plan?.symptomLabel) {
+  const reviewSummary = buildCareReviewSummary(candidate, plan);
+  const reviewPoints = reviewSummary.filter((r) => r.startsWith("・"));
+  if (reviewPoints.length > 0) {
+    reasons.push(...reviewPoints);
+  }
+  if (reasons.length === 0 && plan?.symptomLabel) {
     reasons.push(`・${plan.symptomLabel}の初期相談に対応しやすい施設タイプです`);
   }
-  if (/(japanese|日本語|日系)/i.test(infoText)) {
+  if (/(japanese|日本語|日系)/i.test(infoText) && reasons.length < 3) {
     reasons.push("・日本語対応に関する記載があり、相談時の負担を下げやすい候補です");
   }
-  if (Number.isFinite(candidate?.rating)) {
+  if (Number.isFinite(candidate?.rating) && reasons.length < 3) {
     const count = Number.isFinite(candidate?.userRatingsTotal) ? `（${candidate.userRatingsTotal}件）` : "";
     reasons.push(`・Google評価は ${candidate.rating.toFixed(1)} ${count} で、利用者評価が確認できます`);
   }
@@ -1691,7 +1696,12 @@ async function resolveHospitalCandidates(state) {
     const addr = [ctx.city || ctx.area, ctx.country].filter(Boolean).join(", ") || ctx.country || "Singapore";
     if (addr) {
       const geo = await geocodeAddress(addr);
-      if (geo) location = geo;
+      if (geo) {
+        location = geo;
+        if (!state.locationSnapshot) {
+          state.locationSnapshot = { lat: geo.lat, lng: geo.lng, ts: Date.now() };
+        }
+      }
     }
   }
   if (!location?.lat || !location?.lng) return [];
@@ -1836,7 +1846,8 @@ function buildHospitalRecommendationDetail(state, locationContext, clinicCandida
   );
   const candidates = prioritizeCareCandidates(applySymptomFitFilter(merged, plan), state).slice(0, 2);
   const useHospital = (hospitalCandidates?.length || 0) > 0;
-  if (canRecommendSpecificPlaceFinal(state) && candidates.length) {
+  const hasRealCandidates = candidates.length > 0 && candidates.some((c) => c?.placeId);
+  if ((canRecommendSpecificPlaceFinal(state) || hasRealCandidates) && candidates.length) {
     return {
       name: candidates[0].name,
       mapsUrl: candidates[0].mapsUrl,
@@ -2289,7 +2300,12 @@ async function resolveCareCandidates(state, destination) {
     const addr = [city, country].filter(Boolean).join(", ") || country || "Singapore";
     if (addr) {
       const geo = await geocodeAddress(addr);
-      if (geo) location = geo;
+      if (geo) {
+        location = geo;
+        if (!state.locationSnapshot) {
+          state.locationSnapshot = { lat: geo.lat, lng: geo.lng, ts: Date.now() };
+        }
+      }
     }
   }
   if (!location?.lat || !location?.lng) return [];
