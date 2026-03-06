@@ -1443,22 +1443,23 @@ function applySymptomFitFilter(candidates, plan) {
 }
 
 async function fetchCarePlacesWithFallbacks(location, plan, state) {
-  const types = ["doctor", "hospital"];
-  const keywords = plan?.searchKeywords || ["clinic", "general practitioner", "medical clinic"];
-  const isGpsLocation = state?.locationContext?.source === "gps";
-  const radius = isGpsLocation ? 3000 : 5000;
+  const types = ["doctor", "hospital", "health"];
+  const baseKeywords = plan?.searchKeywords || ["clinic", "general practitioner", "medical clinic"];
+  const country = String(state?.locationContext?.country || "").trim();
+  const isJapan = /japan|jp|日本/i.test(country);
+  const keywords = isJapan
+    ? [...baseKeywords, "クリニック", "内科", "病院", "医療", "診療所"]
+    : [...baseKeywords, "medical"];
+  const radiuses = [3000, 5000, 10000, 20000, 50000];
   const results = [];
-  for (const type of types) {
-    for (const keyword of keywords) {
-      const places = await fetchNearbyPlaces(location, { keyword, type, radius });
-      results.push(...places);
-    }
-  }
-  if (results.length === 0) {
+  for (const radius of radiuses) {
     for (const type of types) {
-      const fallback = await fetchNearbyPlaces(location, { type, radius });
-      results.push(...fallback);
+      for (const keyword of keywords) {
+        const places = await fetchNearbyPlaces(location, { keyword, type, radius });
+        results.push(...places);
+      }
     }
+    if (results.length > 0) break;
   }
   if (results.length === 0) {
     for (const type of types) {
@@ -1466,17 +1467,52 @@ async function fetchCarePlacesWithFallbacks(location, plan, state) {
       results.push(...rankBy);
     }
   }
+  const textQueries = isJapan
+    ? ["クリニック", "内科 クリニック", "病院", "医療", "clinic", "hospital", "doctor"]
+    : ["clinic", "hospital", "doctor", "medical clinic", "GP", "medical"];
   if (results.length === 0) {
-    const textQueries = ["clinic", "hospital", "doctor", "medical clinic", "GP"];
     for (const q of textQueries) {
-      const textResults = await fetchPlacesByTextSearch(location, q, { type: "doctor", radius: 5000 });
-      results.push(...textResults);
+      for (const radius of [5000, 10000, 20000, 50000]) {
+        const textResults = await fetchPlacesByTextSearch(location, q, { type: "doctor", radius });
+        results.push(...textResults);
+        if (results.length >= 4) break;
+      }
       if (results.length >= 4) break;
     }
   }
   if (results.length === 0) {
-    const wider = await fetchPlacesByTextSearch(location, "clinic hospital", { radius: 10000 });
-    results.push(...wider);
+    for (const q of textQueries) {
+      for (const radius of [10000, 20000, 50000]) {
+        const textResults = await fetchPlacesByTextSearch(location, q, { radius });
+        results.push(...textResults);
+        if (results.length >= 4) break;
+      }
+      if (results.length >= 4) break;
+    }
+  }
+  if (results.length === 0) {
+    const lastQuery = isJapan ? "病院 クリニック" : "hospital clinic medical";
+    const last = await fetchPlacesByTextSearch(location, lastQuery, { radius: 50000 });
+    results.push(...last);
+  }
+  if (results.length === 0) {
+    let city = String(state?.locationContext?.city || state?.locationContext?.area || "").trim();
+    if (!city && location?.lat && location?.lng) {
+      const geo = await reverseGeocodeLocation(location);
+      city = geo?.city || geo?.area || "";
+    }
+    if (city) {
+      const cityQuery = isJapan ? `${city} 病院 クリニック` : `${city} hospital clinic`;
+      const cityResults = await fetchPlacesByTextSearch(location, cityQuery, { radius: 50000 });
+      results.push(...cityResults);
+    }
+  }
+  if (results.length === 0 && getPlacesApiKey() && location?.lat && location?.lng) {
+    console.error("[Places API] 全検索戦略で0件: キー・位置は有効なため、通常は発生しない想定です", {
+      lat: location.lat,
+      lng: location.lng,
+      country: state?.locationContext?.country,
+    });
   }
   return results;
 }
@@ -1528,7 +1564,9 @@ function isJapaneseClinicOrSupport(candidate) {
     candidate?.details?.editorialSummary || "",
     ...(candidate?.details?.reviewTexts || []).slice(0, 5).join(" "),
   ].join(" ");
-  return /(japanese|日系|nihon|日本語対応|japanese support|japanese speaking|日本語)/i.test(text);
+  if (/(japanese|日系|nihon|日本語対応|japanese support|japanese speaking|日本語)/i.test(text)) return true;
+  const name = String(candidate?.name || "");
+  return /(内科|クリニック|耳鼻科|小児科|メンタル)/.test(name);
 }
 
 function buildHospitalRecommendationReasons(candidate, plan) {
@@ -1739,28 +1777,35 @@ async function resolveLocationContext(state, clientMeta) {
 async function resolveClinicCandidates(state) {
   if (!canRecommendSpecificPlaceFinal(state)) return [];
   if (!state?.locationSnapshot?.lat || !state?.locationSnapshot?.lng) return [];
-  const keywords = ["clinic", "general practitioner", "medical clinic"];
+  const loc = state.locationSnapshot;
+  const isJapan = /japan|jp|日本/i.test(state?.locationContext?.country || "");
+  const keywords = isJapan
+    ? ["clinic", "クリニック", "内科", "doctor"]
+    : ["clinic", "general practitioner", "medical clinic"];
   const results = [];
   for (const keyword of keywords) {
-    const places = await fetchNearbyPlaces(state.locationSnapshot, {
-      keyword,
-      type: "doctor",
-      rankByDistance: true,
-    });
+    const places = await fetchNearbyPlaces(loc, { keyword, type: "doctor", rankByDistance: true });
     results.push(...places);
   }
-  if (results.length === 0) {
-    const fallback = await fetchNearbyPlaces(state.locationSnapshot, {
-      type: "doctor",
-      rankByDistance: true,
-    });
-    results.push(...fallback);
+  for (const type of ["doctor", "hospital", "health"]) {
+    if (results.length === 0) {
+      const p = await fetchNearbyPlaces(loc, { type, rankByDistance: true });
+      results.push(...p);
+    }
   }
-  const merged = sortPlacesByRatingThenDistance(mergePlaces(results)).slice(0, 2);
-  if (merged.length > 0) return merged;
-  const country = state?.locationContext?.country || "Japan";
-  const fallbackNames = FALLBACK_GP_BY_COUNTRY[country] || FALLBACK_GP_BY_COUNTRY.Japan;
-  return buildFallbackPlaces(fallbackNames, state?.location);
+  for (const radius of [5000, 10000, 20000]) {
+    if (results.length === 0) {
+      const q = isJapan ? "クリニック" : "clinic";
+      const t = await fetchPlacesByTextSearch(loc, q, { type: "doctor", radius });
+      results.push(...t);
+    }
+  }
+  if (results.length === 0) {
+    const q = isJapan ? "病院 クリニック" : "hospital clinic";
+    const last = await fetchPlacesByTextSearch(loc, q, { radius: 50000 });
+    results.push(...last);
+  }
+  return sortPlacesByRatingThenDistance(mergePlaces(results)).slice(0, 2);
 }
 
 async function resolveHospitalCandidates(state) {
@@ -1793,8 +1838,12 @@ async function resolveHospitalCandidates(state) {
     }
   }
   if (!location?.lat || !location?.lng) return [];
+  const isJapan = /japan|jp|日本/i.test(state?.locationContext?.country || "");
   const results = [];
-  for (const keyword of ["hospital", "medical centre", "emergency"]) {
+  const keywords = isJapan
+    ? ["hospital", "病院", "medical centre", "emergency"]
+    : ["hospital", "medical centre", "emergency"];
+  for (const keyword of keywords) {
     const places = await fetchNearbyPlaces(location, {
       keyword,
       type: "hospital",
@@ -1802,20 +1851,23 @@ async function resolveHospitalCandidates(state) {
     });
     results.push(...places);
   }
-  if (results.length === 0) {
-    const fallback = await fetchNearbyPlaces(location, {
-      type: "hospital",
-      rankByDistance: true,
-    });
-    results.push(...fallback);
+  for (const type of ["hospital", "doctor", "health"]) {
+    if (results.length === 0) {
+      const p = await fetchNearbyPlaces(location, { type, rankByDistance: true });
+      results.push(...p);
+    }
+  }
+  for (const radius of [5000, 10000, 20000, 50000]) {
+    if (results.length === 0) {
+      const q = isJapan ? "病院" : "hospital medical centre";
+      const t = await fetchPlacesByTextSearch(location, q, { type: "hospital", radius });
+      results.push(...t);
+    }
   }
   if (results.length === 0) {
-    const textResults = await fetchPlacesByTextSearch(
-      location,
-      "hospital medical centre",
-      { type: "hospital", radius: 5000 }
-    );
-    results.push(...textResults);
+    const q = isJapan ? "病院 医療" : "hospital medical";
+    const last = await fetchPlacesByTextSearch(location, q, { radius: 50000 });
+    results.push(...last);
   }
   return sortPlacesByRatingThenDistance(mergePlaces(results)).slice(0, 2);
 }
@@ -1823,69 +1875,39 @@ async function resolveHospitalCandidates(state) {
 async function resolvePharmacyCandidates(state) {
   if (!canRecommendSpecificPlaceFinal(state)) return [];
   if (!state?.locationSnapshot?.lat || !state?.locationSnapshot?.lng) return [];
-  const keywords = ["pharmacy", "Watsons", "Guardian"];
+  const loc = state.locationSnapshot;
+  const isJapan = /japan|jp|日本/i.test(state?.locationContext?.country || "");
+  const keywords = isJapan
+    ? ["pharmacy", "薬局", "ドラッグストア", "Watsons", "Guardian"]
+    : ["pharmacy", "Watsons", "Guardian", "drugstore"];
   const results = [];
   for (const keyword of keywords) {
-    const places = await fetchNearbyPlaces(state.locationSnapshot, {
+    const places = await fetchNearbyPlaces(loc, {
       keyword,
       type: "pharmacy",
       rankByDistance: true,
     });
     results.push(...places);
   }
+  for (const type of ["pharmacy", "drugstore"]) {
+    if (results.length === 0) {
+      const p = await fetchNearbyPlaces(loc, { type, rankByDistance: true });
+      results.push(...p);
+    }
+  }
+  for (const radius of [5000, 10000, 20000, 50000]) {
+    if (results.length === 0) {
+      const q = isJapan ? "薬局" : "pharmacy";
+      const t = await fetchPlacesByTextSearch(loc, q, { type: "pharmacy", radius });
+      results.push(...t);
+    }
+  }
   if (results.length === 0) {
-    const fallback = await fetchNearbyPlaces(state.locationSnapshot, {
-      type: "pharmacy",
-      rankByDistance: true,
-    });
-    results.push(...fallback);
+    const q = isJapan ? "薬局 ドラッグストア" : "pharmacy drugstore";
+    const last = await fetchPlacesByTextSearch(loc, q, { radius: 50000 });
+    results.push(...last);
   }
   return sortPlacesByRatingThenDistance(mergePlaces(results)).slice(0, 2);
-}
-
-const FALLBACK_PHARMACY_BY_COUNTRY = {
-  Japan: ["マツモトキヨシ 新宿東口店", "ツルハドラッグ すすきの店", "スギ薬局 名駅店"],
-  Singapore: ["Guardian Pharmacy (Raffles City)", "Watsons (ION Orchard)", "Unity Pharmacy (Bugis Junction)"],
-};
-
-const FALLBACK_HOSPITAL_BY_COUNTRY = {
-  Japan: [
-    { name: "聖路加国際病院", type: "General Hospital" },
-    { name: "日本赤十字社医療センター", type: "General Hospital" },
-  ],
-  Singapore: [
-    { name: "Raffles Hospital", type: "General Hospital" },
-    { name: "Mount Elizabeth Hospital", type: "General Hospital" },
-  ],
-};
-
-const FALLBACK_GP_BY_COUNTRY = {
-  // 実在候補（検索不能時の最終フォールバック）
-  Japan: ["新宿南口内科クリニック", "ゆうメンタルクリニック新宿院"],
-  Singapore: ["Raffles Medical", "Fullerton Health", "Healthway Medical"],
-};
-
-const FALLBACK_ENT_BY_COUNTRY = {
-  Japan: ["東京医科大学病院（耳鼻咽喉科）", "日本赤十字社医療センター（耳鼻咽喉科）"],
-  Singapore: ["Mount Elizabeth Hospital (ENT)", "Gleneagles Hospital (ENT)"],
-};
-
-function pickFallbackByLocation(list, locationContext) {
-  if (!Array.isArray(list) || list.length === 0) return null;
-  if (!locationContext?.city) return list[0];
-  const matched = list.find((item) => String(item).includes(locationContext.city));
-  return matched || list[0];
-}
-
-function buildFallbackPlaces(names, location) {
-  return (names || [])
-    .map((name) => ({
-      name,
-      placeId: "",
-      distanceM: null,
-      mapsUrl: buildMapsUrl({ name }, location),
-    }))
-    .slice(0, 3);
 }
 
 function buildPharmacyRecommendation(state, locationContext, pharmacyCandidates) {
@@ -1899,14 +1921,11 @@ function buildPharmacyRecommendation(state, locationContext, pharmacyCandidates)
       preface: "近くで行きやすい場所を案内します。",
     };
   }
-  const fallbackList = FALLBACK_PHARMACY_BY_COUNTRY.Japan.map((entry) => entry.split(" ")[0]);
-  const fallbackCandidates = buildFallbackPlaces(fallbackList, state?.locationSnapshot);
-  const name = fallbackCandidates[0]?.name || "近くの薬局";
   return {
-    name,
-    mapsUrl: fallbackCandidates[0]?.mapsUrl || "",
-    candidates: fallbackCandidates,
-    reason: "近くで行きやすい場所を案内します。",
+    name: "近くの薬局",
+    mapsUrl: "",
+    candidates: [],
+    reason: "位置情報から近くの薬局を検索しました。",
     preface: "近くで行きやすい場所を案内します。",
   };
 }
@@ -1945,25 +1964,12 @@ function buildHospitalRecommendationDetail(state, locationContext, clinicCandida
       preface: "近くで行きやすい場所を案内します。",
     };
   }
-  const country = String(locationContext?.country || "Japan");
-  const fallbackList = (() => {
-    if (destination?.label === "耳鼻科") {
-      return FALLBACK_ENT_BY_COUNTRY[country] || FALLBACK_ENT_BY_COUNTRY.Japan;
-    }
-    if (destination?.label === "GP") {
-      return FALLBACK_GP_BY_COUNTRY[country] || FALLBACK_GP_BY_COUNTRY.Japan;
-    }
-    return (FALLBACK_HOSPITAL_BY_COUNTRY[country] || FALLBACK_HOSPITAL_BY_COUNTRY.Japan || []).map((item) =>
-      typeof item === "string" ? item : item.name
-    );
-  })();
-  const fallbackCandidates = buildFallbackPlaces(fallbackList, state?.locationSnapshot);
   return {
-    name: fallbackCandidates[0]?.name || "Raffles Medical",
-    mapsUrl: fallbackCandidates[0]?.mapsUrl || "",
-    candidates: fallbackCandidates,
+    name: "近くの医療機関",
+    mapsUrl: "",
+    candidates: [],
     type: destination?.label === "GP" ? "Clinic" : "General Hospital",
-    reason: `${plan?.symptomLabel || "現在の症状"}に対応可能な実在候補をフォールバック表示しています。`,
+    reason: `位置情報から${plan?.symptomLabel || "現在の症状"}に対応可能な候補を検索しましたが、見つかりませんでした。`,
     preface: "近くで行きやすい場所を案内します。",
   };
 }
@@ -2428,18 +2434,7 @@ async function resolveCareCandidates(state, destination) {
       mapsUrl: details?.mapUrl || item.mapsUrl,
     });
   }
-  const finalList = enriched.length ? enriched.slice(0, 2) : merged.slice(0, 2);
-  if (finalList.length > 0) return finalList;
-  const names = destination?.fallbackNames;
-  if (Array.isArray(names) && names.length > 0) {
-    return buildFallbackPlaces(names, location || state?.locationSnapshot);
-  }
-  const country = String(state?.locationContext?.country || "Japan");
-  const gpFallback =
-    (FALLBACK_GP_BY_COUNTRY[country] && FALLBACK_GP_BY_COUNTRY[country].length > 0)
-      ? FALLBACK_GP_BY_COUNTRY[country]
-      : FALLBACK_GP_BY_COUNTRY.Japan;
-  return buildFallbackPlaces(gpFallback.slice(0, 2), location || state?.locationSnapshot);
+  return enriched.length ? enriched.slice(0, 2) : merged.slice(0, 2);
 }
 
 function buildHospitalBlock(state, historyText, hospitalRec) {
@@ -2448,26 +2443,7 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
   const rawCandidates = Array.isArray(hospitalRec?.candidates) ? hospitalRec.candidates : [];
   const mainSymptomText = detectCareMainSymptomText(state, historyText || "");
   const plan = buildCareSearchQueries(mainSymptomText, destination);
-  const fallbackNamesByCountry =
-    destination.label === "耳鼻科"
-      ? FALLBACK_ENT_BY_COUNTRY
-      : destination.label === "GP"
-        ? FALLBACK_GP_BY_COUNTRY
-        : null;
-  const country = String(state?.locationContext?.country || "Japan");
-  const fallbackNamePool = fallbackNamesByCountry
-    ? (fallbackNamesByCountry[country] || fallbackNamesByCountry.Japan || [])
-    : [];
   const candidates = rawCandidates
-    .map((c, idx) => {
-      const name = String(c?.name || "").trim();
-      const isGeneric = /^近くの/.test(name) || name === "近くの医療機関" || name === "近くのクリニック";
-      const fallbackName = fallbackNamePool[idx] || fallbackNamePool[0] || name;
-      return {
-        ...c,
-        name: isGeneric ? fallbackName : name,
-      };
-    })
     .filter((c) => String(c?.name || "").trim().length > 0)
     .filter((c, idx, arr) => arr.findIndex((x) => String(x.name).trim() === String(c.name).trim()) === idx)
     .slice(0, 2);
@@ -2517,7 +2493,7 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
       }
     });
   } else {
-    lines.push("近くで受診しやすい実在医療機関を優先して案内します。");
+    lines.push("位置情報から近くの医療機関を検索しましたが、見つかりませんでした。");
   }
   lines.push("");
   // 仕様: INFECTION ではオンライン診療案内を表示しない（強制）

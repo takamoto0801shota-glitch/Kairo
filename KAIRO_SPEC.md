@@ -911,6 +911,64 @@ function canRecommendSpecificPlace(snapshot: LocationSnapshot | null) {
     - 「行く前に知っておくと安心なこと」セクションは出さない。
     - `city` が取れないことを理由に案内を中止しない。
 
+### 8.1 Places API 実装詳細（現行仕組み）
+
+#### 環境変数
+- `GOOGLE_PLACES_API_KEY` または `GOOGLE_MAPS_API_KEY` を指定
+- 未設定時は `[]` を返し、検索をスキップ
+
+#### 使用するAPI
+1. **Nearby Search** (`/place/nearbysearch/json`)
+   - `location`, `radius` または `rankby=distance`, `keyword`, `type`
+2. **Text Search** (`/place/textsearch/json`)
+   - `query`, `location`, `radius`, `type`（省略可）
+3. **Place Details** (`/place/details/json`)
+   - `place_id`, `fields`: rating, reviews, types, url, editorial_summary
+4. **Geocoding** (`/geocode/json`)
+   - 住所→緯度経度、逆ジオコード（緯度経度→都市名）
+
+#### 医療機関検索フロー（`fetchCarePlacesWithFallbacks`）
+1. **Nearby Search（半径順）**
+   - types: `doctor`, `hospital`, `health`
+   - 半径: 3km → 5km → 10km → 20km → 50km（結果が出るまで順に試行）
+   - 日本: keywords に `クリニック`, `内科`, `病院`, `医療`, `診療所` を追加
+2. **rankByDistance（距離順）**
+   - 0件の場合、`rankby=distance` で type ごとに検索（半径制限なし）
+3. **Text Search（type 指定あり）**
+   - 0件の場合、`type=doctor` で radius 5km〜50km を順に試行
+4. **Text Search（type 指定なし）**
+   - 0件の場合、`type` なしで検索（より広い結果）
+5. **都市名検索**
+   - 0件の場合、逆ジオコードで都市を取得し、`[都市名] 病院 クリニック` で検索
+6. **0件ログ**
+   - キー・位置が有効なのに全戦略で0件の場合、`console.error` でログ出力
+
+#### 候補取得フロー（`resolveCareCandidates`）
+1. 位置取得: `locationSnapshot` → ジオコード（住所）→ `getFallbackCoordinates`
+2. 症状検出: `detectCareMainSymptomText` で主症状を抽出
+3. 検索キーワード: `buildCareSearchQueries` で症状に応じた keywords / includeTerms / excludeTerms を決定
+4. `fetchCarePlacesWithFallbacks` で検索
+5. `mergePlaces` で重複除去
+6. `applySymptomFitFilter` で症状適合フィルタ（includeTerms を含む、excludeTerms を除外）
+7. `prioritizeCareCandidates` でソート（シンガポールは日系優先、それ以外は評価・距離順）
+8. 上位6件の `placeId` で Place Details を取得し、`rating`, `reviews`, `editorial_summary` を付与
+9. 最大2件を返す
+
+#### 推薦理由生成（`buildHospitalRecommendationReasons`）
+1. `isJapaneseClinicOrSupport`: 日系・日本語対応なら「日本語で話せる」を追加
+2. `buildCareReviewSummary`: レビュー上位数件から症状関連ワードを抽出し、3行以内で要約
+3. レビューがない場合は `rating` があれば「Google評価は X.X（N件）で」を表示
+4. いずれもなければ `[]` を返し、表示側で「現在地から行きやすく、初期相談先として使いやすい候補です」の固定文を使用
+
+#### 病院・クリニック・薬局検索
+- **`resolveHospitalCandidates`**: type `hospital`, `doctor`, `health`、keywords `病院`（日本）、rankByDistance、Text Search 半径 5km〜50km。位置未取得時はジオコード→`getFallbackCoordinates`
+- **`resolveClinicCandidates`**: type `doctor`, `hospital`, `health`、keywords `クリニック`, `内科`（日本）、rankByDistance、Text Search 半径 5km〜20km
+- **`resolvePharmacyCandidates`**: type `pharmacy`, `drugstore`、keywords `薬局`, `ドラッグストア`（日本）、Text Search 半径 5km〜50km
+
+#### フォールバック
+- フォールバック候補（固定名称）は使用しない
+- API 結果が 0 件の場合は `candidates: []` を返し、「位置情報から検索しましたが、見つかりませんでした」と表示
+
 ## 9. 「🤝 今の状態について」の出力順
 順番を厳守：
 1. ユーザーのつらさ・不安への一文の寄り添い
