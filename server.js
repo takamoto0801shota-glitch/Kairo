@@ -1281,7 +1281,10 @@ function getPlacesApiKey() {
 
 async function fetchNearbyPlaces(location, { keyword, type, radius = 1000, rankByDistance = false }) {
   const key = getPlacesApiKey();
-  if (!key) return [];
+  if (!key) {
+    console.warn("[Places API] キーが未設定です。GOOGLE_PLACES_API_KEY または GOOGLE_MAPS_API_KEY を .env に設定してください。");
+    return [];
+  }
   if (!location?.lat || !location?.lng) return [];
   const params = new URLSearchParams({
     location: `${location.lat},${location.lng}`,
@@ -1296,8 +1299,11 @@ async function fetchNearbyPlaces(location, { keyword, type, radius = 1000, rankB
   if (type) params.set("type", type);
   const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?${params.toString()}`;
   const res = await fetch(url);
-  if (!res.ok) return [];
   const data = await res.json();
+  if (data.status && data.status !== "OK" && data.status !== "ZERO_RESULTS") {
+    console.warn("[Places API] nearbysearch エラー:", data.status, data.error_message || "");
+  }
+  if (!res.ok) return [];
   return normalizePlaces(data.results || [], location);
 }
 
@@ -1314,8 +1320,11 @@ async function fetchPlacesByTextSearch(location, query, { type, radius = 5000 } 
   if (type) params.set("type", type);
   const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?${params.toString()}`;
   const res = await fetch(url);
-  if (!res.ok) return [];
   const data = await res.json();
+  if (data.status && data.status !== "OK" && data.status !== "ZERO_RESULTS") {
+    console.warn("[Places API] textsearch エラー:", data.status, data.error_message || "");
+  }
+  if (!res.ok) return [];
   return normalizePlaces(data.results || [], location);
 }
 
@@ -9458,9 +9467,11 @@ app.post("/api/clear", (req, res) => {
 
 // Health check endpoint
 app.get("/api/health", (req, res) => {
+  const placesKey = process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
   res.json({
     status: "ok",
     hasApiKey: !!process.env.OPENAI_API_KEY,
+    hasPlacesApiKey: !!placesKey,
   });
 });
 
@@ -9470,5 +9481,11 @@ app.listen(PORT, '0.0.0.0', () => {
     process.env.OPENAI_API_KEY
       ? "✓ OpenAI API key is configured"
       : "⚠ OpenAI API key is not configured. Please set OPENAI_API_KEY in .env file"
+  );
+  const placesKey = process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
+  console.log(
+    placesKey
+      ? "✓ Google Places API key is configured"
+      : "⚠ Google Places API key is not configured. Set GOOGLE_PLACES_API_KEY in .env for facility search"
   );
 });
