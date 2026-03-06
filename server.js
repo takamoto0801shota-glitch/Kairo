@@ -1328,13 +1328,13 @@ async function fetchPlacesByTextSearch(location, query, { type, radius = 5000 } 
   return normalizePlaces(data.results || [], location);
 }
 
-async function fetchPlaceDetails(placeId) {
+async function fetchPlaceDetails(placeId, { language = "en" } = {}) {
   if (!getPlacesApiKey()) return null;
   if (!placeId) return null;
   const params = new URLSearchParams({
     place_id: placeId,
     key: getPlacesApiKey(),
-    language: "en",
+    language: language || "en",
     fields: "place_id,name,rating,reviews,types,url,user_ratings_total,editorial_summary",
   });
   const url = `https://maps.googleapis.com/maps/api/place/details/json?${params.toString()}`;
@@ -1585,6 +1585,12 @@ function buildHospitalRecommendationReasons(candidate, plan) {
   const reviewSummary = buildCareReviewSummary(candidate, plan);
   const reviewPoints = reviewSummary.filter((r) => r.startsWith("・"));
   reasons.push(...reviewPoints);
+  if (reasons.length < 3) {
+    const editorial = String(candidate?.details?.editorialSummary || "").trim();
+    if (editorial && editorial.length <= 120 && editorial.length >= 10) {
+      reasons.push(`・${editorial}`);
+    }
+  }
   if (reasons.length > 0) {
     return reasons.slice(0, 3);
   }
@@ -2371,7 +2377,7 @@ function detectCareDestinationFromHistory(historyText) {
   if (text.match(/歯|歯ぐき|虫歯|親知らず|奥歯/)) {
     return {
       label: "歯医者",
-      header: "⭐ おすすめの歯医者（近くて行きやすい）",
+      header: "おすすめの歯医者（近くて行きやすい）",
       places: { type: "dentist", keywords: ["dentist", "dental clinic"] },
       fallbackNames: ["近くの歯科クリニック", "近くの歯医者"],
     };
@@ -2379,7 +2385,7 @@ function detectCareDestinationFromHistory(historyText) {
   if (text.match(/耳|耳鳴り|耳が痛|のど|喉|鼻|鼻水|鼻づまり/)) {
     return {
       label: "耳鼻科",
-      header: "⭐ おすすめの耳鼻科（近くて行きやすい）",
+      header: "おすすめの耳鼻科（近くて行きやすい）",
       places: { type: "doctor", keywords: ["ENT", "ENT clinic", "otolaryngologist"] },
       fallbackNames: ["近くの耳鼻科", "近くのクリニック（耳鼻科）"],
     };
@@ -2387,7 +2393,7 @@ function detectCareDestinationFromHistory(historyText) {
   // default
   return {
     label: "GP",
-    header: "⭐ おすすめのGP（近くて行きやすい）",
+    header: "おすすめのGP（近くて行きやすい）",
     places: { type: "doctor", keywords: ["clinic", "general practitioner", "medical clinic"] },
     fallbackNames: null,
   };
@@ -2430,9 +2436,10 @@ async function resolveCareCandidates(state, destination) {
   const mergedBase = mergePlaces(results);
   const symptomFitted = applySymptomFitFilter(mergedBase, plan);
   const merged = prioritizeCareCandidates(symptomFitted, state).slice(0, 6);
+  const isJapan = /japan|jp|日本/i.test(state?.locationContext?.country || "");
   const enriched = [];
   for (const item of merged) {
-    const details = await fetchPlaceDetails(item.placeId);
+    const details = await fetchPlaceDetails(item.placeId, { language: isJapan ? "ja" : "en" });
     enriched.push({
       ...item,
       details,
@@ -2491,8 +2498,9 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
     list.forEach((c, idx) => {
       const normalizedName = String(c?.name || "").trim();
       lines.push("");
-      lines.push(`・候補${idx + 1}: ${normalizedName}`);
-      lines.push("  推薦理由：");
+      const numLabel = ["①", "②"][idx] || `・候補${idx + 1}`;
+      lines.push(`${numLabel} ${normalizedName}`);
+      lines.push("  いいところ：");
       const reasons = buildHospitalRecommendationReasons(c, plan);
       if (reasons.length > 0) {
         reasons.slice(0, 3).forEach((r) => lines.push(`  ${r}`));
@@ -5314,7 +5322,7 @@ function buildStateFactsBullets(state) {
 
   const impact = val("impact", answers.daily_impact);
   if (impact && !isUnknownLike(impact)) {
-    pushIfValid(lines, `・日常生活では${impact}`);
+    pushIfValid(lines, `・${impact}`);
   }
 
   const associated = val("associated", answers.associated_symptoms);
