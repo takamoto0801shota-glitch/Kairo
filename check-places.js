@@ -58,3 +58,5 @@ fetch(url)
     console.log("✗ ネットワークエラー:", err.message);
     process.exit(1);
   });
+
+console.log("\nより正確な位置検索のため、Google Cloud で「Geocoding API」も有効にすると、都市名から座標を取得できます。");

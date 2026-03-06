@@ -1445,16 +1445,18 @@ function applySymptomFitFilter(candidates, plan) {
 async function fetchCarePlacesWithFallbacks(location, plan, state) {
   const types = ["doctor", "hospital"];
   const keywords = plan?.searchKeywords || ["clinic", "general practitioner", "medical clinic"];
+  const isGpsLocation = state?.locationContext?.source === "gps";
+  const radius = isGpsLocation ? 3000 : 5000;
   const results = [];
   for (const type of types) {
     for (const keyword of keywords) {
-      const places = await fetchNearbyPlaces(location, { keyword, type, radius: 3000 });
+      const places = await fetchNearbyPlaces(location, { keyword, type, radius });
       results.push(...places);
     }
   }
   if (results.length === 0) {
     for (const type of types) {
-      const fallback = await fetchNearbyPlaces(location, { type, radius: 3000 });
+      const fallback = await fetchNearbyPlaces(location, { type, radius });
       results.push(...fallback);
     }
   }
@@ -1518,51 +1520,64 @@ function formatDistanceForCare(distanceM) {
   return `約${(distanceM / 1000).toFixed(1)}km`;
 }
 
+function isJapaneseClinicOrSupport(candidate) {
+  const text = [
+    candidate?.name || "",
+    candidate?.vicinity || "",
+    ...(candidate?.types || []),
+    candidate?.details?.editorialSummary || "",
+    ...(candidate?.details?.reviewTexts || []).slice(0, 5).join(" "),
+  ].join(" ");
+  return /(japanese|日系|nihon|日本語対応|japanese support|japanese speaking|日本語)/i.test(text);
+}
+
 function buildHospitalRecommendationReasons(candidate, plan) {
   const reasons = [];
-  const infoText = [candidate?.name || "", candidate?.vicinity || "", ...(candidate?.types || [])].join(" ");
+  if (isJapaneseClinicOrSupport(candidate)) {
+    reasons.push("・日本語で話せるため、相談時の負担を下げやすい候補です");
+  }
   const reviewSummary = buildCareReviewSummary(candidate, plan);
   const reviewPoints = reviewSummary.filter((r) => r.startsWith("・"));
-  if (reviewPoints.length > 0) {
-    reasons.push(...reviewPoints);
+  reasons.push(...reviewPoints);
+  if (reasons.length > 0) {
+    return reasons.slice(0, 3);
   }
-  if (reasons.length === 0 && plan?.symptomLabel) {
-    reasons.push(`・${plan.symptomLabel}の初期相談に対応しやすい施設タイプです`);
-  }
-  if (/(japanese|日本語|日系)/i.test(infoText) && reasons.length < 3) {
-    reasons.push("・日本語対応に関する記載があり、相談時の負担を下げやすい候補です");
-  }
-  if (Number.isFinite(candidate?.rating) && reasons.length < 3) {
+  if (Number.isFinite(candidate?.rating)) {
     const count = Number.isFinite(candidate?.userRatingsTotal) ? `（${candidate.userRatingsTotal}件）` : "";
-    reasons.push(`・Google評価は ${candidate.rating.toFixed(1)} ${count} で、利用者評価が確認できます`);
+    return [`・Google評価は ${candidate.rating.toFixed(1)} ${count} で、利用者評価が確認できます`];
   }
-  return reasons.slice(0, 3);
+  return [];
 }
 
 function buildCareReviewSummary(candidate, plan) {
   const details = candidate?.details;
   const snippets = Array.isArray(details?.reviewTexts) ? details.reviewTexts.slice(0, 8) : [];
   if (snippets.length === 0) {
-    return [
-      `${plan?.symptomLabel || "現在の症状"}の初期相談先として、立地・診療領域・評価の整合で選定しています。`,
-    ];
+    return [];
   }
   const joined = snippets.join(" ").toLowerCase();
   const points = [];
-  if (/(腹痛|gastro|digestive|消化器|stomach|abdominal)/.test(joined)) {
-    points.push(`${plan?.symptomLabel || "症状"}に関連する相談への対応が丁寧という記載`);
+  const symptomLabel = plan?.symptomLabel || "症状";
+  if (/(腹痛|gastro|digestive|消化器|stomach|abdominal|胃|お腹|下痢)/.test(joined)) {
+    points.push(`${symptomLabel}や消化器症状への対応が丁寧という口コミが多い`);
   }
-  if (/(explain|説明|丁寧|わかりやすい|careful)/.test(joined)) {
+  if (/(頭痛|headache|neurology|神経)/.test(joined)) {
+    points.push(`${symptomLabel}の相談に丁寧に対応してくれるという声`);
+  }
+  if (/(発熱|fever|熱|咳|cough|喉|throat|のど)/.test(joined)) {
+    points.push(`${symptomLabel}の初期相談で利用しやすいという口コミ`);
+  }
+  if (/(explain|説明|丁寧|わかりやすい|careful|親切)/.test(joined)) {
     points.push("説明が丁寧で相談しやすいという声");
   }
-  if (/(wait|待ち|quick|fast|smooth)/.test(joined)) {
-    points.push("待ち時間や案内が比較的スムーズという声");
+  if (/(wait|待ち|quick|fast|smooth|スムーズ)/.test(joined)) {
+    points.push("待ち時間や案内がスムーズという記載");
   }
-  if (/(friendly|親切|kind|staff)/.test(joined)) {
-    points.push("スタッフ対応が親切という声");
+  if (/(friendly|親切|kind|staff|対応)/.test(joined)) {
+    points.push("スタッフ対応が親切という口コミ");
   }
-  if (points.length === 0) {
-    points.push("初期相談で利用しやすいという声");
+  if (/(japanese|日本語|日系)/.test(joined)) {
+    points.push("日本語での相談がしやすいという声");
   }
   return points.slice(0, 3).map((p) => `・${p}`);
 }
@@ -1603,6 +1618,53 @@ async function reverseGeocodeWithRetry(location, retries = 2) {
   return null;
 }
 
+const FALLBACK_COORDINATES = {
+  country: {
+    Singapore: { lat: 1.3521, lng: 103.8198 },
+    Japan: { lat: 35.6762, lng: 139.6503 },
+    "": { lat: 1.3521, lng: 103.8198 },
+  },
+  city: {
+    singapore: { lat: 1.3521, lng: 103.8198 },
+    tokyo: { lat: 35.6762, lng: 139.6503 },
+    osaka: { lat: 34.6937, lng: 135.5023 },
+    yokohama: { lat: 35.4437, lng: 139.6380 },
+    nagoya: { lat: 35.1815, lng: 136.9066 },
+    fukuoka: { lat: 33.5904, lng: 130.4017 },
+    sapporo: { lat: 43.0618, lng: 141.3545 },
+    kyoto: { lat: 35.0116, lng: 135.7681 },
+    kobe: { lat: 34.6913, lng: 135.1830 },
+    kawasaki: { lat: 35.5309, lng: 139.7034 },
+    saitama: { lat: 35.8617, lng: 139.6455 },
+    chiba: { lat: 35.6074, lng: 140.1063 },
+    sendai: { lat: 38.2682, lng: 140.8694 },
+    hiroshima: { lat: 34.3853, lng: 132.4553 },
+    orchard: { lat: 1.3044, lng: 103.8318 },
+    marina: { lat: 1.2834, lng: 103.8607 },
+    bugis: { lat: 1.2988, lng: 103.8545 },
+    tampines: { lat: 1.3526, lng: 103.9442 },
+    jurong: { lat: 1.3331, lng: 103.7423 },
+  },
+};
+
+function getFallbackCoordinates(country, city, area) {
+  const raw = String(city || area || "").trim();
+  const cityKey = raw.toLowerCase().replace(/\s+/g, "");
+  if (cityKey) {
+    for (const [key, coords] of Object.entries(FALLBACK_COORDINATES.city)) {
+      if (cityKey.includes(key) || key.includes(cityKey)) {
+        return coords;
+      }
+    }
+  }
+  const c = String(country || "").trim();
+  return (
+    FALLBACK_COORDINATES.country[c] ||
+    FALLBACK_COORDINATES.country[""] ||
+    { lat: 1.3521, lng: 103.8198 }
+  );
+}
+
 async function geocodeAddress(address) {
   const apiKey = process.env.GOOGLE_GEOCODE_API_KEY || getPlacesApiKey();
   if (!apiKey || !address) return null;
@@ -1612,8 +1674,11 @@ async function geocodeAddress(address) {
   });
   const url = `https://maps.googleapis.com/maps/api/geocode/json?${params.toString()}`;
   const res = await fetch(url);
-  if (!res.ok) return null;
   const data = await res.json();
+  if (data.status && data.status !== "OK" && data.status !== "ZERO_RESULTS") {
+    console.warn("[Geocoding API] エラー:", data.status, data.error_message || "");
+  }
+  if (!res.ok) return null;
   const result = (data.results || [])[0];
   if (!result?.geometry?.location) return null;
   const loc = result.geometry.location;
@@ -1702,14 +1767,28 @@ async function resolveHospitalCandidates(state) {
   let location = state?.locationSnapshot;
   if (!location?.lat || !location?.lng) {
     const ctx = state?.locationContext || {};
-    const addr = [ctx.city || ctx.area, ctx.country].filter(Boolean).join(", ") || ctx.country || "Singapore";
-    if (addr) {
+    const city = ctx.city || ctx.area;
+    const country = ctx.country || "";
+    const addrs = [
+      [city, country].filter(Boolean).join(", "),
+      city || "",
+      country || "Singapore",
+    ].filter(Boolean);
+    for (const addr of addrs) {
       const geo = await geocodeAddress(addr);
       if (geo) {
         location = geo;
         if (!state.locationSnapshot) {
           state.locationSnapshot = { lat: geo.lat, lng: geo.lng, ts: Date.now() };
         }
+        break;
+      }
+    }
+    if (!location?.lat || !location?.lng) {
+      const fallback = getFallbackCoordinates(country, city, ctx.area);
+      location = fallback;
+      if (!state.locationSnapshot) {
+        state.locationSnapshot = { lat: fallback.lat, lng: fallback.lng, ts: Date.now() };
       }
     }
   }
@@ -2306,14 +2385,26 @@ async function resolveCareCandidates(state, destination) {
     const ctx = state?.locationContext || {};
     const city = ctx.city || ctx.area;
     const country = ctx.country || "";
-    const addr = [city, country].filter(Boolean).join(", ") || country || "Singapore";
-    if (addr) {
+    const addrs = [
+      [city, country].filter(Boolean).join(", "),
+      city || "",
+      country || "Singapore",
+    ].filter(Boolean);
+    for (const addr of addrs) {
       const geo = await geocodeAddress(addr);
       if (geo) {
         location = geo;
         if (!state.locationSnapshot) {
           state.locationSnapshot = { lat: geo.lat, lng: geo.lng, ts: Date.now() };
         }
+        break;
+      }
+    }
+    if (!location?.lat || !location?.lng) {
+      const fallback = getFallbackCoordinates(country, city, ctx.area);
+      location = fallback;
+      if (!state.locationSnapshot) {
+        state.locationSnapshot = { lat: fallback.lat, lng: fallback.lng, ts: Date.now() };
       }
     }
   }
@@ -8106,7 +8197,7 @@ app.post("/api/chat", async (req, res) => {
     });
     if (location) {
       const normalized = normalizeLocation(location);
-      if (normalized && !state.locationSnapshot) {
+      if (normalized) {
         state.locationSnapshot = normalized;
       }
     }
@@ -8115,9 +8206,9 @@ app.post("/api/chat", async (req, res) => {
       if (clientMeta.locationPromptShown === true) {
         state.locationPromptShown = true;
       }
-      if (clientMeta.locationSnapshot && !state.locationSnapshot) {
+      if (clientMeta.locationSnapshot) {
         const normalized = normalizeLocation(clientMeta.locationSnapshot);
-        if (normalized) {
+        if (normalized && !state.locationSnapshot) {
           state.locationSnapshot = normalized;
         }
       }
