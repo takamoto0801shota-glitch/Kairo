@@ -3,6 +3,7 @@ const API_URL = "/api/chat";
 const CLEAR_URL = "/api/clear";
 const STATE_PATTERNS_URL = "/api/state-patterns";
 const ACTION_DETAILS_URL = "/api/action-details";
+const HOSPITAL_DETAILS_URL = "/api/hospital-details";
 
 // Conversation history keys
 const HISTORY_KEY = "kairo_chat_history";
@@ -658,6 +659,38 @@ async function showConcreteActionDetails(blockContent) {
   }
 }
 
+async function fetchHospitalDetails() {
+  const conversationId = getConversationId();
+  const response = await fetch(HOSPITAL_DETAILS_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ conversationId }),
+  });
+  if (!response.ok) {
+    throw new Error(`hospital-details status=${response.status}`);
+  }
+  const data = await response.json();
+  return data?.message || "受診先の詳細を取得できませんでした。";
+}
+
+async function showConcreteHospitalDetails() {
+  if (appState.concreteModalBusy) return;
+  appState.concreteModalBusy = true;
+  openConcreteModal();
+  setConcreteModalBody("受診先の詳細を取得しています…");
+  try {
+    const detailText = await fetchHospitalDetails();
+    setConcreteModalBody(detailText);
+  } catch (error) {
+    console.error("受診先モーダル生成エラー:", error);
+    setConcreteModalBody("受診先の詳細を取得できませんでした。近くの医療機関を検索してご確認ください。");
+  } finally {
+    appState.concreteModalBusy = false;
+  }
+}
+
 // Check if decision is completed (判断が完了しているかチェック)
 function isDecisionCompleted(text) {
   // 判断を示すブロックが含まれているかチェック
@@ -973,18 +1006,24 @@ function addMessage(text, isUser = false, save = true, options = {}) {
       const isActionBlock =
         block?.header?.icon === "✅" &&
         /今すぐやること/.test(block?.header?.name || "");
+      const isHospitalBlock =
+        block?.header?.icon === "🏥" &&
+        /受診先の候補|Kairoの判断/.test(block?.header?.name || "");
+      const showActionDetailButton = isActionBlock && appState.riskLevel !== "RED";
       let detailButton = null;
       const iconText = block?.header?.icon || splitHeaderIconAndName(headerText).icon;
       const nameText = block?.header?.name || splitHeaderIconAndName(headerText).name;
       const headerTitleEl = appendHeaderTitleWithIcon(headerDiv, iconText, "");
-      if (isStateBlock || isActionBlock) {
+      if (isStateBlock || showActionDetailButton || isHospitalBlock) {
         detailButton = document.createElement("button");
         detailButton.type = "button";
         detailButton.className = "block-header-action";
         detailButton.textContent = "具体的に";
         detailButton.disabled = true;
         detailButton.addEventListener("click", () => {
-          if (isActionBlock) {
+          if (isHospitalBlock) {
+            showConcreteHospitalDetails();
+          } else if (isActionBlock) {
             showConcreteActionDetails(block.content || "");
           } else {
             showConcreteStateDetails(block.content || "");

@@ -1335,14 +1335,16 @@ async function fetchPlacesByTextSearch(location, query, { type, radius = 5000 } 
   return normalizePlaces(data.results || [], location);
 }
 
-async function fetchPlaceDetails(placeId, { language = "en" } = {}) {
+async function fetchPlaceDetails(placeId, { language = "en", includeOpeningHours = false } = {}) {
   if (!getPlacesApiKey()) return null;
   if (!placeId) return null;
+  const baseFields = "place_id,name,rating,reviews,types,url,user_ratings_total,editorial_summary";
+  const fields = includeOpeningHours ? `${baseFields},opening_hours` : baseFields;
   const params = new URLSearchParams({
     place_id: placeId,
     key: getPlacesApiKey(),
     language: language || "en",
-    fields: "place_id,name,rating,reviews,types,url,user_ratings_total,editorial_summary",
+    fields,
   });
   const url = `https://maps.googleapis.com/maps/api/place/details/json?${params.toString()}`;
   const res = await fetch(url);
@@ -1350,6 +1352,13 @@ async function fetchPlaceDetails(placeId, { language = "en" } = {}) {
   const data = await res.json();
   const result = data?.result;
   if (!result) return null;
+  const openingHours = result?.opening_hours;
+  const openNow =
+    openingHours && typeof openingHours?.open_now === "boolean"
+      ? openingHours.open_now
+      : typeof result?.opening_hours?.open_now === "boolean"
+        ? result.opening_hours.open_now
+        : null;
   return {
     name: typeof result?.name === "string" ? result.name.trim() : null,
     rating: typeof result?.rating === "number" ? result.rating : null,
@@ -1361,6 +1370,7 @@ async function fetchPlaceDetails(placeId, { language = "en" } = {}) {
     reviewTexts: Array.isArray(result?.reviews)
       ? result.reviews.map((r) => String(r?.text || "").trim()).filter(Boolean)
       : [],
+    openNow: includeOpeningHours ? openNow : null,
   };
 }
 
@@ -2600,6 +2610,65 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
     lines.push("Doctor Anywhere / WhiteCoat");
     lines.push("オンラインでもMCは発行されます。");
   }
+  return lines.join("\n");
+}
+
+/** 🏥受診先モーダル用：一文＋日系2＋GP2（SG）or 病院2（他国）、理由2つ、営業中、星評価 */
+async function buildHospitalDetailsModalContent(state) {
+  const country = String(state?.locationContext?.country || "").trim();
+  const isSingapore = country === "Singapore";
+  const clinicCandidates = state?.clinicCandidates || [];
+  const hospitalCandidates = state?.hospitalCandidates || [];
+  const historyText = state?.historyTextForCare || "";
+  const plan = buildCareSearchQueries(detectCareMainSymptomText(state, historyText), null);
+
+  const intro = isSingapore
+    ? "シンガポールではまず、GPに相談するのが一般的です。"
+    : "この症状で相談できる近くの医療機関をまとめました。";
+
+  const lines = [intro, ""];
+
+  let places = [];
+  if (isSingapore) {
+    const japanese = clinicCandidates.filter(isJapaneseClinicOrSupport).slice(0, 2);
+    const gp = clinicCandidates.filter((c) => !isJapaneseClinicOrSupport).slice(0, 2);
+    places = [...japanese, ...gp];
+    if (places.length < 4) {
+      const rest = clinicCandidates.filter((c) => !places.includes(c)).slice(0, 4 - places.length);
+      places = [...places, ...rest];
+    }
+  } else {
+    const source = hospitalCandidates.length > 0 ? hospitalCandidates : clinicCandidates;
+    places = source.slice(0, 4);
+  }
+
+  for (let i = 0; i < Math.min(places.length, 4); i++) {
+    const c = places[i];
+    if (!c?.placeId) continue;
+    const details = await fetchPlaceDetails(c.placeId, { language: "ja", includeOpeningHours: true });
+    const name = details?.name || c.name || "";
+    const rating = details?.rating ?? c?.rating ?? c?.details?.rating;
+    const ratingStr = Number.isFinite(rating)
+      ? ` ★${rating.toFixed(1)}${Number.isFinite(details?.userRatingsTotal ?? c?.userRatingsTotal ?? c?.details?.userRatingsTotal) ? `（${(details?.userRatingsTotal ?? c?.userRatingsTotal ?? c?.details?.userRatingsTotal)}件）` : ""}`
+      : "";
+    const openNow = details?.openNow;
+    const openStr =
+      openNow === true ? " 営業中" : openNow === false ? " 休業中" : "";
+
+    const enriched = { ...c, details: details || c.details };
+    const reasons = buildHospitalRecommendationReasons(enriched, plan).slice(0, 2);
+
+    if (i > 0) lines.push("");
+    const sectionLabel = isSingapore
+      ? i < 2
+        ? `■日系クリニック ${i + 1}`
+        : `■近くのGP ${i - 1}`
+      : `■候補${i + 1}`;
+    lines.push(sectionLabel);
+    lines.push(`${name}${ratingStr}${openStr}`);
+    reasons.forEach((r) => lines.push(r));
+  }
+
   return lines.join("\n");
 }
 
@@ -9746,6 +9815,24 @@ app.post("/api/action-details", async (req, res) => {
       message: fallbackParts.join("\n"),
       sourcePolicy: [],
     });
+  }
+});
+
+app.post("/api/hospital-details", async (req, res) => {
+  try {
+    const { conversationId } = req.body || {};
+    const state = conversationId ? getOrInitConversationState(conversationId) : initConversationState();
+    const message = await buildHospitalDetailsModalContent(state);
+    return res.status(200).json({ message });
+  } catch (error) {
+    console.error("hospital-details error:", error);
+    const cid = (req.body && req.body.conversationId) || null;
+    const fallbackState = cid ? getOrInitConversationState(cid) : null;
+    const fallbackMsg =
+      fallbackState && fallbackState.decisionLevel === "🔴"
+        ? "受診先の詳細を取得できませんでした。近くの医療機関を検索してご確認ください。"
+        : "受診先の詳細を取得できませんでした。";
+    return res.status(200).json({ message: fallbackMsg });
   }
 });
 
