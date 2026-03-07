@@ -864,7 +864,7 @@ function extractSummary(text) {
 
 // Add message to chat (AIは即時表示)
 let isCollecting = true;
-function addMessage(text, isUser = false, save = true) {
+function addMessage(text, isUser = false, save = true, options = {}) {
   if (!isUser) {
     const raw = String(text || "");
     if (
@@ -879,7 +879,10 @@ function addMessage(text, isUser = false, save = true) {
   const messagesContainer = document.getElementById("chatMessages");
   const messageDiv = document.createElement("div");
   messageDiv.className = `message ${isUser ? "user" : "ai"}`;
-  
+  if (options.animateFromTop) {
+    messageDiv.classList.add("message--animate-from-top");
+  }
+
   if (isUser) {
     // User messages: show immediately
     messageDiv.textContent = text;
@@ -1293,7 +1296,7 @@ async function handleUserInput() {
       } else {
         setTimeout(() => {
           if (triageState.is_final && !isFirstResponse && sections.length > 0) renderSummary();
-          addMessage(aiMessage);
+          addMessage(aiMessage, false, true, { animateFromTop: !!aiResponse.isPreSummaryConfirmation });
           if (aiResponse.followUpMessage) {
             addMessage(aiResponse.followUpMessage);
           }

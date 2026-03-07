@@ -1351,6 +1351,7 @@ async function fetchPlaceDetails(placeId, { language = "en" } = {}) {
   const result = data?.result;
   if (!result) return null;
   return {
+    name: typeof result?.name === "string" ? result.name.trim() : null,
     rating: typeof result?.rating === "number" ? result.rating : null,
     userRatingsTotal:
       typeof result?.user_ratings_total === "number" ? result.user_ratings_total : null,
@@ -1361,6 +1362,15 @@ async function fetchPlaceDetails(placeId, { language = "en" } = {}) {
       ? result.reviews.map((r) => String(r?.text || "").trim()).filter(Boolean)
       : [],
   };
+}
+
+const MIN_RATING_FOR_CARE_DISPLAY = 3.8;
+
+function filterByMinRating(candidates) {
+  return (candidates || []).filter((c) => {
+    const r = c?.rating ?? c?.details?.rating;
+    return r != null && Number(r) > MIN_RATING_FOR_CARE_DISPLAY;
+  });
 }
 
 function sortPlacesByRatingThenDistance(list) {
@@ -1607,28 +1617,40 @@ function isJapaneseClinicOrSupport(candidate) {
   return /(内科|クリニック|耳鼻科|小児科|メンタル)/.test(name);
 }
 
+const CARE_REASONS_FALLBACKS = [
+  "・現在地から行きやすく、初期相談先として使いやすい候補です",
+  "・アクセスが良く、通院しやすい立地です",
+  "・評判が確認できる候補です",
+];
+
 function buildHospitalRecommendationReasons(candidate, plan) {
   const reasons = [];
   if (isJapaneseClinicOrSupport(candidate)) {
-    reasons.push("・日本語で話せるため、相談時の負担を下げやすい候補です");
+    reasons.push("・日本語が通じるため、相談しやすい候補です");
   }
   const reviewSummary = buildCareReviewSummary(candidate, plan);
   const reviewPoints = reviewSummary.filter((r) => r.startsWith("・"));
   reasons.push(...reviewPoints);
-  if (reasons.length < 3) {
+  if (reasons.length < 4) {
     const editorial = String(candidate?.details?.editorialSummary || "").trim();
     if (editorial && editorial.length <= 120 && editorial.length >= 10) {
       reasons.push(`・${editorial}`);
     }
   }
+  while (reasons.length < 3) {
+    const used = new Set(reasons);
+    const next = CARE_REASONS_FALLBACKS.find((f) => !used.has(f));
+    if (next) reasons.push(next);
+    else break;
+  }
   if (reasons.length > 0) {
-    return reasons.slice(0, 3);
+    return reasons.slice(0, 4);
   }
   if (Number.isFinite(candidate?.rating)) {
     const count = Number.isFinite(candidate?.userRatingsTotal) ? `（${candidate.userRatingsTotal}件）` : "";
-    return [`・Google評価は ${candidate.rating.toFixed(1)} ${count} で、利用者評価が確認できます`];
+    return [`・Google評価は ${candidate.rating.toFixed(1)} ${count} で、利用者評価が確認できます`, ...CARE_REASONS_FALLBACKS.slice(0, 2)];
   }
-  return [];
+  return CARE_REASONS_FALLBACKS.slice(0, 3);
 }
 
 function buildCareReviewSummary(candidate, plan) {
@@ -1641,27 +1663,27 @@ function buildCareReviewSummary(candidate, plan) {
   const points = [];
   const symptomLabel = plan?.symptomLabel || "症状";
   if (/(腹痛|gastro|digestive|消化器|stomach|abdominal|胃|お腹|下痢)/.test(joined)) {
-    points.push(`${symptomLabel}や消化器症状への対応が丁寧という口コミが多い`);
+    points.push(`${symptomLabel}・消化器症状への対応が丁寧`);
   }
   if (/(頭痛|headache|neurology|神経)/.test(joined)) {
-    points.push(`${symptomLabel}の相談に丁寧に対応してくれるという声`);
+    points.push(`${symptomLabel}の相談に丁寧に対応`);
   }
   if (/(発熱|fever|熱|咳|cough|喉|throat|のど)/.test(joined)) {
-    points.push(`${symptomLabel}の初期相談で利用しやすいという口コミ`);
+    points.push(`${symptomLabel}の初期相談で利用しやすい`);
   }
   if (/(explain|説明|丁寧|わかりやすい|careful|親切)/.test(joined)) {
-    points.push("説明が丁寧で相談しやすいという声");
+    points.push("説明が丁寧で相談しやすい");
   }
   if (/(wait|待ち|quick|fast|smooth|スムーズ)/.test(joined)) {
-    points.push("待ち時間や案内がスムーズという記載");
+    points.push("待ち時間や案内がスムーズ");
   }
   if (/(friendly|親切|kind|staff|対応)/.test(joined)) {
-    points.push("スタッフ対応が親切という口コミ");
+    points.push("スタッフ対応が親切");
   }
   if (/(japanese|日本語|日系)/.test(joined)) {
-    points.push("日本語での相談がしやすいという声");
+    points.push("日本語が通じる");
   }
-  return points.slice(0, 3).map((p) => `・${p}`);
+  return points.slice(0, 4).map((p) => `・${p}`);
 }
 
 async function reverseGeocodeLocation(location) {
@@ -1915,7 +1937,14 @@ async function resolveHospitalCandidates(state) {
     const last = await fetchPlacesByTextSearch(location, q, { radius: 50000 });
     results.push(...last);
   }
-  return sortPlacesByRatingThenDistance(mergePlaces(results)).slice(0, 2);
+  const merged = sortPlacesByRatingThenDistance(mergePlaces(results)).slice(0, 2);
+  const enriched = [];
+  for (const item of merged) {
+    const details = await fetchPlaceDetails(item.placeId, { language: "ja" });
+    const displayName = details?.name || item.name;
+    enriched.push({ ...item, name: displayName || item.name });
+  }
+  return enriched;
 }
 
 async function resolvePharmacyCandidates(state) {
@@ -2000,8 +2029,9 @@ function buildHospitalRecommendationDetail(state, locationContext, clinicCandida
     Array.isArray(hospitalCandidates) ? hospitalCandidates : []
   );
   const filtered = isSingapore ? merged : applySymptomFitFilter(merged, plan);
+  const meetsRating = filterByMinRating(filtered);
   const maxCandidates = isSingapore ? 3 : 2;
-  const candidates = prioritizeCareCandidates(filtered, state).slice(0, maxCandidates);
+  const candidates = prioritizeCareCandidates(meetsRating, state).slice(0, maxCandidates);
   const useHospital = (hospitalCandidates?.length || 0) > 0;
   const hasRealCandidates = candidates.length > 0 && candidates.some((c) => c?.placeId);
   if ((canRecommendSpecificPlaceFinal(state) || hasRealCandidates) && candidates.length) {
@@ -2478,14 +2508,15 @@ async function resolveCareCandidates(state, destination) {
   const results = await fetchCarePlacesWithFallbacks(location, plan, state);
   const mergedBase = mergePlaces(results);
   const symptomFitted = isSingapore ? mergedBase : applySymptomFitFilter(mergedBase, plan);
-  const merged = prioritizeCareCandidates(symptomFitted, state).slice(0, 6);
-  const isJapan = /japan|jp|日本/i.test(country || "");
+  const merged = prioritizeCareCandidates(symptomFitted, state).slice(0, 10);
   const maxReturn = isSingapore ? 3 : 2;
   const enriched = [];
   for (const item of merged) {
-    const details = await fetchPlaceDetails(item.placeId, { language: isJapan ? "ja" : "en" });
+    const details = await fetchPlaceDetails(item.placeId, { language: "ja" });
+    const displayName = details?.name || item.name;
     enriched.push({
       ...item,
+      name: displayName || item.name,
       details,
       rating: details?.rating ?? item.rating,
       userRatingsTotal: details?.userRatingsTotal ?? item.userRatingsTotal,
@@ -2493,7 +2524,8 @@ async function resolveCareCandidates(state, destination) {
       mapsUrl: details?.mapUrl || item.mapsUrl,
     });
   }
-  return enriched.length ? enriched.slice(0, maxReturn) : merged.slice(0, maxReturn);
+  const meetsRating = filterByMinRating(enriched);
+  return meetsRating.slice(0, maxReturn);
 }
 
 function buildHospitalBlock(state, historyText, hospitalRec) {
@@ -2506,6 +2538,10 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
   const maxDisplay = isSingapore ? 3 : 2;
   const candidates = rawCandidates
     .filter((c) => String(c?.name || "").trim().length > 0)
+    .filter((c) => {
+      const r = c?.rating ?? c?.details?.rating;
+      return r != null && Number(r) > MIN_RATING_FOR_CARE_DISPLAY;
+    })
     .filter((c, idx, arr) => arr.findIndex((x) => String(x.name).trim() === String(c.name).trim()) === idx)
     .slice(0, maxDisplay);
   // 🔴のみ：夜間（20:00〜5:59）のときだけ、無理をさせない一文を追加
@@ -2530,36 +2566,35 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
   const timeMessage = isLateNight
     ? "現在は夜間の時間帯です。症状が強くなければ、明日受診する形が選択肢の一つです。"
     : "";
+  const headerLine = isSingapore ? "おすすめの医療機関（日本人クリニック・近くのGP）" : destination.header;
   const lines = [
     "🏥 受診先の候補",
-    timeMessage,
-    "",
+    ...(timeMessage ? [timeMessage] : []),
     "⸻",
-    "",
-    isSingapore ? "おすすめの医療機関（日本人クリニック・近くのGP）" : destination.header,
-  ].filter(Boolean);
+    headerLine,
+  ];
 
   const list = Array.isArray(candidates) ? candidates : [];
   if (list.length > 0) {
     list.forEach((c, idx) => {
       const normalizedName = String(c?.name || "").trim();
-      lines.push("");
+      const rating = c?.rating ?? c?.details?.rating;
+      const ratingStr = Number.isFinite(rating)
+        ? ` ★${rating.toFixed(1)}${Number.isFinite(c?.userRatingsTotal ?? c?.details?.userRatingsTotal) ? `（${(c?.userRatingsTotal ?? c?.details?.userRatingsTotal)}件）` : ""}`
+        : "";
+      if (idx > 0) lines.push("");
       const numLabel = ["①", "②", "③"][idx] || `・候補${idx + 1}`;
-      lines.push(`${numLabel} ${normalizedName}`);
+      lines.push(`${numLabel} ${normalizedName}${ratingStr}`);
       lines.push("  いいところ：");
       const reasons = buildHospitalRecommendationReasons(c, plan);
-      if (reasons.length > 0) {
-        reasons.slice(0, 3).forEach((r) => lines.push(`  ${r}`));
-      } else {
-        lines.push("  ・現在地から行きやすく、初期相談先として使いやすい候補です");
-      }
+      reasons.slice(0, 4).forEach((r) => lines.push(`  ${r}`));
     });
   } else {
     lines.push("位置情報から近くの医療機関を検索しましたが、見つかりませんでした。");
   }
-  lines.push("");
   // 仕様: INFECTION ではオンライン診療案内を表示しない（強制）。🔴ではMC関連を一切入れない（強制）
   if (category !== "INFECTION" && state?.decisionLevel !== "🔴") {
+    lines.push("");
     lines.push("もし、外出がつらい場合は、オンライン診療という方法もあります。");
     lines.push("今の症状であればオンラインでの初期相談は可能です。");
     lines.push("Doctor Anywhere / WhiteCoat");
@@ -3631,6 +3666,27 @@ function isDecline(text) {
     /(今はいい|大丈夫です|結構です|いりません|不要|いいえ|やめて)/.test(t);
 }
 
+/** 🔴質問①：「ここで整理」を選んだか（整理・まとめ・準備・診察まで・最初・前者・1・一つ目 等） */
+function isRedChoicePrepare(text) {
+  const t = (text || "").trim();
+  return /^(整理|まとめ|準備|診察まで|最初|前者|1|一つ目|ひとつ目|左)/.test(t) ||
+    /(ここで整理|診察までの準備|整理して|まとめて|準備を)/.test(t);
+}
+
+/** 🔴質問①：「英語」を選んだか（英語・伝え方・後者・2・二つ目 等） */
+function isRedChoiceEnglish(text) {
+  const t = (text || "").trim();
+  return /^(英語|伝え方|後者|2|二つ目|ふたつ目|右)/.test(t) ||
+    /(英語で|伝え方を|英語の)/.test(t);
+}
+
+/** 🔴質問①：「どっちも」を選んだか（両方・どっちも・両方とも・両方お願い 等） */
+function isRedChoiceBoth(text) {
+  const t = (text || "").trim();
+  return /^(両方|どっちも|両方とも|両方お願い|両方お願いします|両方したい)/.test(t) ||
+    /(両方|どっちも|両方とも)/.test(t);
+}
+
 function isRestChoice(text) {
   const t = (text || "").trim();
   return (
@@ -3897,7 +3953,7 @@ function buildCommunicationScript(state, destinationName, decisionType) {
   ].join("\n");
 
   const smartphoneLine = "そのままスマホを見せても大丈夫です。";
-  const nextQuestion = `診察までの間にできることも、今ここで整理できます。${FOLLOW_UP_SUFFIX}`;
+  const nextInvite = "他にも気になることがあればなんでも言ってください";
 
   return [
     reassurance,
@@ -3910,25 +3966,46 @@ function buildCommunicationScript(state, destinationName, decisionType) {
     en,
     "",
     smartphoneLine,
-    nextQuestion,
+    "",
+    nextInvite,
   ].join("\n");
+}
+
+/** buildCommunicationScript の ④【English】＋⑤＋⑥ 部分（🔴「どっちも」用） */
+function buildCommunicationScriptEnglishPart(state, destinationName, decisionType) {
+  const full = buildCommunicationScript(state, destinationName, decisionType);
+  const idx = full.indexOf("【English】");
+  if (idx === -1) return full;
+  return full.slice(idx);
 }
 
 function buildImmediateActionsWithReasons(state, decisionType) {
   const snapshot = state?.judgmentSnapshot || {};
   if (decisionType === "A_HOSPITAL") {
-    return [
+    const category = resolveQuestionCategoryFromState(state);
+    const items = [];
+    if (category === "INFECTION") {
+      items.push(
+        ["・体温を測る", "　→ 数字があると説明が早くなります"],
+        ["・マスクを用意する", "　→ 感染症の対策はしておきましょう"],
+        ["・受診の伝え方をメモしておく", "　→ 診察室で落ち着いて話しやすくなります"]
+      );
+    } else {
+      const symptom = snapshot.main_symptom || "症状";
+      items.push(
+        ["・体温を測る", "　→ 数字があると説明が早くなります"],
+        ["・今の症状を一言で言えるようにしておく", "　→ 診察がスムーズになります"],
+        [`・${symptom}の経過をメモしておく`, "　→ 医師に伝えやすくなります"]
+      );
+    }
+    const lines = [
       "診察までの間に、できることを簡単にまとめます。",
       "",
-      "・体温を測る",
-      "　→ 数字があると説明が早くなります",
+      ...items.slice(0, 3).flatMap(([title, reason]) => [title, reason]),
       "",
-      "・マスクを用意する",
-      "　→ 感染症の対策はしておきましょう",
-      "",
-      "今は、病院に向かう準備を優先してください。",
-      "迷ったら、この画面をそのまま見せて大丈夫です。",
-    ].join("\n");
+      "今は、病院に向かう準備を優先してください。迷ったら、この画面をそのまま見せて大丈夫です。",
+    ];
+    return lines.join("\n");
   }
   return buildWatchfulActions(state);
 }
@@ -3941,6 +4018,11 @@ function buildNextFlow(decisionType) {
 }
 
 const FOLLOW_UP_SUFFIX = "\n\n他にも気になることがあればなんでも言ってください";
+
+/** 🔴質問①（A_HOSPITAL用）：診察前準備 or 英語伝え方の選択 */
+function buildRedFollowUpQuestion() {
+  return `診察までの間にできることを、今ここで整理できますか？　それとも受診先で英語でどう伝えたらいいか、一緒に考えますか？${FOLLOW_UP_SUFFIX}`;
+}
 
 function buildFollowUpQuestion1(destinationName) {
   return `もしよろしければ、${destinationName}でどう伝えればいいか、一緒に考えましょうか？${FOLLOW_UP_SUFFIX}`;
@@ -4100,6 +4182,22 @@ function handleFollowUpFlow(message, state) {
       const script = buildCommunicationScript(state, destinationName, decisionType);
       return { message: script };
     }
+    if (resume === "red_prepare") {
+      state.followUpPhase = "closed";
+      const actions = buildImmediateActionsWithReasons(state, decisionType);
+      return { message: actions };
+    }
+    if (resume === "red_english") {
+      state.followUpPhase = "closed";
+      const script = buildCommunicationScript(state, destinationName, decisionType);
+      return { message: script };
+    }
+    if (resume === "red_both") {
+      state.followUpPhase = "closed";
+      const actions = buildImmediateActionsWithReasons(state, decisionType);
+      const englishPart = buildCommunicationScriptEnglishPart(state, destinationName, decisionType);
+      return { message: `${actions}\n\n${englishPart}` };
+    }
   }
 
   if (decisionType === "C_WATCHFUL_WAITING") {
@@ -4149,14 +4247,59 @@ function handleFollowUpFlow(message, state) {
     return { message: buildClosingMessage() };
   }
 
-  const q1 = buildFollowUpQuestion1(destinationName);
-  const q2Hospital = `診察までの間にできることも、今ここで整理できます。${FOLLOW_UP_SUFFIX}`;
+  // A_HOSPITAL（🔴）：質問①は診察前準備 or 英語伝え方の選択。B_PHARMACYは従来の伝え方質問。
+  const q1 =
+    decisionType === "A_HOSPITAL"
+      ? buildRedFollowUpQuestion()
+      : buildFollowUpQuestion1(destinationName);
 
   if (state.followUpPhase === "closed") {
     return { message: buildClosingMessage() };
   }
 
   if (state.followUpStep <= 1) {
+    if (isDecline(trimmed)) {
+      state.followUpPhase = "closed";
+      return { message: buildClosingMessage() };
+    }
+    if (decisionType === "A_HOSPITAL") {
+      if (isRedChoiceBoth(trimmed)) {
+        const missing = getMissingFieldForFollowUp(state.judgmentSnapshot);
+        if (missing) {
+          state.followUpSnapshotPendingField = missing.field;
+          state.followUpSnapshotResume = "red_both";
+          return { message: missing.question };
+        }
+        state.followUpPhase = "closed";
+        const actions = buildImmediateActionsWithReasons(state, decisionType);
+        const englishPart = buildCommunicationScriptEnglishPart(state, destinationName, decisionType);
+        return { message: `${actions}\n\n${englishPart}` };
+      }
+      if (isRedChoicePrepare(trimmed)) {
+        const missing = getMissingFieldForFollowUp(state.judgmentSnapshot);
+        if (missing) {
+          state.followUpSnapshotPendingField = missing.field;
+          state.followUpSnapshotResume = "red_prepare";
+          return { message: missing.question };
+        }
+        state.followUpPhase = "closed";
+        const actions = buildImmediateActionsWithReasons(state, decisionType);
+        return { message: actions };
+      }
+      if (isRedChoiceEnglish(trimmed)) {
+        const missing = getMissingFieldForFollowUp(state.judgmentSnapshot);
+        if (missing) {
+          state.followUpSnapshotPendingField = missing.field;
+          state.followUpSnapshotResume = "red_english";
+          return { message: missing.question };
+        }
+        state.followUpPhase = "closed";
+        const script = buildCommunicationScript(state, destinationName, decisionType);
+        return { message: script };
+      }
+      return { message: "どちらにしますか？「ここで整理」か「英語」か、どちらか教えてください。" };
+    }
+    // B_PHARMACY：はい/いいえ
     if (isAffirmative(trimmed)) {
       const missing = getMissingFieldForFollowUp(state.judgmentSnapshot);
       if (missing) {
@@ -4164,29 +4307,11 @@ function handleFollowUpFlow(message, state) {
         state.followUpSnapshotResume = "communication_script";
         return { message: missing.question };
       }
-      state.followUpStep = 2;
+      state.followUpPhase = "closed";
       const script = buildCommunicationScript(state, destinationName, decisionType);
       return { message: script };
     }
-    if (isDecline(trimmed)) {
-      state.followUpPhase = "closed";
-      return { message: buildClosingMessage() };
-    }
     return { message: "伝え方を一緒に考えますか？「はい」か「今はいいです」か、どちらか教えてください。" };
-  }
-
-  if (state.followUpStep === 2) {
-    if (isAffirmative(trimmed)) {
-      state.followUpPhase = "closed";
-      const actions = buildImmediateActionsWithReasons(state, decisionType);
-      const flow = buildNextFlow(decisionType);
-      return { message: flow ? `${actions}\n\n${flow}` : actions };
-    }
-    if (isDecline(trimmed)) {
-      state.followUpPhase = "closed";
-      return { message: buildClosingMessage() };
-    }
-    return { message: "診察までの準備を整理しますか？「はい」か「今はいいです」か、どちらか教えてください。" };
   }
 
   return { message: buildClosingMessage() };
@@ -8799,6 +8924,7 @@ app.post("/api/chat", async (req, res) => {
       return res.json({
         message: confirmMsg,
         response: confirmMsg,
+        isPreSummaryConfirmation: true,
         judgeMeta: {
           judgement: finalLevel,
           confidence,
@@ -9128,9 +9254,7 @@ app.post("/api/chat", async (req, res) => {
           destinationName,
           decisionType
         );
-        followUpQuestion = buildFollowUpQuestion1(
-          conversationState[conversationId].followUpDestinationName
-        );
+        followUpQuestion = buildRedFollowUpQuestion();
       } else {
         conversationState[conversationId].followUpPhase = "questioning";
         conversationState[conversationId].followUpStep = 1;

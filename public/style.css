@@ -223,6 +223,22 @@ body {
     animation: none;
 }
 
+/* まとめ前の確認メッセージ：上から下へスライドイン（すぐ出さず、上から下に表示） */
+.message.ai.message--animate-from-top {
+    animation: messageSlideFromTop 0.5s ease-out forwards;
+    transform-origin: top center;
+}
+@keyframes messageSlideFromTop {
+    from {
+        opacity: 0;
+        transform: translateY(-24px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
 .chat-input-container {
     display: flex;
     align-items: center;
