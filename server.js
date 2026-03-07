@@ -3,7 +3,7 @@ const express = require("express");
 const cors = require("cors");
 const OpenAI = require("openai");
 const path = require("path");
-require("dotenv").config();
+// Railway は環境変数を直接注入するため dotenv は不要
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1271,8 +1271,15 @@ function mergePlaces(...lists) {
 }
 
 function getPlacesApiKey() {
+  const key = process.env.GOOGLE_PLACES_API_KEY;
+  console.log("[Places API] ENV CHECK:", {
+    "GOOGLE_PLACES_API_KEY in process.env": "GOOGLE_PLACES_API_KEY" in process.env,
+    "value exists": !!key,
+    "value length": key ? key.length : 0,
+    "GOOGLE_* keys": Object.keys(process.env || {}).filter((k) => /^GOOGLE/i.test(k)),
+  });
   return (
-    process.env.GOOGLE_PLACES_API_KEY ||
+    key ||
     process.env.GOOGLE_MAPS_API_KEY ||
     process.env.GOOGLE_CUSTOM_SEARCH_API_KEY ||
     process.env.GOOGLE_API_KEY
@@ -5328,10 +5335,7 @@ function buildStateFactsBullets(state) {
   const associated = val("associated", answers.associated_symptoms);
   if (associated && !isUnknownLike(associated)) {
     const a = String(associated).trim();
-    const assocLine = /(ある|ない|続く|出る|つらい|痛い|苦しい|しびれ|吐き気|めまい|嘔吐|発熱)/.test(a)
-      ? `・${a}`
-      : `・付随症状として${a}`;
-    pushIfValid(lines, assocLine);
+    pushIfValid(lines, `・${a}`);
   }
 
   const cause = val("cause_category", state?.causeDetailText || answers.cause_category);
