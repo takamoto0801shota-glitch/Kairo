@@ -2404,6 +2404,39 @@ function sanitizeSummaryQuestions(text) {
   return text.replace(/[？?]/g, "。");
 }
 
+/** LLM出力の簡潔化：「〜の可能性があります」→「〜の可能性」など */
+function simplifyPossibilityPhrases(text) {
+  if (!text) return text;
+  return text.replace(/の可能性があります/g, "の可能性");
+}
+
+/** 漢字・誤字修正：ひらがなを適切な漢字に変換（症状文脈） */
+function correctKanjiAndTypos(text) {
+  if (!text) return text;
+  let t = text;
+  const replacements = [
+    [/(頭|あたま)があつい/g, "頭が熱い"],
+    [/頭がいたい/g, "頭が痛い"],
+    [/お腹がいたい/g, "お腹が痛い"],
+    [/おなかがいたい/g, "お腹が痛い"],
+    [/腹がいたい/g, "お腹が痛い"],
+    [/のどがいたい/g, "のどが痛い"],
+    [/喉がいたい/g, "喉が痛い"],
+    [/(^|[。\s])ねつがある/g, "$1熱がある"],
+    [/(^|[。\s])ねつが(ある|でる)/g, "$1熱が$2"],
+    [/ずつう/g, "頭痛"],
+    [/ふつう/g, "普通"],
+    [/はきけ/g, "吐き気"],
+    [/げり/g, "下痢"],
+    [/いたみ/g, "痛み"],
+    [/きもちがわるい/g, "気持ちが悪い"],
+  ];
+  for (const [pat, repl] of replacements) {
+    t = t.replace(pat, repl);
+  }
+  return t;
+}
+
 function buildOutlookTriggers(state) {
   const triggers = [];
   const painScore = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
@@ -2883,7 +2916,10 @@ function stripInfectionOnlineClinicGuidance(text, state) {
   return filtered.replace(/\n{3,}/g, "\n\n");
 }
 
-/** 🔴時はMC関連の文を必ず除去（LLM漏れ対策） */
+const REST_BLOCK_HEADER = /^🧾\s*休息とMCの目安/;
+const NEXT_SECTION_HEADER = /^(🟢|🟡|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬)\s/;
+
+/** 🔴時はMC・休息ブロックを必ず除去（LLM漏れ対策） */
 function stripMcForRed(text, level) {
   if (!text || level !== "🔴") return text;
   const mcForbidden = new Set([
@@ -2894,17 +2930,32 @@ function stripMcForRed(text, level) {
     "今の症状であればオンラインでの初期相談は可能です。",
     "オンラインでもMCは発行されます。",
   ]);
-  const filtered = text
-    .split("\n")
-    .filter((line) => {
-      const t = String(line || "").trim();
-      if (!t) return true;
-      if (mcForbidden.has(t)) return false;
-      if (/MC.*取得|MC.*発行|オンライン.*MC|MC.*オンライン/.test(t)) return false;
-      return true;
-    })
-    .join("\n");
-  return filtered.replace(/\n{3,}/g, "\n\n");
+  const lines = text.split("\n");
+  const result = [];
+  let inRestBlock = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const t = String(line || "").trim();
+    if (REST_BLOCK_HEADER.test(line)) {
+      inRestBlock = true;
+      continue;
+    }
+    if (inRestBlock) {
+      if (NEXT_SECTION_HEADER.test(line)) {
+        inRestBlock = false;
+      } else {
+        continue;
+      }
+    }
+    if (!t) {
+      result.push(line);
+      continue;
+    }
+    if (mcForbidden.has(t)) continue;
+    if (/MC.*取得|MC.*発行|オンライン.*MC|MC.*オンライン/.test(t)) continue;
+    result.push(line);
+  }
+  return result.join("\n").replace(/\n{3,}/g, "\n\n");
 }
 
 function stripHospitalMapLinks(text) {
@@ -3628,7 +3679,8 @@ function resolveRestLevelFromState(state) {
     // 仕様: GI は常に LIGHT
     return "LIGHT";
   }
-  // PAIN / INFECTION は 4問目（daily_impact）の回答を 1:1 で参照する
+  // INFECTION は daily_impact（体温）の回答を 1:1 で参照。PAIN は daily_impact を削除したため LIGHT で固定。
+  if (category === "PAIN") return "LIGHT";
   const byAnswer = mapDailyImpactAnswerToRestLevel(state?.slotAnswers?.daily_impact);
   if (byAnswer) return byAnswer;
   // 自由記述は近似マッピング結果（slotNormalized）でフォールバック
@@ -4471,6 +4523,16 @@ const SLOT_STATUS_KEY_MAP = {
   worsening_trend: "worsening_trend",
 };
 
+const STATUS_KEY_TO_SLOT = {
+  severity: "pain_score",
+  worsening: "worsening",
+  duration: "duration",
+  impact: "daily_impact",
+  associated: "associated_symptoms",
+  cause_category: "cause_category",
+  worsening_trend: "worsening_trend",
+};
+
 const FIXED_SLOT_ORDER = [
   "pain_score",
   "worsening",
@@ -4511,8 +4573,16 @@ function getSlotOrderWithConditional(state) {
   if (category === "SKIN") {
     base = base.filter((k) => k !== "cause_category");
   }
-  if (category === "GI") {
+  if (category === "GI" || category === "PAIN") {
     base = base.filter((k) => k !== "daily_impact");
+  }
+  if (category === "PAIN" || category === "INFECTION") {
+    const idx4 = base.indexOf("daily_impact");
+    const idx5 = base.indexOf("associated_symptoms");
+    if (idx4 >= 0 && idx5 >= 0) {
+      base[idx4] = "associated_symptoms";
+      base[idx5] = "daily_impact";
+    }
   }
   return base;
 }
@@ -4828,8 +4898,9 @@ function setSlotFromSpontaneous(state, slotKey, payload = {}) {
   return true;
 }
 
-function applySpontaneousSlotFill(state, message) {
+function applySpontaneousSlotFill(state, message, opts = {}) {
   if (!state) return 0;
+  const { isFirstMessage = false } = opts;
   const text = normalizeUserText(message);
   if (!text) return 0;
   ensureSlotStatusShape(state);
@@ -4895,6 +4966,13 @@ function applySpontaneousSlotFill(state, message) {
       allowOverwrite: correction,
     })) {
       state.associatedSymptoms = associated.associated || [];
+      if (isFirstMessage) {
+        state.associatedSymptomsFromFirstMessage = true;
+      }
+      const raw = String(associated.raw || "").toLowerCase();
+      if (/(だるさや発熱|発熱がある|頭が熱い|頭があつい|ねつがある|熱がある|熱っぽい|熱が出)/.test(raw)) {
+        state.triageCategory = "INFECTION";
+      }
       added += 1;
     }
   }
@@ -5190,11 +5268,19 @@ function detectQuestionCategory4(text) {
 function resolveLockedQuestionCategory(state, historyText = "") {
   if (state?.triageCategory) return state.triageCategory;
   const fromState = resolveQuestionCategoryFromState(state);
-  if (fromState) {
+  if (fromState === "INFECTION" && state?.slotFilled?.associated_symptoms) {
+    state.triageCategory = "INFECTION";
+    return "INFECTION";
+  }
+  if (fromState && fromState !== "INFECTION") {
     state.triageCategory = fromState;
     return fromState;
   }
   const detected = detectQuestionCategory4(historyText);
+  if (detected === "INFECTION") {
+    state.triageCategory = "PAIN";
+    return "PAIN";
+  }
   state.triageCategory = detected || "PAIN";
   return state.triageCategory;
 }
@@ -5231,10 +5317,7 @@ function getCategoryQuestionOverride(category, slotKey) {
       };
     }
     if (slotKey === "associated_symptoms") {
-      return {
-        question: "今一番つらい症状はどれに近いですか？",
-        options: ["喉の違和感や鼻水", "強い全身のだるさ", "咳が強い／胸が苦しい"],
-      };
+      return null;
     }
     if (slotKey === "cause_category") {
       return {
@@ -5260,13 +5343,31 @@ function getCategoryQuestionOverride(category, slotKey) {
   return null;
 }
 
-function applyCategoryQuestionOverride(fixed, slotKey, category, useFinalPrefix) {
+function hasFeverMentionInHistory(historyText) {
+  const text = String(historyText || "");
+  return /(頭が熱い|頭があつい|ねつがある|熱がある|熱っぽい|発熱|熱が出)/.test(text);
+}
+
+function buildPainInfectionAssociatedOptions(historyText) {
+  const hasFever = hasFeverMentionInHistory(historyText);
+  const base = ["これ以外は特にない", "吐き気がある"];
+  const third = hasFever ? "だるさがある" : "だるさや発熱がある";
+  return [...base, third];
+}
+
+function applyCategoryQuestionOverride(fixed, slotKey, category, useFinalPrefix, historyText = "") {
   if (!fixed || !slotKey) return fixed;
   if (slotKey === "worsening") {
     const baseCategory = detectSymptomCategory(category === "GI" ? "腹痛" : category === "INFECTION" ? "喉" : category === "SKIN" ? "ヒリヒリ" : "頭痛");
     const options = buildPainQualityOptions(baseCategory);
     fixed.options = options;
     fixed.question = `${useFinalPrefix ? "最後に、" : ""}${FIXED_QUESTIONS.worsening.q}\n・${options.join("\n・")}`;
+    return fixed;
+  }
+  if ((category === "PAIN" || category === "INFECTION") && slotKey === "associated_symptoms") {
+    const options = buildPainInfectionAssociatedOptions(historyText);
+    fixed.options = options;
+    fixed.question = `${useFinalPrefix ? "最後に、" : ""}${FIXED_QUESTIONS.associated_symptoms.q}\n・${options.join("\n・")}`;
     return fixed;
   }
   const override = getCategoryQuestionOverride(category, slotKey);
@@ -5472,12 +5573,18 @@ function normalizeFreeTextForSummary(text) {
     .trim();
 }
 
+/** ユーザー回答をそのまま返す（緊急度判定以外で使用）。slotAnswers（raw）を優先し、フィルタを通さない。 */
 function getSlotStatusValue(state, statusKey, fallback = "") {
-  const raw = state?.slotStatus?.[statusKey]?.value;
-  const picked = raw !== null && raw !== undefined && String(raw).trim() !== ""
-    ? raw
-    : fallback;
-  return normalizeFreeTextForSummary(picked);
+  const slotKey = STATUS_KEY_TO_SLOT[statusKey] || statusKey;
+  const fromAnswers = state?.slotAnswers?.[slotKey];
+  const fromStatus = state?.slotStatus?.[statusKey]?.value;
+  const picked =
+    fromAnswers !== null && fromAnswers !== undefined && String(fromAnswers).trim() !== ""
+      ? fromAnswers
+      : fromStatus !== null && fromStatus !== undefined && String(fromStatus).trim() !== ""
+        ? fromStatus
+        : fallback;
+  return String(picked ?? "").trim();
 }
 
 function buildFactsFromSlotAnswers(state) {
@@ -5510,7 +5617,7 @@ function buildFactsFromSlotAnswers(state) {
   if (durationRaw) {
     facts.push(`始まりは「${durationRaw}」`);
   }
-  if (associatedRaw) {
+  if (!state?.associatedSymptomsFromFirstMessage && associatedRaw) {
     if (associatedRaw.includes("ない")) {
       facts.push("これ以外の症状は特にない");
     } else {
@@ -5625,10 +5732,12 @@ function buildStateFactsBullets(state) {
     pushIfValid(lines, `・${impact}`);
   }
 
-  const associated = val("associated", answers.associated_symptoms);
-  if (associated && !isUnknownLike(associated)) {
-    const a = String(associated).trim();
-    pushIfValid(lines, `・${a}`);
+  if (!state?.associatedSymptomsFromFirstMessage) {
+    const associated = val("associated", answers.associated_symptoms);
+    if (associated && !isUnknownLike(associated)) {
+      const a = String(associated).trim();
+      pushIfValid(lines, `・${a}`);
+    }
   }
 
   const cause = val("cause_category", state?.causeDetailText || answers.cause_category);
@@ -8142,6 +8251,9 @@ function mapFreeTextToOptionIndex(answer, options, type) {
 
   if (type === "associated_symptoms") {
     if (none.test(text)) return 0;
+    if (indexOf("吐き気がある") >= 0 && /吐き気|嘔吐|むかむか/.test(text)) return 1;
+    if ((indexOf("だるさや発熱がある") >= 0 || indexOf("だるさがある") >= 0) &&
+        /だるさ|発熱|熱|頭が熱い|頭があつい|ねつ|熱っぽい/.test(text)) return 2;
     if (severe.test(text)) return Math.min(2, options.length - 1);
     return options.length >= 3 ? 1 : 0;
   }
@@ -8478,7 +8590,8 @@ app.post("/api/chat", async (req, res) => {
     }
     const state = getOrInitConversationState(conversationId);
     if (!state.triageCategory) {
-      state.triageCategory = detectQuestionCategory4(message);
+      const detected = detectQuestionCategory4(message);
+      state.triageCategory = detected === "INFECTION" ? "PAIN" : detected;
     }
     console.log("[DEBUG] request init", {
       conversationId,
@@ -8508,9 +8621,8 @@ app.post("/api/chat", async (req, res) => {
     const locationRePromptMessage = null;
     ensureSlotFilledConsistency(conversationState[conversationId]);
     const filledBeforeTurn = countFilledSlots(conversationState[conversationId].slotFilled, conversationState[conversationId]);
-    applySpontaneousSlotFill(conversationState[conversationId], message);
-
     const userMessageCountBefore = (conversationHistory[conversationId] || []).filter((m) => m.role === "user").length;
+    applySpontaneousSlotFill(conversationState[conversationId], message, { isFirstMessage: userMessageCountBefore === 0 });
     const isFirstUserMessage = userMessageCountBefore === 0;
 
     // 絶対防御: 初回ユーザーメッセージではサマリー・フォローを絶対に返さない
@@ -8521,7 +8633,7 @@ app.post("/api/chat", async (req, res) => {
       let fixed = buildFixedQuestion(firstSlot, false);
       const historyText = message;
       const category = resolveLockedQuestionCategory(state, historyText);
-      applyCategoryQuestionOverride(fixed, firstSlot, category, false);
+      applyCategoryQuestionOverride(fixed, firstSlot, category, false, historyText);
       const symptomLabel = toMainSymptomLabelForSafety(message);
       const safetyTemplate = FIRST_QUESTION_SAFETY_TEMPLATES[Math.floor(Math.random() * FIRST_QUESTION_SAFETY_TEMPLATES.length)];
       const safetyLine = safetyTemplate(symptomLabel);
@@ -8752,6 +8864,15 @@ app.post("/api/chat", async (req, res) => {
             conversationState[conversationId].causeDetailText = freeText.trim();
           }
         }
+        if (type === "associated_symptoms") {
+          const selectedOpt = lastOptionsSnapshot[selectedIndex] || valueForDisplay || "";
+          const answerText = (valueForDisplay || selectedOpt || "").toLowerCase();
+          const isFeverAnswer = /だるさや発熱|発熱がある|頭が熱い|頭があつい|ねつがある|熱がある|熱っぽい|熱が出/.test(selectedOpt) ||
+            /だるさや発熱|発熱がある|頭が熱い|頭があつい|ねつがある|熱がある|熱っぽい|熱が出/.test(answerText);
+          if (isFeverAnswer) {
+            conversationState[conversationId].triageCategory = "INFECTION";
+          }
+        }
         conversationState[conversationId].confidence = computeConfidenceFromSlots(
           conversationState[conversationId].slotFilled,
           conversationState[conversationId]
@@ -8879,7 +9000,7 @@ app.post("/api/chat", async (req, res) => {
           conversationState[conversationId],
           historyText
         );
-        applyCategoryQuestionOverride(fixed, nextSlot, category, useFinalPrefix);
+        applyCategoryQuestionOverride(fixed, nextSlot, category, useFinalPrefix, historyText);
         const introTemplateIds = buildIntroTemplateIds(
           conversationState[conversationId],
           conversationState[conversationId].questionCount,
@@ -8937,7 +9058,7 @@ app.post("/api/chat", async (req, res) => {
         conversationState[conversationId],
         historyText
       );
-      applyCategoryQuestionOverride(fixed, fallbackSlot, category, false);
+      applyCategoryQuestionOverride(fixed, fallbackSlot, category, false, historyText);
       const aiResponseForced = fixed.question;
       conversationState[conversationId].lastOptions = fixed.options;
       conversationState[conversationId].lastQuestionType = fixed.type;
@@ -9030,7 +9151,7 @@ app.post("/api/chat", async (req, res) => {
         conversationState[conversationId],
         historyText
       );
-      applyCategoryQuestionOverride(fixed, forcedSlot, category, false);
+      applyCategoryQuestionOverride(fixed, forcedSlot, category, false, historyText);
       aiResponse = fixed.question;
       conversationState[conversationId].lastOptions = fixed.options;
       conversationState[conversationId].lastQuestionType = fixed.type;
@@ -9283,6 +9404,8 @@ app.post("/api/chat", async (req, res) => {
       );
       aiResponse = sanitizeGeneralPhrases(aiResponse);
       aiResponse = sanitizeSummaryQuestions(aiResponse);
+      aiResponse = simplifyPossibilityPhrases(aiResponse);
+      aiResponse = correctKanjiAndTypos(aiResponse);
       aiResponse = enforceSummaryIntroTemplate(aiResponse);
       aiResponse = enforceSummaryStructureStrict(
         aiResponse,
@@ -9389,7 +9512,7 @@ app.post("/api/chat", async (req, res) => {
           conversationState[conversationId],
           historyText
         );
-        applyCategoryQuestionOverride(fixed, nextSlot, category, useFinalPrefix);
+        applyCategoryQuestionOverride(fixed, nextSlot, category, useFinalPrefix, historyText);
         const introTemplateIds = buildIntroTemplateIds(
           conversationState[conversationId],
           conversationState[conversationId].questionCount,
@@ -9511,6 +9634,8 @@ app.post("/api/chat", async (req, res) => {
     }
 
     aiResponse = enforceBulletSymbol(aiResponse);
+    aiResponse = simplifyPossibilityPhrases(aiResponse);
+    aiResponse = correctKanjiAndTypos(aiResponse);
 
     // Add AI response to history
     conversationHistory[conversationId].push({
