@@ -509,6 +509,12 @@ function renderStructuredStateModal(body, { structured, message, triageLevel }) 
     lines.push("");
     lines.push("こんな変化があれば受診を検討");
     (s.consultChangeBullets || []).forEach((b) => lines.push(b));
+  } else if (triageLevel === "🔴") {
+    lines.push("");
+    lines.push("今回受診をおすすめしている理由");
+    (s.redVisitReasonsBullets || []).forEach((b) => lines.push(b));
+    lines.push("");
+    lines.push("これらがあるため、一度医療機関で確認しておくと安心です。");
   }
   const rareItems = s.rare_emergency || [];
   const hasRare = rareItems.length > 0;

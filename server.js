@@ -866,13 +866,26 @@ function initConversationState(input = {}) {
     expectsCorrectionReason: false,
     confirmationExtraFacts: [],
     confirmationShown: false,
+    summaryGenerationPromise: null,
   };
 }
 
-function buildRepairPrompt(requiredLevel) {
+function buildStateAboutContextForSummary(state) {
+  if (!state) return "";
+  const bullets = buildStateFactsBullets(state);
+  if (bullets.length === 0) return "";
+  return `【🤝 今の状態について（ユーザー固有・必ず参照）】
+${bullets.join("\n")}
+
+✅ 今すぐやること は、上記の状態に即した具体的な行動を出してください。一般的なテンプレ・汎用表現は禁止。痛みの強さ・きっかけ・経過など、上記の具体語を理由に反映すること。
+`;
+}
+
+function buildRepairPrompt(requiredLevel, state = null) {
+  const stateContext = buildStateAboutContextForSummary(state);
   return `
 あなたはKairoです。以下の会話内容を踏まえ、最後に出すべき「まとめブロック」を**必ず全ブロック**で出力してください。
-
+${stateContext ? `\n${stateContext}\n` : ""}
 要件：
 - 出力はまとめブロックのみ（質問や追加の会話はしない）
 - ブロック構成は必ずフルセット
@@ -918,7 +931,7 @@ function buildRepairPrompt(requiredLevel) {
 ✅ 今すぐやること：
 - 項目は最大3つ
 - 各項目は「行動 + 理由（1文）」のセット
-- 理由は不安を下げる説明に限定（正しさの証明・詳細な医学説明は禁止）
+${stateContext ? "- 上記【🤝 今の状態について】の内容を必ず反映し、その状態に即した具体的な行動を出す（テンプレ・汎用表現は禁止）\n" : ""}- 理由は不安を下げる説明に限定（正しさの証明・詳細な医学説明は禁止）
 - 口調はやわらかく、選択肢を残す
   - 「〜してみてください」「〜すると楽になることがあります」を使う
 - 命令形・断定は禁止
@@ -1469,24 +1482,61 @@ function applySymptomFitFilter(candidates, plan) {
   return filtered.length > 0 ? filtered : list;
 }
 
-/** シンガポール専用：Google Places API Text Search でクエリ検索。日本人クリニック + 近くのGP の2検索のみ。専門科検索は使用しない。 */
+const JAPANESE_CLINIC_SEARCH_KEYWORDS = [
+  "Japanese clinic",
+  "Japanese medical clinic",
+  "Japanese doctor clinic",
+];
+
+/** 症状カテゴリごとのGP検索キーワード */
+function getGpSearchKeywordsByCategory(category) {
+  switch (category) {
+    case "PAIN":
+      return ["general practitioner", "clinic", "medical clinic"];
+    case "SKIN":
+      return ["dermatology clinic", "skin clinic", "general practitioner"];
+    case "GI":
+      return ["general practitioner", "gastroenterology clinic"];
+    case "INFECTION":
+      return ["general practitioner", "family clinic"];
+    default:
+      return ["general practitioner", "clinic", "medical clinic"];
+  }
+}
+
+/** シンガポール専用：症状カテゴリに合った施設タイプで検索。日本人クリニック2件 + GP2件、合計4件。 */
 async function fetchCarePlacesForSingapore(location, state) {
   if (!getPlacesApiKey() || !location?.lat || !location?.lng) return [];
-  const results = [];
-  const q1 = await fetchPlacesByTextSearch(location, "japanese clinic singapore", { radius: 50000 });
-  results.push(...q1);
-  const q2 = await fetchPlacesByTextSearch(location, "general practitioner", { radius: 50000 });
-  results.push(...q2);
-  if (results.length < 3) {
-    const q3 = await fetchPlacesByTextSearch(location, "family clinic", { radius: 50000 });
-    results.push(...q3);
+  const category = state?.triageCategory || resolveQuestionCategoryFromState(state) || "PAIN";
+  const gpKeywords = getGpSearchKeywordsByCategory(category);
+
+  const japaneseResults = [];
+  for (const kw of JAPANESE_CLINIC_SEARCH_KEYWORDS) {
+    const places = await fetchPlacesByTextSearch(location, kw, { radius: 50000 });
+    japaneseResults.push(...places);
+    if (japaneseResults.length >= 2) break;
   }
-  if (results.length < 3) {
-    const q4 = await fetchPlacesByTextSearch(location, "gp clinic", { radius: 50000 });
-    results.push(...q4);
+  const japaneseMerged = mergePlaces(japaneseResults);
+  const japaneseSorted = sortPlacesByRatingThenDistance(japaneseMerged).filter(isJapaneseClinicOrSupport);
+  const japaneseTop = japaneseSorted.slice(0, 2);
+
+  const gpResults = [];
+  for (const kw of gpKeywords) {
+    const places = await fetchPlacesByTextSearch(location, kw, { radius: 50000 });
+    gpResults.push(...places);
+    if (gpResults.length >= 2) break;
   }
-  const merged = mergePlaces(results);
-  return prioritizeCareCandidates(merged, state);
+  if (gpResults.length < 2) {
+    const fallback = await fetchPlacesByTextSearch(location, "general practitioner", { radius: 50000 });
+    gpResults.push(...fallback);
+  }
+  const gpMerged = mergePlaces(gpResults);
+  const gpFiltered = gpMerged.filter((c) => !isJapaneseClinicOrSupport(c));
+  const gpSorted = sortPlacesByRatingThenDistance(gpFiltered);
+  const gpTop = gpSorted.slice(0, 2);
+
+  const combined = [...japaneseTop, ...gpTop];
+  return prioritizeCareCandidates(combined, state);
 }
 
 async function fetchCarePlacesWithFallbacks(location, plan, state) {
@@ -1627,73 +1677,87 @@ function isJapaneseClinicOrSupport(candidate) {
   return /(内科|クリニック|耳鼻科|小児科|メンタル)/.test(name);
 }
 
-const CARE_REASONS_FALLBACKS = [
-  "・現在地から行きやすく、初期相談先として使いやすい候補です",
-  "・アクセスが良く、通院しやすい立地です",
-  "・評判が確認できる候補です",
-];
+const FORBIDDEN_REASON_PHRASES = /説明が丁寧|評判が良い|相談しやすい|人気|おすすめ/;
 
-function buildHospitalRecommendationReasons(candidate, plan) {
-  const reasons = [];
-  if (isJapaneseClinicOrSupport(candidate)) {
-    reasons.push("・日本語が通じるため、相談しやすい候補です");
+/** 症状カテゴリ別の「症状との相性」候補（優先1） */
+function getSymptomFitReasonsByCategory(category) {
+  switch (category) {
+    case "PAIN":
+      return [
+        "痛みや体調不良の初期相談で利用されることが多い",
+        "体調不良の相談で利用されることが多い",
+      ];
+    case "SKIN":
+      return [
+        "皮膚トラブルの初期相談がしやすい",
+        "発疹やかゆみの相談で利用されることが多い",
+      ];
+    case "GI":
+      return [
+        "腹痛・消化器症状の初期相談で利用されることが多い",
+        "体調不良の初期相談に対応しているGP",
+      ];
+    case "INFECTION":
+      return [
+        "発熱や体調不良の相談で利用されることが多い",
+        "体調不良の初期相談で利用されることが多い",
+      ];
+    default:
+      return [
+        "体調不良の初期相談で利用されることが多い",
+        "初期相談の窓口として利用されることが多い",
+      ];
   }
-  const reviewSummary = buildCareReviewSummary(candidate, plan);
-  const reviewPoints = reviewSummary.filter((r) => r.startsWith("・"));
-  reasons.push(...reviewPoints);
-  if (reasons.length < 4) {
-    const editorial = String(candidate?.details?.editorialSummary || "").trim();
-    if (editorial && editorial.length <= 120 && editorial.length >= 10) {
-      reasons.push(`・${editorial}`);
-    }
-  }
-  while (reasons.length < 3) {
-    const used = new Set(reasons);
-    const next = CARE_REASONS_FALLBACKS.find((f) => !used.has(f));
-    if (next) reasons.push(next);
-    else break;
-  }
-  if (reasons.length > 0) {
-    return reasons.slice(0, 4);
-  }
-  if (Number.isFinite(candidate?.rating)) {
-    const count = Number.isFinite(candidate?.userRatingsTotal) ? `（${candidate.userRatingsTotal}件）` : "";
-    return [`・Google評価は ${candidate.rating.toFixed(1)} ${count} で、利用者評価が確認できます`, ...CARE_REASONS_FALLBACKS.slice(0, 2)];
-  }
-  return CARE_REASONS_FALLBACKS.slice(0, 3);
 }
 
-function buildCareReviewSummary(candidate, plan) {
-  const details = candidate?.details;
-  const snippets = Array.isArray(details?.reviewTexts) ? details.reviewTexts.slice(0, 8) : [];
-  if (snippets.length === 0) {
-    return [];
+/** いいところ生成：優先順位1〜4、最大2・最低1、禁止表現を避け、同じ文章を使い回さない */
+function buildHospitalRecommendationReasons(candidate, plan, state = null, usedReasons = new Set()) {
+  const category = state ? (state.triageCategory || resolveQuestionCategoryFromState(state)) : "PAIN";
+  const reasons = [];
+  const pick = (pool) => {
+    const available = pool.filter((p) => !usedReasons.has(p) && !FORBIDDEN_REASON_PHRASES.test(p));
+    if (available.length > 0) {
+      const chosen = available[0];
+      reasons.push(`・${chosen}`);
+      usedReasons.add(chosen);
+      return true;
+    }
+    return false;
+  };
+
+  const symptomPool = getSymptomFitReasonsByCategory(category);
+  pick(symptomPool);
+
+  if (isJapaneseClinicOrSupport(candidate)) {
+    const jp = "日本語で症状を説明できるため安心";
+    if (!usedReasons.has(jp) && reasons.length < 2) {
+      reasons.push(`・${jp}`);
+      usedReasons.add(jp);
+    }
   }
-  const joined = snippets.join(" ").toLowerCase();
-  const points = [];
-  const symptomLabel = plan?.symptomLabel || "症状";
-  if (/(腹痛|gastro|digestive|消化器|stomach|abdominal|胃|お腹|下痢)/.test(joined)) {
-    points.push(`${symptomLabel}・消化器症状への対応が丁寧`);
+
+  if (reasons.length < 2) {
+    const accessPool = [
+      "現在地から行きやすい場所にあります",
+      "駅や主要エリアからアクセスしやすい",
+    ];
+    pick(accessPool);
   }
-  if (/(頭痛|headache|neurology|神経)/.test(joined)) {
-    points.push(`${symptomLabel}の相談に丁寧に対応`);
+
+  if (reasons.length < 2) {
+    const initialPool = [
+      "初期相談の窓口として利用されることが多い",
+      "体調不良の初期相談に対応しているGP",
+    ];
+    pick(initialPool);
   }
-  if (/(発熱|fever|熱|咳|cough|喉|throat|のど)/.test(joined)) {
-    points.push(`${symptomLabel}の初期相談で利用しやすい`);
+
+  if (reasons.length === 0) {
+    const fallback = "体調不良の初期相談で利用されることが多い";
+    reasons.push(`・${fallback}`);
+    usedReasons.add(fallback);
   }
-  if (/(explain|説明|丁寧|わかりやすい|careful|親切)/.test(joined)) {
-    points.push("説明が丁寧で相談しやすい");
-  }
-  if (/(wait|待ち|quick|fast|smooth|スムーズ)/.test(joined)) {
-    points.push("待ち時間や案内がスムーズ");
-  }
-  if (/(friendly|親切|kind|staff|対応)/.test(joined)) {
-    points.push("スタッフ対応が親切");
-  }
-  if (/(japanese|日本語|日系)/.test(joined)) {
-    points.push("日本語が通じる");
-  }
-  return points.slice(0, 4).map((p) => `・${p}`);
+  return reasons.slice(0, 2);
 }
 
 async function reverseGeocodeLocation(location) {
@@ -2040,8 +2104,16 @@ function buildHospitalRecommendationDetail(state, locationContext, clinicCandida
   );
   const filtered = isSingapore ? merged : applySymptomFitFilter(merged, plan);
   const meetsRating = filterByMinRating(filtered);
-  const maxCandidates = isSingapore ? 3 : 2;
-  const candidates = prioritizeCareCandidates(meetsRating, state).slice(0, maxCandidates);
+  let candidates;
+  if (isSingapore) {
+    const prioritized = prioritizeCareCandidates(meetsRating, state);
+    const japanese = prioritized.filter(isJapaneseClinicOrSupport).slice(0, 1);
+    const gp = prioritized.filter((c) => !isJapaneseClinicOrSupport).slice(0, 1);
+    candidates = [...japanese, ...gp];
+  } else {
+    const maxCandidates = 2;
+    candidates = prioritizeCareCandidates(meetsRating, state).slice(0, maxCandidates);
+  }
   const useHospital = (hospitalCandidates?.length || 0) > 0;
   const hasRealCandidates = candidates.length > 0 && candidates.some((c) => c?.placeId);
   if ((canRecommendSpecificPlaceFinal(state) || hasRealCandidates) && candidates.length) {
@@ -2552,7 +2624,7 @@ async function resolveCareCandidates(state, destination) {
   const mergedBase = mergePlaces(results);
   const symptomFitted = isSingapore ? mergedBase : applySymptomFitFilter(mergedBase, plan);
   const merged = prioritizeCareCandidates(symptomFitted, state).slice(0, 10);
-  const maxReturn = isSingapore ? 3 : 2;
+  const maxReturn = isSingapore ? 4 : 2;
   const enriched = [];
   for (const item of merged) {
     const details = await fetchPlaceDetails(item.placeId, { language: "ja" });
@@ -2578,7 +2650,7 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
   const mainSymptomText = detectCareMainSymptomText(state, historyText || "");
   const plan = buildCareSearchQueries(mainSymptomText, destination);
   const isSingapore = String(state?.locationContext?.country || "").trim() === "Singapore";
-  const maxDisplay = isSingapore ? 3 : 2;
+  const maxDisplay = 2;
   const candidates = rawCandidates
     .filter((c) => String(c?.name || "").trim().length > 0)
     .filter((c) => {
@@ -2618,6 +2690,7 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
   ];
 
   const list = Array.isArray(candidates) ? candidates : [];
+  const usedReasons = new Set();
   if (list.length > 0) {
     list.forEach((c, idx) => {
       const normalizedName = String(c?.name || "").trim();
@@ -2629,8 +2702,8 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
       const numLabel = ["①", "②", "③"][idx] || `・候補${idx + 1}`;
       lines.push(`${numLabel} ${normalizedName}${ratingStr}`);
       lines.push("  いいところ：");
-      const reasons = buildHospitalRecommendationReasons(c, plan);
-      reasons.slice(0, 4).forEach((r) => lines.push(`  ${r}`));
+      const reasons = buildHospitalRecommendationReasons(c, plan, state, usedReasons);
+      reasons.forEach((r) => lines.push(`  ${r}`));
     });
   } else {
     lines.push("位置情報から近くの医療機関を検索しましたが、見つかりませんでした。");
@@ -2675,6 +2748,7 @@ async function buildHospitalDetailsModalContent(state) {
     places = source.slice(0, 4);
   }
 
+  const usedReasons = new Set();
   for (let i = 0; i < Math.min(places.length, 4); i++) {
     const c = places[i];
     if (!c?.placeId) continue;
@@ -2687,18 +2761,19 @@ async function buildHospitalDetailsModalContent(state) {
     const openNow = details?.openNow;
     const openStr =
       openNow === true ? " 営業中" : openNow === false ? " 休業中" : "";
+    const distanceStr = Number.isFinite(c?.distanceM) ? ` ${formatDistanceForCare(c.distanceM)}` : "";
 
     const enriched = { ...c, details: details || c.details };
-    const reasons = buildHospitalRecommendationReasons(enriched, plan).slice(0, 2);
+    const reasons = buildHospitalRecommendationReasons(enriched, plan, state, usedReasons);
 
     if (i > 0) lines.push("");
     const sectionLabel = isSingapore
       ? i < 2
-        ? `■日系クリニック ${i + 1}`
+        ? `■日本人クリニック ${i + 1}`
         : `■近くのGP ${i - 1}`
       : `■候補${i + 1}`;
     lines.push(sectionLabel);
-    lines.push(`${name}${ratingStr}${openStr}`);
+    lines.push(`${name}${ratingStr}${distanceStr}${openStr}`);
     reasons.forEach((r) => lines.push(r));
   }
 
@@ -6089,6 +6164,54 @@ function buildConsultChangeBulletsForPatterns(category) {
   ];
 }
 
+/** 🔴時：今回受診をおすすめしている理由（ユーザー状態から3件抜き出し） */
+function buildRedVisitReasonsBullets(state) {
+  const bullets = [];
+  const answers = state?.slotAnswers || {};
+  const val = (key, fallback) => getSlotStatusValue(state, key, fallback);
+  const symptom = state?.judgmentSnapshot?.main_symptom || state?.primarySymptom || "症状";
+  const isUnknown = (t) => !t || /^(ない|なし|特にない|わからない|分からない|不明|思い当たらない)$/i.test(String(t).trim());
+
+  const duration = val("duration", answers.duration);
+  if (duration && !isUnknown(duration)) {
+    const m = String(duration).match(/(\d+)\s*日/);
+    const text = m ? `${symptom}が${m[1]}日前から続いている` : `${symptom}が${duration}`;
+    bullets.push(`・${text}`);
+  }
+
+  const painScore = Number.isFinite(state?.lastPainScore)
+    ? state.lastPainScore
+    : (() => {
+        const m = String(val("severity", answers.pain_score)).match(/(\d{1,2})/);
+        return m ? Number(m[1]) : null;
+      })();
+  if (Number.isFinite(painScore) && painScore >= 7) {
+    bullets.push(`・痛みが${painScore}/10と強い`);
+  }
+
+  const worsening = val("worsening", answers.worsening) || val("worsening_trend", answers.worsening_trend);
+  if (worsening && !isUnknown(worsening) && /悪化|悪くなっ|ひどくなっ/.test(worsening)) {
+    bullets.push("・発症時より悪化している");
+  }
+
+  const impact = val("impact", answers.daily_impact);
+  if (bullets.length < 3 && impact && !isUnknown(impact) && /(動けない|つらい|困難)/.test(impact)) {
+    bullets.push(`・${impact}`);
+  }
+
+  const associated = val("associated", answers.associated_symptoms);
+  if (bullets.length < 3 && associated && !isUnknown(associated)) {
+    bullets.push(`・${String(associated).trim()}`);
+  }
+
+  while (bullets.length < 3 && (duration || symptom)) {
+    const dup = bullets.some((b) => b.includes("続いている"));
+    if (!dup) bullets.push(`・${symptom}が続いている`);
+    break;
+  }
+  return bullets.slice(0, 3);
+}
+
 function buildConcreteStatePatternMessage(state, summaryFacts = [], summarySection = "") {
   const snapshot = state?.judgmentSnapshot || {};
   const mainSymptom =
@@ -6141,6 +6264,11 @@ function buildConcreteStatePatternMessage(state, summaryFacts = [], summarySecti
     lines.push("");
     lines.push("こんな変化があれば受診を検討");
     consultChanges.slice(0, 3).forEach((line) => lines.push(line));
+  } else if (level === "🔴") {
+    lines.push("今回受診をおすすめしている理由");
+    buildRedVisitReasonsBullets(state).forEach((line) => lines.push(line));
+    lines.push("");
+    lines.push("これらがあるため、一度医療機関で確認しておくと安心です。");
   }
   return { message: lines.join("\n").trim(), query };
 }
@@ -6570,6 +6698,8 @@ async function buildDiseaseSafetyFilteredMessage(
       ? "今のあなたは🟡の可能性もないとは言えません。なので、確認をするためにも受診をおすすめします。"
       : `${mainSymptom}のほとんどは命に関わるものではありません。特に、急激な悪化や神経症状がなければ、よくあるタイプの可能性が高いです。`;
 
+  const redVisitReasonsBullets = level === "🔴" && state ? buildRedVisitReasonsBullets(state) : [];
+
   return {
     common,
     conditional,
@@ -6577,6 +6707,7 @@ async function buildDiseaseSafetyFilteredMessage(
     reassuranceCommon,
     reassuranceBullets: reassurance.slice(0, 3),
     consultChangeBullets: consultChanges.slice(0, 3),
+    redVisitReasonsBullets,
     triageLevel: level,
   };
 }
@@ -6647,6 +6778,11 @@ async function buildDiseaseFocusedModalMessage(searchResults = [], mainSymptom =
         lines.push("");
         lines.push("こんな変化があれば受診を検討");
         buildConsultChangeBulletsForPatterns(category).slice(0, 3).forEach((b) => lines.push(b));
+      } else if (level === "🔴") {
+        lines.push("今回受診をおすすめしている理由");
+        buildRedVisitReasonsBullets(state).forEach((b) => lines.push(b));
+        lines.push("");
+        lines.push("これらがあるため、一度医療機関で確認しておくと安心です。");
       }
       return lines.join("\n").trim();
     }
@@ -6705,6 +6841,11 @@ function buildDiseaseFocusedModalFallback(mainSymptom, level, state = null) {
     lines.push("");
     lines.push("こんな変化があれば受診を検討");
     buildConsultChangeBulletsForPatterns(category).slice(0, 3).forEach((b) => lines.push(b));
+  } else if (level === "🔴") {
+    lines.push("今回受診をおすすめしている理由");
+    buildRedVisitReasonsBullets(state).forEach((b) => lines.push(b));
+    lines.push("");
+    lines.push("これらがあるため、一度医療機関で確認しておくと安心です。");
   }
   return lines.join("\n").trim();
 }
@@ -6818,6 +6959,10 @@ function buildEvidenceDrivenConcreteMessage(options = {}) {
     buildReassuranceBulletsForPatterns(state).slice(0, 3).forEach((b) => lines.push(b));
     lines.push("", "こんな変化があれば受診を検討");
     buildConsultChangeBulletsForPatterns(category).slice(0, 3).forEach((b) => lines.push(b));
+  } else if (level === "🔴") {
+    lines.push("", "今回受診をおすすめしている理由");
+    buildRedVisitReasonsBullets(state).forEach((b) => lines.push(b));
+    lines.push("", "これらがあるため、一度医療機関で確認しておくと安心です。");
   }
   return lines.join("\n").trim();
 }
@@ -6917,6 +7062,7 @@ function enforceConcreteModalStructure(message, options = {}) {
   const sectionHeaders = new Set([
     "現時点の安心材料",
     "こんな変化があれば受診を検討",
+    "今回受診をおすすめしている理由",
   ]);
   const patternBlocks = [];
   let i = 0;
@@ -7003,6 +7149,10 @@ function enforceConcreteModalStructure(message, options = {}) {
     out.push("", "こんな変化があれば受診を検討");
     const consult = buildConsultChangeBulletsForPatterns(category).slice(0, 3);
     consult.forEach((line) => out.push(line));
+  } else if (level === "🔴") {
+    out.push("", "今回受診をおすすめしている理由");
+    buildRedVisitReasonsBullets(state).forEach((line) => out.push(line));
+    out.push("", "これらがあるため、一度医療機関で確認しておくと安心です。");
   }
 
   return out
@@ -7113,6 +7263,11 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
       lines.push("");
       lines.push("こんな変化があれば受診を検討");
       structured.consultChangeBullets.forEach((b) => lines.push(b));
+    } else if (level === "🔴") {
+      lines.push("今回受診をおすすめしている理由");
+      buildRedVisitReasonsBullets(state).forEach((b) => lines.push(b));
+      lines.push("");
+      lines.push("これらがあるため、一度医療機関で確認しておくと安心です。");
     }
   }
 
@@ -7180,7 +7335,7 @@ function compactConcreteMessageForQuery(detailMessage) {
     .filter((line) => line.length > 0)
     .filter(
       (line) =>
-        !/^(あなたの状態の理解を深める|今の状態は、次のようなパターンと似ています。|現時点の安心材料|こんな変化があれば受診を検討|■|🟢 よくある原因|🟡 状況によっては確認が必要|🔴 すぐ受診が必要なサイン)/.test(
+        !/^(あなたの状態の理解を深める|今の状態は、次のようなパターンと似ています。|現時点の安心材料|こんな変化があれば受診を検討|今回受診をおすすめしている理由|■|🟢 よくある原因|🟡 状況によっては確認が必要|🔴 すぐ受診が必要なサイン)/.test(
           line
         )
     )
@@ -7591,11 +7746,15 @@ function buildCurrentStateContext(state, historyText = "", concreteMessage = "")
     state?.slotAnswers?.associated_symptoms || "",
     historyText || "",
   ].join(" "));
+  // 🤝今の状態についてのクエリ（主症状 + 箇条書き全文）。今すぐやることはこれに「対処法」を加える。
+  const stateAboutFacts = buildStateFactsBullets(state).map((line) => toBulletText(line)).join(" ");
+  const stateAboutQuery = `${mainSymptom} ${stateAboutFacts}`.replace(/\s{2,}/g, " ").trim();
   return {
     symptoms,
     location,
     mainSymptom,
     summaryFacts,
+    stateAboutQuery,
     duration,
     intensity,
     progression,
@@ -7605,6 +7764,10 @@ function buildCurrentStateContext(state, historyText = "", concreteMessage = "")
 }
 
 function buildMandatoryGoogleQuery(context) {
+  // 今すぐやること: 🤝今の状態についてのクエリ + 対処法
+  if (context?.stateAboutQuery) {
+    return `${context.stateAboutQuery} 対処法`.replace(/\s{2,}/g, " ").trim().slice(0, 260);
+  }
   const mainSymptom = String(context?.mainSymptom || context?.location || "症状");
   const facts = Array.isArray(context?.summaryFacts) ? context.summaryFacts.join(" ") : "";
   const symptoms = Array.isArray(context?.symptoms) ? context.symptoms.join(" ") : "";
@@ -7636,6 +7799,9 @@ function buildImmediateActionSearchQueries(context) {
   const symptoms = (Array.isArray(context?.symptoms) ? context.symptoms : []).join(" ").trim();
   const features = context?.features || {};
   const painType = features?.painType || "";
+  const baseQuery = context?.stateAboutQuery
+    ? context.stateAboutQuery
+    : `${mainSymptom} ${facts} ${symptoms}`.replace(/\s{2,}/g, " ").trim();
   const mainEn =
     MAIN_SYMPTOM_TO_EN[mainSymptom] ||
     (/(頭|お腹|喉|皮膚|唇)/.test(mainSymptom)
@@ -7644,12 +7810,12 @@ function buildImmediateActionSearchQueries(context) {
   const mandatoryQuery = buildMandatoryGoogleQuery(context);
   const jaBase = [
     mandatoryQuery,
-    `${mainSymptom} ${facts} ${symptoms} 対処法`.replace(/\s{2,}/g, " ").trim().slice(0, 256),
-    `${mainSymptom} ${symptoms} 対処法 セルフケア`.replace(/\s{2,}/g, " ").trim().slice(0, 256),
-    `${mainSymptom} 対処法 自宅`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
-    `${mainSymptom} 対処法`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
-    painType ? `${mainSymptom} ${painType} 対処法`.replace(/\s{2,}/g, " ").trim().slice(0, 200) : null,
-    `${mainSymptom} 自宅 ケア 方法`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
+    `${baseQuery} 対処法`.replace(/\s{2,}/g, " ").trim().slice(0, 256),
+    `${baseQuery} 対処法 セルフケア`.replace(/\s{2,}/g, " ").trim().slice(0, 256),
+    `${baseQuery} 対処法 自宅`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
+    `${baseQuery} 対処法`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
+    painType ? `${baseQuery} ${painType} 対処法`.replace(/\s{2,}/g, " ").trim().slice(0, 200) : null,
+    `${baseQuery} 自宅 ケア 方法`.replace(/\s{2,}/g, " ").trim().slice(0, 128),
     "体調不良 対処法 自宅",
     "症状 対処法 自宅 セルフケア",
   ].filter((q) => q && String(q).trim().length > 0);
@@ -7767,9 +7933,11 @@ function normalizeContextLocation(location) {
 async function generateImmediateActionsFromContextOnly(state, context) {
   if (!context) return [];
   try {
+    const stateAboutFacts = buildStateFactsBullets(state).map((line) => toBulletText(line)).join(" / ") || context?.stateAboutQuery || "";
     const llmPrompt = [
       "Generate 3 immediate self-care actions based on the user's symptom context. No search results available.",
-      "Use ONLY currentStateContext. Do not diagnose.",
+      "Use ONLY currentStateContext and stateAboutForActions. Do not diagnose.",
+      "CRITICAL: Actions must be personalized to the user's specific state (stateAboutForActions). Reference pain level, duration, triggers, etc. in reasons.",
       "Return strict JSON: {\"actions\":[{\"title\":\"...\",\"reason\":\"...\",\"isOtc\":false}]}",
       "Use recommending tone: 〜してください or 〜するといいです. Avoid 〜します.",
       "Make actions specific to the symptom (head/stomach/throat/skin). OTC max 1.",
@@ -7778,7 +7946,7 @@ async function generateImmediateActionsFromContextOnly(state, context) {
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: llmPrompt },
-        { role: "user", content: JSON.stringify({ currentStateContext: context }) },
+        { role: "user", content: JSON.stringify({ currentStateContext: context, stateAboutForActions: stateAboutFacts }) },
       ],
       temperature: 0.3,
       max_tokens: 500,
@@ -7854,10 +8022,14 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
 
     let parsed = null;
     try {
+      const stateAboutFacts = buildStateFactsBullets(state).map((line) => toBulletText(line)).join(" / ") || currentStateContext?.stateAboutQuery || "";
       const llmPrompt = [
         "You convert medical search evidence into immediate actions.",
         "Use ONLY provided currentStateContext and extractedSearchEvidence.",
         "Do not invent sources. Do not diagnose.",
+        "CRITICAL: Actions must be personalized to the user's specific state. Use summaryFacts/stateAboutQuery from currentStateContext.",
+        "Each action must reference or address the user's specific symptoms (e.g., pain level, duration, triggers, associated symptoms).",
+        "Avoid generic advice. The reason for each action must explain why it fits THIS user's situation.",
         "Return strict JSON: {\"topic\":\"...\",\"actions\":[{\"title\":\"...\",\"reason\":\"...\",\"isOtc\":false}]}",
         "actions max 3, OTC max 1.",
         "Keep Japanese output. Use recommending tone: 〜してください or 〜するといいです. Avoid 〜します.",
@@ -7870,6 +8042,7 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
             role: "user",
             content: JSON.stringify({
               currentStateContext,
+              stateAboutForActions: stateAboutFacts,
               extractedSearchEvidence: {
                 selfCare: evidence.selfCare,
                 observe: evidence.observe,
@@ -8543,6 +8716,149 @@ function getOrInitConversationState(conversationId) {
   return conversationState[conversationId];
 }
 
+/** 確認文表示時にバックグラウンドでまとめを生成。conversationId のみで呼び、conversationState/History を参照する。 */
+async function generateSummaryForConfirmation(conversationId) {
+  const state = conversationState[conversationId];
+  const history = conversationHistory[conversationId];
+  if (!state || !history) return { message: "", followUpQuestion: null, followUpMessage: null };
+  const level = finalizeRiskLevel(state);
+  const historyTextForCare = history.filter((m) => m.role === "user").map((m) => m.content).join("\n");
+  const careDestination = detectCareDestinationFromHistory(historyTextForCare);
+  state.careDestination = careDestination;
+  state.historyTextForCare = historyTextForCare;
+  const historyTextForOtc = historyTextForCare;
+  const otcCategory = (() => {
+    if (historyTextForOtc.match(/腹|お腹|胃|下痢|便秘/)) return "bowel";
+    if (historyTextForOtc.match(/喉|のど/)) return "throat";
+    if (historyTextForOtc.match(/鼻水|鼻づまり|くしゃみ/)) return "nose";
+    if (historyTextForOtc.match(/咳|せき/)) return "cough";
+    if (historyTextForOtc.match(/だるい|脱水|水分/)) return "fatigue";
+    if (historyTextForOtc.match(/かゆみ|アレルギー|花粉/)) return "allergy";
+    if (historyTextForOtc.match(/頭痛|頭が痛|頭が重|発熱|熱/)) return "pain_fever";
+    return "pain_fever";
+  })();
+  const otcWarningIndex = Math.floor(Math.random() * 5);
+  await resolveLocationContext(state, state.clientMeta);
+  const locationContext = state.locationContext || {};
+  if (level === "🔴") {
+    state.clinicCandidates = await resolveCareCandidates(state, careDestination);
+    state.hospitalCandidates = await resolveHospitalCandidates(state);
+  }
+  state.pharmacyCandidates = await resolvePharmacyCandidates(state);
+  const pharmacyRec = buildPharmacyRecommendation(state, locationContext, state.pharmacyCandidates);
+  state.pharmacyRecommendation = pharmacyRec;
+  const otcExamples = buildOtcExamples(otcCategory, locationContext.country);
+  state.otcExamples = otcExamples;
+  const hospitalRec = buildHospitalRecommendationDetail(state, locationContext, state.clinicCandidates, state.hospitalCandidates);
+  state.hospitalRecommendation = hospitalRec;
+  const hospitalListSource = (state.hospitalCandidates || []).length > 0 ? state.hospitalCandidates : state.clinicCandidates || [];
+  const clinicList = hospitalListSource.map((item) => `・${item.name}`).join("\n");
+  const clinicHint = clinicList ? `\n以下の候補から具体名を1つ選んで提示してください。\n${clinicList}\n` : "\n具体名がない場合は、近いGP/クリニックの具体名を提示してください。\n";
+  const pharmacyHint = pharmacyRec?.name
+    ? `\n薬局名は「${pharmacyRec.name}」を優先してください。\n薬名は例示で2〜3件、一般名＋商品名で示し、末尾に「最終判断は薬剤師に相談してください。これは一般的に現地で使われる選択肢です。」を入れてください。\n`
+    : "\n薬局名は国・都市レベルで具体名を1件提示し、薬名は例示で2〜3件、一般名＋商品名で示してください。\n末尾に「最終判断は薬剤師に相談してください。これは一般的に現地で使われる選択肢です。」を入れてください。\n";
+  const summaryContextMessages = buildStructuredConversationForLlm(history, state);
+  const summaryOnlyMessages = [
+    { role: "system", content: buildRepairPrompt(level, state) },
+    { role: "system", content: clinicHint },
+    { role: "system", content: pharmacyHint },
+    ...summaryContextMessages,
+  ];
+  let aiResponse = (await openai.chat.completions.create({ model: "gpt-4o-mini", messages: summaryOnlyMessages, temperature: 0.7, max_tokens: 1000 })).choices[0].message.content;
+  if (!hasAllSummaryBlocks(aiResponse)) {
+    const strict = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "system", content: buildRepairPrompt(level, state) + "\n\n不足ブロックがある場合は必ず補完して、全ブロックを完成させてください。" }, ...summaryContextMessages],
+      temperature: 0.7,
+      max_tokens: 1000,
+    });
+    aiResponse = strict.choices[0].message.content;
+  }
+  if (level !== "🔴" && isHospitalFlow(aiResponse)) {
+    const repair = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "system", content: buildRepairPrompt(level, state) }, ...summaryContextMessages],
+      temperature: 0.7,
+      max_tokens: 1000,
+    });
+    aiResponse = repair.choices[0].message.content;
+  }
+  aiResponse = normalizeSummaryLevel(aiResponse, level);
+  aiResponse = ensureYellowOtcBlock(aiResponse, level, otcCategory, otcWarningIndex, state.pharmacyRecommendation, state.otcExamples, state.pharmacyRecommendation?.preface);
+  aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
+  let immediateActionPlan = null;
+  if (level === "🟢" || level === "🟡") {
+    try {
+      immediateActionPlan = await buildImmediateActionHypothesisPlan(state, historyTextForOtc, aiResponse);
+    } catch (e) {
+      immediateActionPlan = await buildImmediateActionFallbackPlanFromState(state);
+    }
+    aiResponse = normalizeStateBlockForGreenYellow(aiResponse, state);
+    aiResponse = ensureImmediateActionsBlock(aiResponse, level, state, historyTextForOtc, immediateActionPlan);
+  }
+  if (level === "🔴") {
+    state.decisionLevel = "🔴";
+    try {
+      immediateActionPlan = await buildImmediateActionHypothesisPlan(state, historyTextForOtc, aiResponse);
+    } catch (_) {
+      immediateActionPlan = null;
+    }
+  }
+  aiResponse = ensureOutlookBlock(aiResponse, state);
+  aiResponse = enforceYellowOtcPositionStrict(aiResponse, level);
+  if (level === "🔴") {
+    aiResponse = ensureHospitalMemoBlock(aiResponse, state, historyTextForOtc);
+    aiResponse = ensureRedImmediateActionsBlock(aiResponse, state, historyTextForOtc, immediateActionPlan);
+    aiResponse = ensureHospitalBlock(aiResponse, state, historyTextForOtc);
+  }
+  state.summaryText = aiResponse;
+  if (level === "🔴" && state.hospitalRecommendation?.name && (!aiResponse.includes(state.hospitalRecommendation.name) || !aiResponse.includes("タイプ：") || !aiResponse.includes("理由："))) {
+    aiResponse = buildLocalSummaryFallback(level, history, state);
+  }
+  if (!validateSummaryAgainstNormalized(aiResponse, state)) {
+    aiResponse = buildLocalSummaryFallback(level, history, state);
+  }
+  aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
+  if (!hasAllSummaryBlocks(aiResponse)) {
+    aiResponse = buildLocalSummaryFallback(level, history, state);
+  }
+  aiResponse = ensureRestMcDecisionBlock(aiResponse, level, state);
+  aiResponse = sanitizeGeneralPhrases(aiResponse);
+  aiResponse = sanitizeSummaryQuestions(aiResponse);
+  aiResponse = simplifyPossibilityPhrases(aiResponse);
+  aiResponse = correctKanjiAndTypos(aiResponse);
+  aiResponse = enforceSummaryIntroTemplate(aiResponse);
+  aiResponse = enforceSummaryStructureStrict(aiResponse, level, history, state);
+  aiResponse = stripInfectionOnlineClinicGuidance(aiResponse, state);
+  aiResponse = stripHospitalMapLinks(aiResponse);
+  aiResponse = stripMcForRed(aiResponse, level);
+  const decisionType = level === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING";
+  state.summaryShown = true;
+  state.hasSummaryBlockGenerated = true;
+  state.decisionType = decisionType;
+  state.decisionLevel = level === "🔴" ? "🔴" : "🟢";
+  if (!state.judgmentSnapshot) {
+    state.judgmentSnapshot = buildJudgmentSnapshot(state, history, decisionType);
+  }
+  if (state.decisionRatio === null) {
+    const computed = calculateRiskFromState(state);
+    state.decisionRatio = computed.ratio;
+  }
+  state.finalQuestionPending = false;
+  let followUpQuestion = null;
+  if (decisionType === "A_HOSPITAL") {
+    state.followUpPhase = "questioning";
+    state.followUpStep = 1;
+    state.followUpDestinationName = formatDestinationName(state.hospitalRecommendation?.name, decisionType);
+    followUpQuestion = buildRedFollowUpQuestion();
+  } else {
+    state.followUpPhase = "questioning";
+    state.followUpStep = 1;
+    followUpQuestion = `このまま少し休みますか？\nそれとも、もう少し詳しく確認しますか？${FOLLOW_UP_SUFFIX}`;
+  }
+  return { message: aiResponse, followUpQuestion, followUpMessage: null };
+}
+
 // Chat API endpoint
 app.post("/api/chat", async (req, res) => {
   try {
@@ -8748,7 +9064,50 @@ app.post("/api/chat", async (req, res) => {
         (conversationState[conversationId].confirmationExtraFacts =
           conversationState[conversationId].confirmationExtraFacts || []).push(msg);
       }
-      // user message will be pushed below in normal flow
+      if (isOk || !conversationState[conversationId].confirmationPending) {
+        conversationHistory[conversationId].push({ role: "user", content: message });
+        const promise = conversationState[conversationId].summaryGenerationPromise;
+        const { message: summaryMsg, followUpQuestion: fq } = promise
+          ? await promise
+          : await generateSummaryForConfirmation(conversationId);
+        conversationState[conversationId].summaryGenerationPromise = null;
+        conversationHistory[conversationId].push({ role: "assistant", content: summaryMsg });
+        if (fq) {
+          conversationHistory[conversationId].push({ role: "assistant", content: fq });
+        }
+        const finalRisk = conversationState[conversationId].decisionLevel || finalizeRiskLevel(conversationState[conversationId]);
+        const slotsFilledCount = countFilledSlots(state.slotFilled, state);
+        const decisionAllowed = slotsFilledCount >= getRequiredSlotCount(state);
+        return res.json({
+          message: summaryMsg,
+          response: summaryMsg,
+          judgeMeta: {
+            judgement: finalRisk,
+            confidence: state.confidence,
+            ratio: state.decisionRatio ?? 0,
+            shouldJudge: true,
+            slotsFilledCount,
+            decisionAllowed,
+            questionCount: state.questionCount,
+            summaryLine: extractSummaryLine(summaryMsg),
+            questionType: null,
+            rawScore: state.lastPainScore,
+            painScoreRatio: state.lastPainWeight,
+          },
+          triage: { judgement: finalRisk, confidence: state.confidence, ratio: state.decisionRatio ?? 0, shouldJudge: true },
+          triage_state: buildTriageState(true, finalRisk, slotsFilledCount),
+          sections: extractSectionsBySpecs(summaryMsg, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text),
+          questionPayload: null,
+          normalizedAnswer: state.lastNormalizedAnswer || null,
+          followUpQuestion: fq,
+          followUpMessage: null,
+          locationPromptMessage,
+          locationRePromptMessage: null,
+          locationSnapshot: state.locationSnapshot,
+          conversationId,
+        });
+      }
+      // isRejection: user message will be pushed below in normal flow
     }
 
     // ユーザー回答のスコアを集計
@@ -9100,7 +9459,7 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    // 6スロット完了時: まとめの前に確認を取る（🟢🟡🔴共通）
+    // 6スロット完了時: まとめの前に確認を取る（🟢🟡🔴共通）。確認文表示と同時にまとめをバックグラウンド生成開始。
     if (shouldJudgeNow && !conversationState[conversationId].confirmationShown && !conversationState[conversationId].summaryShown) {
       const confirmMsg = buildPreSummaryConfirmationMessage(
         conversationState[conversationId]
@@ -9110,6 +9469,7 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].confirmationShown = true;
       conversationState[conversationId].lastOptions = [];
       conversationState[conversationId].lastQuestionType = null;
+      conversationState[conversationId].summaryGenerationPromise = generateSummaryForConfirmation(conversationId);
       const finalLevel = finalizeRiskLevel(conversationState[conversationId]);
       return res.json({
         message: confirmMsg,
@@ -9270,7 +9630,7 @@ app.post("/api/chat", async (req, res) => {
         conversationState[conversationId]
       );
       const summaryOnlyMessages = [
-        { role: "system", content: buildRepairPrompt(level) },
+        { role: "system", content: buildRepairPrompt(level, conversationState[conversationId]) },
         { role: "system", content: clinicHint },
         { role: "system", content: pharmacyHint },
         ...summaryContextMessages,
@@ -9284,7 +9644,7 @@ app.post("/api/chat", async (req, res) => {
       aiResponse = forced.choices[0].message.content;
       if (!hasAllSummaryBlocks(aiResponse)) {
         const strictMessages = [
-          { role: "system", content: buildRepairPrompt(level) + "\n\n不足ブロックがある場合は必ず補完して、全ブロックを完成させてください。" },
+          { role: "system", content: buildRepairPrompt(level, conversationState[conversationId]) + "\n\n不足ブロックがある場合は必ず補完して、全ブロックを完成させてください。" },
           ...summaryContextMessages,
         ];
         const strict = await openai.chat.completions.create({
@@ -9299,7 +9659,7 @@ app.post("/api/chat", async (req, res) => {
         const repairForLevel = await openai.chat.completions.create({
           model: "gpt-4o-mini",
           messages: [
-            { role: "system", content: buildRepairPrompt(level) },
+            { role: "system", content: buildRepairPrompt(level, conversationState[conversationId]) },
             ...summaryContextMessages,
           ],
           temperature: 0.7,
@@ -9620,7 +9980,7 @@ app.post("/api/chat", async (req, res) => {
       const needsRepair = !hasAllSummaryBlocks(aiResponse);
       if (needsRepair) {
         const repairMessages = [
-          { role: "system", content: buildRepairPrompt(updatedLevel) },
+          { role: "system", content: buildRepairPrompt(updatedLevel, conversationState[conversationId]) },
           ...structuredConversation,
         ];
         const repaired = await openai.chat.completions.create({
