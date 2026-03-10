@@ -5920,49 +5920,49 @@ function buildPreSummaryConfirmationMessage(state) {
   return parts.join("\n");
 }
 
-function buildStateAboutLine(state, level) {
-  // 🟡のみ：指定の「型」に合わせて生成（固定文にはしない）
-  if (level === "🟡") {
-    // RED抑制ガード時（PAIN + さっき/数時間前）は、危険否定ではなく時間軸ベースで記述する
-    if (shouldBlockRedByPainRecentDuration(state)) {
-      const symptomSource = [
-        state?.primarySymptom || "",
-        state?.slotStatus?.associated?.value || "",
-        state?.slotAnswers?.associated_symptoms || "",
-      ]
-        .filter(Boolean)
-        .join(" ");
-      const toMainSymptomLabel = (text) => {
-        const s = String(text || "");
-        if (/(頭が痛|頭痛|こめかみ|後頭部)/.test(s)) return "頭痛";
-        if (/(お腹が痛|腹痛|胃痛|みぞおち|下腹)/.test(s)) return "腹痛";
-        if (/(喉が痛|のどが痛|喉の痛み|咽頭痛)/.test(s)) return "喉の痛み";
-        if (/(唇が痛|唇|口唇)/.test(s)) return "唇の痛み";
-        return "症状";
-      };
-      const mainSymptom = toMainSymptomLabel(symptomSource);
-      return `現在の${mainSymptom}は発症からの時間経過や症状の推移からみて、急激に悪化している経過ではありません。`;
-    }
-    const painScore = state?.lastPainScore;
-    const painPart =
-      painScore !== null && painScore !== undefined ? `（痛みは${painScore}くらい）` : "";
-    const otherStrong =
-      state?.slotAnswers?.associated_symptoms?.includes("ない")
-        ? "他に強い症状が見られない"
-        : "他に強い症状が目立たない";
-    const templates = [
-      `現在の症状の強さ${painPart}や${otherStrong}ことから、緊急性を示す特徴は確認されていません。`,
-      `現在の症状の強さ${painPart}と${otherStrong}点から見ても、緊急性を示す特徴は確認されていません。`,
-    ];
-    return templates[Math.floor(Math.random() * templates.length)];
+/** 🟢/🟡用：symptomInfo を緊急度が低い順に1つ選ぶ */
+function pickSymptomInfoForJudgment(state) {
+  const answers = state?.slotAnswers || {};
+  const worseningTrend = String(
+    getSlotStatusValue(state, "worsening_trend", answers.worsening_trend) ||
+    getSlotStatusValue(state, "worsening", answers.worsening) ||
+    ""
+  ).trim();
+  if (/良くな|まし|和らい|軽くな|回復|改善/.test(worseningTrend)) {
+    return "回復に向かっている";
   }
-  const painScore = state?.lastPainScore;
-  const painText =
-    painScore !== null && painScore !== undefined ? `痛みは${painScore}くらい` : "痛みは中程度";
-  const symptomsText = state?.slotAnswers?.associated_symptoms?.includes("ない")
-    ? "他の症状は少ない"
-    : "他の症状は多くない";
-  return `今の情報を見る限り、${painText}で${symptomsText}ため、急ぐ状況ではなさそうです。`;
+  const associated = String(
+    getSlotStatusValue(state, "associated", answers.associated_symptoms) || ""
+  ).trim();
+  if (!associated || /(特にない|ない|なし|これ以外は特にない)/.test(associated)) {
+    return "他に強い症状が見られていない";
+  }
+  const cause = pickCauseTextForConcreteMode(state, []);
+  if (cause) {
+    return `きっかけは${cause}の可能性がある`;
+  }
+  return "他に強い症状が見られていない";
+}
+
+const STATE_JUDGMENT_TEMPLATES = [
+  (s) =>
+    `今の情報を見る限り、\n急いで受診する必要がありそうなサインは見当たりません。\n\n痛みはつらいと思いますが、\n${s} ことから、\n\nまずは少し様子を見ても大丈夫そうです。`,
+  (s) =>
+    `現在の症状から見ると、\n緊急性が高そうなサインは今のところ見られていません。\n\n不安になると思いますが、\n${s} ため、\n\n今は落ち着いて様子を見る判断でも問題なさそうです。`,
+  (s) =>
+    `現時点の情報では、\n危険なサインは特に見当たりません。\n\nつらい症状があると不安になると思いますが、\n${s} ことから、\n\n今は様子を見る判断で問題なさそうです。`,
+  (s) =>
+    `今の症状を総合して見ると、\n急いで受診が必要な状況ではなさそうです。\n\n痛みや違和感があると心配になりますよね。\nただ、${s} ため、\n\nまずは少し様子を見て大丈夫そうです。`,
+];
+
+function buildStateAboutLine(state, level) {
+  // 🟢/🟡：固定テンプレート（①危険サインなし ②共感 ③symptomInfo ④様子見）をランダムで使用
+  if (level === "🟢" || level === "🟡") {
+    const symptomInfo = pickSymptomInfoForJudgment(state);
+    const template = STATE_JUDGMENT_TEMPLATES[Math.floor(Math.random() * STATE_JUDGMENT_TEMPLATES.length)];
+    return template(symptomInfo);
+  }
+  return "なので、今は様子を見る判断で大丈夫そうです。";
 }
 
 function toBulletText(line) {
@@ -8118,9 +8118,9 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
 }
 
 function buildStateDecisionLine(state, level) {
-  // 🟡のみ：心理クッション文（1文）を返す
-  if (level === "🟡") {
-    return buildYellowPsychologicalCushionLine();
+  // 🟢/🟡：判断文は buildStateAboutLine に含まれるため空
+  if (level === "🟢" || level === "🟡") {
+    return "";
   }
   return "なので、今は様子を見る判断で大丈夫そうです。";
 }
@@ -8136,12 +8136,14 @@ function normalizeStateBlockForGreenYellow(text, state) {
   );
   const sliceEnd = end >= 0 ? end : lines.length;
   const level = state?.decisionLevel === "🟡" ? "🟡" : "🟢";
+  const aboutLine = buildStateAboutLine(state, level);
+  const decisionLine = buildStateDecisionLine(state, level);
   const newBlock = [
     "🤝 今の状態について",
     ...buildStateFactsBullets(state),
     "",
-    buildStateAboutLine(state, level),
-    buildStateDecisionLine(state, level),
+    ...(aboutLine ? [aboutLine] : []),
+    ...(decisionLine ? [decisionLine] : []),
   ];
   return [...lines.slice(0, start), ...newBlock, ...lines.slice(sliceEnd)].join("\n");
 }
@@ -9022,7 +9024,7 @@ app.post("/api/chat", async (req, res) => {
     if (conversationState[conversationId].confirmationPending || conversationState[conversationId].expectsCorrectionReason) {
       const msg = String(message || "").trim();
       const isRejection = /違う|間違っている|違います|違ってる|違ってます/.test(msg);
-      const isOk = /^(はい|うん|ええ|大丈夫|OK|ok|よろしい|合ってる|あってる|いいです|問題ない|それでいい|それでいいです|大丈夫です|合っています|あっています)$/i.test(msg);
+      const isOk = /^(はい|うん|ええ|大丈夫|OK|ok|よろしい|合ってる|合っている|あってる|あっている|いいです|問題ない|それでいい|それでいいです|大丈夫です)$/i.test(msg);
 
       if (conversationState[conversationId].confirmationPending && isRejection) {
         conversationState[conversationId].confirmationPending = false;
@@ -9061,9 +9063,11 @@ app.post("/api/chat", async (req, res) => {
 
       conversationState[conversationId].confirmationPending = false;
       conversationState[conversationId].expectsCorrectionReason = false;
-      if (!isOk && msg.length > 2) {
+      const hasAddedInfo = !isOk && msg.length > 2;
+      if (hasAddedInfo) {
         (conversationState[conversationId].confirmationExtraFacts =
           conversationState[conversationId].confirmationExtraFacts || []).push(msg);
+        conversationState[conversationId].summaryGenerationPromise = null;
       }
       if (isOk || !conversationState[conversationId].confirmationPending) {
         conversationHistory[conversationId].push({ role: "user", content: message });
