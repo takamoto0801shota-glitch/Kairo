@@ -9027,6 +9027,7 @@ app.post("/api/chat", async (req, res) => {
       if (conversationState[conversationId].confirmationPending && isRejection) {
         conversationState[conversationId].confirmationPending = false;
         conversationState[conversationId].expectsCorrectionReason = true;
+        conversationState[conversationId].summaryGenerationPromise = null;
         const reply = "他に気になることがあれば、なんでも言ってください。";
         conversationHistory[conversationId].push({ role: "user", content: message });
         conversationHistory[conversationId].push({ role: "assistant", content: reply });
@@ -9072,9 +9073,6 @@ app.post("/api/chat", async (req, res) => {
           : await generateSummaryForConfirmation(conversationId);
         conversationState[conversationId].summaryGenerationPromise = null;
         conversationHistory[conversationId].push({ role: "assistant", content: summaryMsg });
-        if (fq) {
-          conversationHistory[conversationId].push({ role: "assistant", content: fq });
-        }
         const finalRisk = conversationState[conversationId].decisionLevel || finalizeRiskLevel(conversationState[conversationId]);
         const slotsFilledCount = countFilledSlots(state.slotFilled, state);
         const decisionAllowed = slotsFilledCount >= getRequiredSlotCount(state);
@@ -9099,7 +9097,7 @@ app.post("/api/chat", async (req, res) => {
           sections: extractSectionsBySpecs(summaryMsg, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text),
           questionPayload: null,
           normalizedAnswer: state.lastNormalizedAnswer || null,
-          followUpQuestion: fq,
+          followUpQuestion: null,
           followUpMessage: null,
           locationPromptMessage,
           locationRePromptMessage: null,
@@ -9997,23 +9995,11 @@ app.post("/api/chat", async (req, res) => {
     aiResponse = simplifyPossibilityPhrases(aiResponse);
     aiResponse = correctKanjiAndTypos(aiResponse);
 
-    // Add AI response to history
+    // Add AI response to history（フォロー文はまとめ出し終え後にユーザー応答時のみ表示）
     conversationHistory[conversationId].push({
       role: "assistant",
       content: aiResponse,
     });
-    if (followUpMessage) {
-      conversationHistory[conversationId].push({
-        role: "assistant",
-        content: followUpMessage,
-      });
-    }
-    if (followUpQuestion) {
-      conversationHistory[conversationId].push({
-        role: "assistant",
-        content: followUpQuestion,
-      });
-    }
 
     const finalRisk = conversationState[conversationId].decisionLevel || level;
     const finalScore = conversationState[conversationId].totalScore;
@@ -10063,8 +10049,8 @@ app.post("/api/chat", async (req, res) => {
       sections,
       questionPayload,
       normalizedAnswer,
-      followUpQuestion,
-      followUpMessage,
+      followUpQuestion: null,
+      followUpMessage: null,
       locationPromptMessage,
       locationRePromptMessage: locationRePromptBeforeSummary,
       locationSnapshot: conversationState[conversationId].locationSnapshot,
