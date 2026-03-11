@@ -1350,25 +1350,34 @@ async function handleUserInput() {
       if (shouldShowSections) {
         const firstDelay = QUESTION_DELAY_MS + 600;
         const interval = 800;
+        const followUpMessage = aiResponse.followUpMessage;
+        const followUpQuestion = aiResponse.followUpQuestion || DEFAULT_FOLLOW_UP_QUESTION;
+        const triggerFollowUpAfterLastSection = () => {
+          if (followUpMessage) addMessage(followUpMessage);
+          addMessage(followUpQuestion);
+        };
         const timerId0 = setTimeout(() => {
           renderSummary();
-          if (sections[0]) renderSection(sections[0]);
+          if (sections[0]) {
+            renderSection(sections[0]);
+            if (sections.length === 1) {
+              const followUpTimerId = setTimeout(triggerFollowUpAfterLastSection, 300);
+              appState.sectionTimers.push(followUpTimerId);
+            }
+          }
         }, firstDelay);
         appState.sectionTimers.push(timerId0);
         for (let idx = 1; idx < sections.length; idx++) {
+          const isLastSection = idx === sections.length - 1;
           const timerId = setTimeout(() => {
             renderSection(sections[idx]);
+            if (isLastSection) {
+              const followUpTimerId = setTimeout(triggerFollowUpAfterLastSection, 300);
+              appState.sectionTimers.push(followUpTimerId);
+            }
           }, firstDelay + idx * interval);
           appState.sectionTimers.push(timerId);
         }
-        const tailDelay = firstDelay + sections.length * interval;
-        if (aiResponse.followUpMessage) {
-          const timerId = setTimeout(() => addMessage(aiResponse.followUpMessage), tailDelay);
-          appState.sectionTimers.push(timerId);
-        }
-        const fq = aiResponse.followUpQuestion || DEFAULT_FOLLOW_UP_QUESTION;
-        const timerIdFq = setTimeout(() => addMessage(fq), tailDelay + 300);
-        appState.sectionTimers.push(timerIdFq);
       } else {
         setTimeout(() => {
           if (triageState.is_final && !isFirstResponse && !aiResponse.isPreSummaryConfirmation) {

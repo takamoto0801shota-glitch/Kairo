@@ -8,6 +8,8 @@ const path = require("path");
 const app = express();
 const PORT = process.env.PORT || 3000;
 const IS_DEBUG = false;
+/** フォールバックを避けるため、LLM 失敗時の最低リトライ回数 */
+const LLM_RETRY_COUNT = 5;
 
 // Middleware
 app.use(cors());
@@ -478,8 +480,8 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 - すべての質問が終了した後にのみ、緊急度を判定する（途中で結論を出さない）。
 - 最終判定は必ず1回のみ表示する。
 - Phase1（即時RED条件）：
-  1) pain_score が高（8以上）かつ daily_impact が高
-  2) pain_score が高（8以上）かつ associated_symptoms が中以上
+  1) pain_score が高（7以上）かつ daily_impact が高
+  2) pain_score が高（7以上）かつ associated_symptoms が中以上
   3) daily_impact が高かつ associated_symptoms が中以上
   4) criticalスロット（pain_score / daily_impact / associated_symptoms）のうち、高レベル（最大weight=3）が2つ以上
   5) criticalスロット（pain_score / daily_impact / associated_symptoms）のうち、高レベルが1つだけの場合は🟡固定
@@ -1078,7 +1080,7 @@ function removeForbiddenSummaryBlocks(text, allowedHeaders) {
   return output.join("\n");
 }
 
-function enforceSummaryStructureStrict(text, level, history, state) {
+async function enforceSummaryStructureStrict(text, level, history, state) {
   const normalizedText = normalizeHospitalMemoHeaderText(text);
   const headers = getRequiredSummaryHeadersByLevel(level);
   const cleaned = removeForbiddenSummaryBlocks(normalizedText, headers);
@@ -1086,7 +1088,7 @@ function enforceSummaryStructureStrict(text, level, history, state) {
   const hasAll = headers.every((h) => blocks.has(h));
   const hasEmergencyBlock = String(cleaned || "").includes("🚨");
   if (!hasAll || hasEmergencyBlock) {
-    return buildLocalSummaryFallback(level, history, state);
+    return await buildLocalSummaryFallback(level, history, state);
   }
   // 強制的に仕様順へ再構成（順序ゆらぎを排除）
   return headers.map((h) => blocks.get(h)).join("\n\n").trim();
@@ -3158,7 +3160,8 @@ function buildSecondaryImmediateFallbackAction() {
   };
 }
 
-function ensureActionCount(actions = [], targetCount = 2, context = {}, evidence = {}) {
+function ensureActionCount(actions = [], targetCount = 2, context = {}, evidence = {}, options = {}) {
+  const { skipSupplements = false } = options;
   const out = [];
   const seen = new Set();
   for (const item of (Array.isArray(actions) ? actions : [])) {
@@ -3169,6 +3172,7 @@ function ensureActionCount(actions = [], targetCount = 2, context = {}, evidence
     seen.add(key);
     if (out.length >= targetCount) return out;
   }
+  if (skipSupplements) return out.slice(0, targetCount);
   const topic = normalizeContextLocation(context?.location || "");
   const supplements = [];
   if (topic === "頭") {
@@ -3268,8 +3272,8 @@ function ensureActionCount(actions = [], targetCount = 2, context = {}, evidence
   return out.slice(0, targetCount);
 }
 
-function ensureMinimumDoActions(actions = [], minCount = 3, context = {}, evidence = {}) {
-  const out = ensureActionCount(actions, minCount, context, evidence);
+function ensureMinimumDoActions(actions = [], minCount = 3, context = {}, evidence = {}, options = {}) {
+  const out = ensureActionCount(actions, minCount, context, evidence, options);
   return out.slice(0, 4);
 }
 
@@ -3348,6 +3352,82 @@ const PAIN_INFECTION_YELLOW_FIRST_ACTION = {
 };
 
 /**
+ * モーダル・本文共通：doActions を LLM でリファインする（検索結果の有無に関係なく、症状に即した文面に整える）
+ * フォールバックせず、最低5回リトライする。
+ */
+async function refineDoActionsWithLLM(plan, state, level, options = {}) {
+  const { forSummary = false } = options;
+  const doActions = sanitizeImmediateActions(plan?.actions || [], buildSafeImmediateFallbackAction())
+    .map((a) => ({
+      action: toConciseActionTitle(a.title),
+      reason: ensureReliableReason(a.reason, plan?.evidence || {}),
+    }))
+    .slice(0, forSummary ? 3 : 4);
+
+  const minRequired = forSummary ? 2 : 3;
+  const ctx = plan?.currentStateContext || {};
+  const mainSymptom = String(ctx?.mainSymptom || ctx?.location || "症状").trim();
+
+  for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
+    try {
+      const isYellow = level === "🟡";
+      const useSimple = attempt >= 3 || doActions.length === 0;
+      let prompt;
+      if (useSimple) {
+        prompt = [
+          `主症状「${mainSymptom}」に合わせてセルフケアを${minRequired}件生成。`,
+          "JSONのみ: {\"do\":[{\"action\":\"...\",\"reason\":\"...\"}]}。曖昧表現・医療行為禁止。",
+        ].join("\n");
+      } else {
+        prompt = [
+          "あなたは医療情報を要約して行動を具体化するアシスタントです。",
+          "出力はJSONのみ。診断断定は禁止。",
+          "主症状・ユーザーの回答を「付随症状」にまとめない。主症状は主症状として、各スロットの内容を適切に区別して行動・理由に反映する。",
+          "行動は勧める口調で（〜してください／〜するといいです）。「〜します」は避ける。",
+          "曖昧表現禁止（例：「安静に」だけは禁止）。「何をどのくらい」が分かる具体動作＋軽い理由をセットで出す。",
+          "理由行に ・ は使わない。番号付き（1) / 1️⃣）は禁止。医療行為の指示・危険行為・専門処置は禁止。",
+          "次の形式で返す: {\"do\":[{\"action\":\"...\",\"reason\":\"...\"}]}",
+          forSummary ? "doは2件。各reasonは検索要点と整合する確実な理由にする。" : "doは最低3件、最大4件。各reasonは検索要点と整合する確実な理由にする。",
+          isYellow && !forSummary ? "OTC（市販薬：鎮痛薬・整腸剤・のど飴・ワセリン等）を1件必ず含める。" : "",
+          "「症状メモを2時間ごとに1回...」は禁止。",
+        ]
+          .filter(Boolean)
+          .join("\n");
+      }
+
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: prompt },
+          {
+            role: "user",
+            content: JSON.stringify({
+              currentStateContext: ctx,
+              evidence: {
+                selfCare: plan?.evidence?.selfCare || [],
+                observe: plan?.evidence?.observe || [],
+                danger: plan?.evidence?.danger || [],
+              },
+              doActions: doActions.length > 0 ? doActions : undefined,
+            }),
+          },
+        ],
+        temperature: 0.3 + attempt * 0.05,
+        max_tokens: 500,
+      });
+      const parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
+      const outDo = Array.isArray(parsed?.do) ? parsed.do : doActions;
+      const valid = outDo.filter((x) => x && x.action && x.reason).map((x) => ({ title: x.action, reason: x.reason }));
+      if (valid.length >= minRequired) return valid;
+      if (valid.length > 0 && attempt >= LLM_RETRY_COUNT - 1) return valid;
+    } catch (_) {
+      /* retry */
+    }
+  }
+  return doActions.length > 0 ? doActions.map((x) => ({ title: x.action, reason: x.reason })) : [];
+}
+
+/**
  * モーダル・本文共通：doActions を plan から構築する。
  * @param {object} plan - buildImmediateActionHypothesisPlan の戻り値
  * @param {object} state - conversationState
@@ -3360,8 +3440,13 @@ function buildDoActionsFromPlan(plan, state, level, options = {}) {
   const evidence = plan?.evidence || {};
   const category = resolveQuestionCategoryFromState(state);
 
-  const rawActions = Array.isArray(actionsOverride) ? actionsOverride : (Array.isArray(plan?.actions) ? plan.actions : []);
-  const picked = forSummary ? pickActionsForBlock(plan, 2) : rawActions.slice(0, 4);
+  const rawActions =
+    Array.isArray(actionsOverride) && actionsOverride.length > 0
+      ? actionsOverride
+      : (Array.isArray(plan?.actions) ? plan.actions : []);
+  const picked = forSummary
+    ? (rawActions.length > 0 ? rawActions.slice(0, 2) : pickActionsForBlock(plan, 2))
+    : rawActions.slice(0, 4);
   const doItems = sanitizeImmediateActions(picked, buildSafeImmediateFallbackAction()).map((a) => ({
     action: toConciseActionTitle(a.title),
     reason: ensureReliableReason(a.reason, evidence),
@@ -3369,11 +3454,13 @@ function buildDoActionsFromPlan(plan, state, level, options = {}) {
 
   const minCount = forSummary ? 2 : 3;
   const maxCount = forSummary ? 3 : 4;
+  const skipSupplements = Boolean(actionsOverride && actionsOverride.length > 0);
   let ensured = ensureMinimumDoActions(
     doItems.map((x) => ({ title: x.action, reason: x.reason, isOtc: false })),
     minCount,
     ctx,
-    evidence
+    evidence,
+    { skipSupplements }
   ).map((x) => ({ action: toConciseActionTitle(x.title), reason: ensureReliableReason(x.reason, evidence) }));
 
   if (level === "🟡" && (category === "PAIN" || category === "INFECTION")) {
@@ -3386,7 +3473,7 @@ function buildDoActionsFromPlan(plan, state, level, options = {}) {
       ensured = [...ensured, getOtcActionForYellowModal(topic)].slice(0, maxCount);
     }
   }
-  if (!forSummary && ensured.length < 3) {
+  if (!forSummary && ensured.length < 3 && !skipSupplements) {
     const extra = ensureMinimumDoActions(
       ensured.map((x) => ({ title: x.action, reason: x.reason, isOtc: false })),
       3,
@@ -3410,15 +3497,19 @@ function buildClosingLine() {
   return templates[Math.floor(Math.random() * templates.length)];
 }
 
-/** 本文用：モーダルと同じ buildDoActionsFromPlan を使用し、①②③④の枠で出力 */
-function buildImmediateActionsBlock(level, state, historyText = "", research = null) {
+/** 本文用：モーダルと同じ LLM リファイン＋buildDoActionsFromPlan を使用し、①②③④の枠で出力 */
+async function buildImmediateActionsBlock(level, state, historyText = "", research = null) {
   const plan = research || {};
   const context = plan?.currentStateContext || buildCurrentStateContext(state, historyText || "", state?.lastConcreteDetailsText || "");
   const lines = ["✅ 今すぐやること"];
   lines.push(buildWhySection(context));
   lines.push("");
 
-  const doActions = buildDoActionsFromPlan(plan, state, level, { forSummary: true });
+  const refinedActions = await refineDoActionsWithLLM(plan, state, level, { forSummary: true });
+  const doActions = buildDoActionsFromPlan(plan, state, level, {
+    forSummary: true,
+    actionsOverride: refinedActions.length > 0 ? refinedActions : undefined,
+  });
   doActions.forEach((item, idx) => {
     lines.push(`・${String(item.action || "").trim()}`);
     lines.push(`→ ${String(item.reason || "").trim()}`);
@@ -3449,41 +3540,77 @@ function buildYellowPsychologicalCushionLine() {
   return "いまの経過なら、判断を急がず体の負担を整えながら落ち着いて様子を見られる段階と捉えられます。";
 }
 
-function ensureImmediateActionsBlock(text, level, state, historyText = "", research = null) {
+async function ensureImmediateActionsBlock(text, level, state, historyText = "", research = null) {
   if (!text) return text;
   if (level !== "🟡" && level !== "🟢") return text;
-  return replaceSummaryBlock(
-    text,
-    "✅ 今すぐやること",
-    buildImmediateActionsBlock(level, state, historyText, research)
-  );
+  const block = await buildImmediateActionsBlock(level, state, historyText, research);
+  return replaceSummaryBlock(text, "✅ 今すぐやること", block);
+}
+
+async function generateMinimalActionsLastResort(context) {
+  const mainSymptom = String(context?.mainSymptom || context?.location || "症状").trim();
+  for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
+    try {
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `主症状に合わせてセルフケアを2つ生成。JSONのみ: {"actions":[{"title":"...","reason":"...","isOtc":false}]}`,
+          },
+          { role: "user", content: `主症状: ${mainSymptom}. 2件返す。` },
+        ],
+        temperature: 0.3,
+        max_tokens: 400,
+      });
+      const parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
+      const actions = Array.isArray(parsed?.actions) ? parsed.actions : [];
+      const valid = actions.filter((a) => a && a.title && a.reason).slice(0, 2);
+      if (valid.length > 0) return valid;
+    } catch (_) {
+      /* retry */
+    }
+  }
+  return [];
 }
 
 async function buildImmediateActionFallbackPlanFromState(state, overrides = {}) {
   const context =
     overrides.currentStateContext ||
     buildCurrentStateContext(state, "", state?.lastConcreteDetailsText || "");
-  const fallbackPrimary = buildSafeImmediateFallbackAction();
   let seedActions =
     Array.isArray(overrides.actions) && overrides.actions.length > 0
-      ? sanitizeImmediateActions(overrides.actions, fallbackPrimary)
+      ? sanitizeImmediateActions(overrides.actions, null)
       : [];
+
   if (seedActions.length === 0) {
-    let contextOnlyActions = await generateImmediateActionsFromContextOnly(state, context);
-    if (!contextOnlyActions || contextOnlyActions.length === 0) {
-      contextOnlyActions = await generateImmediateActionsFromContextOnly(state, context);
-    }
-    if (contextOnlyActions && contextOnlyActions.length > 0) {
-      seedActions = sanitizeImmediateActions(contextOnlyActions, fallbackPrimary);
+    for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
+      const contextOnlyActions = await generateImmediateActionsFromContextOnly(state, context, attempt >= 2);
+      if (contextOnlyActions && contextOnlyActions.length > 0) {
+        seedActions = sanitizeImmediateActions(contextOnlyActions, null);
+        break;
+      }
     }
   }
+  if (seedActions.length === 0) {
+    for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
+      const contextOnlyActions = await generateImmediateActionsFromContextOnly(state, context, true);
+      if (contextOnlyActions && contextOnlyActions.length > 0) {
+        seedActions = sanitizeImmediateActions(contextOnlyActions, null);
+        break;
+      }
+    }
+  }
+  if (seedActions.length === 0) {
+    const lastResort = await generateMinimalActionsLastResort(context);
+    if (lastResort && lastResort.length > 0) {
+      seedActions = lastResort;
+    }
+  }
+
+  const actionsToEnsure = seedActions.length > 0 ? seedActions : [];
   return {
-    actions: ensureActionCount(
-      seedActions.length > 0 ? seedActions : [],
-      3,
-      context,
-      overrides.evidence || {}
-    ),
+    actions: ensureActionCount(actionsToEnsure, 3, context, overrides.evidence || {}, { skipSupplements: true }),
     currentStateContext: context,
     searchQuery: overrides.searchQuery || "",
     sourceNames: Array.isArray(overrides.sourceNames) ? overrides.sourceNames : [],
@@ -3608,83 +3735,19 @@ function renderActionDetailMessage(cushion, doActions = [], dontActions = [], ap
 async function buildConcreteImmediateActionsDetails(state, actionSection = "") {
   const historyText = state?.historyTextForCare || "";
   const plan = await buildImmediateActionHypothesisPlan(state, historyText, actionSection || "");
-  const doActions = sanitizeImmediateActions(plan?.actions || [], buildSafeImmediateFallbackAction())
-    .map((a) => ({
-      action: toConciseActionTitle(a.title),
-      reason: ensureReliableReason(a.reason, plan?.evidence || {}),
-    }))
-    .slice(0, 4);
   const dontActions = buildDontActionsFromContext(plan?.currentStateContext || {}, plan?.evidence || {});
   const cushion = buildYellowPsychologicalCushionLine();
 
-  try {
-    const isYellow = state?.decisionLevel === "🟡";
-    const prompt = [
-      "あなたは医療情報を要約して行動を具体化するアシスタントです。",
-      "出力はJSONのみ。診断断定は禁止。",
-      "主症状・ユーザーの回答を「付随症状」にまとめない。主症状は主症状として、各スロットの内容を適切に区別して行動・理由に反映する。",
-      "行動は勧める口調で（〜してください／〜するといいです）。「〜します」は避ける。",
-      "曖昧表現禁止（例：「安静に」だけは禁止）。「何をどのくらい」が分かる具体動作＋軽い理由をセットで出す。",
-      "理由行に ・ は使わない。番号付き（1) / 1️⃣）は禁止。医療行為の指示・危険行為・専門処置は禁止。",
-      "次の形式で返す: {\"cushion\":\"...\",\"do\":[{\"action\":\"...\",\"reason\":\"...\"}],\"dont\":[{\"action\":\"...\",\"reason\":\"...\"}]}",
-      "cushionは1文、40〜65文字、保証語・危険語を使わない。",
-      "doは最低3件、最大4件。dontは最大2件。各reasonは検索要点と整合する確実な理由にする。",
-      isYellow ? "OTC（市販薬：鎮痛薬・整腸剤・のど飴・ワセリン等）を1件必ず含める。" : "",
-      "「症状メモを2時間ごとに1回...」は禁止。",
-    ]
-      .filter(Boolean)
-      .join("\n");
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: prompt },
-        {
-          role: "user",
-          content: JSON.stringify({
-            currentStateContext: plan?.currentStateContext || {},
-            evidence: {
-              selfCare: plan?.evidence?.selfCare || [],
-              observe: plan?.evidence?.observe || [],
-              danger: plan?.evidence?.danger || [],
-            },
-            doActions,
-            dontActions,
-            fallbackCushion: cushion,
-          }),
-        },
-      ],
-      temperature: 0.3,
-      max_tokens: 650,
-    });
-    const parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
-    const outCushion = String(parsed?.cushion || cushion).trim();
-    const outDo = Array.isArray(parsed?.do) ? parsed.do : doActions;
-    const outDont = Array.isArray(parsed?.dont) ? parsed.dont : dontActions;
-    const llmActions = outDo.map((x) => ({ title: x.action, reason: x.reason }));
-    const ensuredDo = buildDoActionsFromPlan(plan, state, state?.decisionLevel || "🟢", {
-      actionsOverride: llmActions,
-    });
-    const safeDont = (Array.isArray(outDont) ? outDont : [])
-      .filter((x) => x && x.action && x.reason)
-      .slice(0, 2);
-    const appendMc = shouldAppendMcLinesToModal(state);
-    return {
-      message: renderActionDetailMessage(outCushion, ensuredDo, safeDont.length > 0 ? safeDont : dontActions, appendMc),
-      query: plan?.searchQuery || "",
-      sourceNames: plan?.sourceNames || [],
-    };
-  } catch (_) {
-    const fallbackActions = doActions.map((x) => ({ title: x.action, reason: x.reason }));
-    const fallbackDo = buildDoActionsFromPlan(plan, state, state?.decisionLevel || "🟢", {
-      actionsOverride: fallbackActions,
-    });
-    const appendMc = shouldAppendMcLinesToModal(state);
-    return {
-      message: renderActionDetailMessage(cushion, fallbackDo, dontActions, appendMc),
-      query: plan?.searchQuery || "",
-      sourceNames: plan?.sourceNames || [],
-    };
-  }
+  const refinedActions = await refineDoActionsWithLLM(plan, state, state?.decisionLevel || "🟢", { forSummary: false });
+  const ensuredDo = buildDoActionsFromPlan(plan, state, state?.decisionLevel || "🟢", {
+    actionsOverride: refinedActions.length > 0 ? refinedActions : undefined,
+  });
+  const appendMc = shouldAppendMcLinesToModal(state);
+  return {
+    message: renderActionDetailMessage(cushion, ensuredDo, dontActions, appendMc),
+    query: plan?.searchQuery || "",
+    sourceNames: plan?.sourceNames || [],
+  };
 }
 
 function mapDailyImpactAnswerToRestLevel(answer) {
@@ -3989,7 +4052,7 @@ function buildJudgmentSnapshot(state, history = [], decisionType) {
   if (state?.slotNormalized?.associated_symptoms?.riskLevel === RISK_LEVELS.HIGH) {
     redFlags.push("強い付随症状");
   }
-  if (Number.isFinite(state?.lastPainScore) && state.lastPainScore >= 8) {
+  if (Number.isFinite(state?.lastPainScore) && state.lastPainScore >= 7) {
     redFlags.push("痛みスコアが高い");
   }
   if (state?.slotNormalized?.daily_impact?.riskLevel === RISK_LEVELS.HIGH) {
@@ -4678,7 +4741,7 @@ const SUBJECTIVE_ALERT_WORDS = ["気になります", "引っかかります", "
 
 function riskFromPainScore(rawScore) {
   if (rawScore === null || rawScore === undefined) return RISK_LEVELS.MEDIUM;
-  if (rawScore >= 8) return RISK_LEVELS.HIGH;
+  if (rawScore >= 7) return RISK_LEVELS.HIGH;
   if (rawScore >= 5) return RISK_LEVELS.MEDIUM;
   return RISK_LEVELS.LOW;
 }
@@ -4952,7 +5015,7 @@ function setSlotFromSpontaneous(state, slotKey, payload = {}) {
   let normalized = null;
   if (slotKey === "pain_score") {
     normalized = buildNormalizedAnswer(slotKey, rawAnswer || String(rawScore ?? ""), 0, rawScore);
-    const weight = rawScore >= 8 ? 2.0 : rawScore >= 5 ? 1.5 : 1.0;
+    const weight = rawScore >= 7 ? 2.0 : rawScore >= 5 ? 1.5 : 1.0;
     if (Number.isFinite(rawScore)) {
       updatePainScoreState(state, rawScore, weight, rawAnswer || String(rawScore));
     }
@@ -5717,6 +5780,8 @@ function sanitizeSummaryBullets(text, state) {
     .map((line) => {
       const trimmed = line.trim();
       if (!trimmed.startsWith("・")) return line;
+      const content = trimmed.replace(/^・\s*/, "").trim();
+      if (isConfirmationOnlyAnswer(content)) return "";
       if (/^・(ない|特にない|なし)$/.test(trimmed)) {
         if (answers.associated_symptoms?.includes("ない")) {
           return "・これ以外の症状は特にない";
@@ -5725,6 +5790,7 @@ function sanitizeSummaryBullets(text, state) {
       }
       return line;
     })
+    .filter((line) => line !== "")
     .join("\n");
 }
 
@@ -5821,10 +5887,22 @@ function buildStateFactsBullets(state) {
   extra.forEach((f) => {
     const s = String(f).trim();
     if (!s) return;
+    if (isConfirmationOnlyAnswer(s)) return;
     pushIfValid(lines, s.startsWith("・") ? s : `・${s}`);
   });
 
   return lines.slice(0, 8);
+}
+
+/** 確認文への肯定・否定のみの返答（箇条書きに書かない） */
+function isConfirmationOnlyAnswer(text) {
+  const t = String(text || "").trim();
+  if (!t) return true;
+  if (/^(ない|なし|特になし)$/i.test(t)) return true;
+  if (/^(はい|うん|ええ|おっけー|おk|OK|ok|よろしい|合ってる|合ってます|合っています|あってる|あってます|あっています|いいです|問題ない|問題ないです|それでいい|それでいいです|大丈夫|大丈夫です|特にない|特にないです|特にありません|ないです|ありません|そうです|そうですね|その通り|そのとおり|その通りです|正しい|正しいです|正解|間違いない|間違いありません|了解|了解です|承知|承知しました|かしこまりました)$/i.test(t)) return true;
+  if (/^(はい|うん|ええ)[、,]?\s*(あってる|あっています|合ってる|合っています|大丈夫|大丈夫です|そうです|その通り)/i.test(t)) return true;
+  if (/^(はい|うん|ええ)[、,]?\s*(特にない|特にありません|ないです|ありません)/i.test(t)) return true;
+  return false;
 }
 
 const PRE_SUMMARY_CONFIRMATION_PHRASES = [
@@ -5941,22 +6019,54 @@ function pickSymptomInfoForJudgment(state) {
   return "他に強い症状が見られていない";
 }
 
-const STATE_JUDGMENT_TEMPLATES = [
+const STATE_JUDGMENT_TEMPLATES_GREEN = [
   (s) =>
-    `今の情報を見る限り、急いで受診する必要がありそうなサインは見当たりません。痛みはつらいと思いますが、${s} ことから、今は大きく心配する状況ではなさそうです。`,
+    `今の情報を見る限り、急いで受診する必要がありそうなサインは見当たりません。\n痛みはつらいと思いますが、${s} ことから、今は大きく心配する状況ではなさそうです。`,
   (s) =>
-    `現在の症状から見ると、緊急性が高そうなサインは今のところ見られていません。不安になると思いますが、${s} ため、今の状態は大きな心配はなさそうです。`,
+    `現在の症状から見ると、緊急性が高そうなサインは今のところ見られていません。\n不安になると思いますが、${s} ため、今の状態は大きな心配はなさそうです。`,
   (s) =>
-    `現時点の情報では、危険なサインは特に見当たりません。つらい症状があると不安になると思いますが、${s} ことから、今は大きく心配する状況ではなさそうです。`,
+    `現時点の情報では、危険なサインは特に見当たりません。\nつらい症状があると不安になると思いますが、${s} ことから、今は大きく心配する状況ではなさそうです。`,
   (s) =>
-    `今の症状を総合して見ると、急いで受診が必要な状況ではなさそうです。痛みや違和感があると心配になりますよね。ただ、${s} ため、今の状態は大きな心配はなさそうです。`,
+    `今の症状を総合して見ると、急いで受診が必要な状況ではなさそうです。\n痛みや違和感があると心配になりますよね。\nただ、${s} ため、今の状態は大きな心配はなさそうです。`,
 ];
 
+/** 🟡①: 痛み7以上のみ */
+const STATE_JUDGMENT_YELLOW_PAIN_HIGH = (s) =>
+  `今の情報を見る限り、危険なサインは今のところ見当たりません。\nつらい症状があると不安になりますよね。\nただ、${s} ことから、今すぐ大きく心配する状況ではなさそうです。\n体調の変化には少し気をつけながら様子を見ていきましょう。`;
+
+/** 🟡②: フォールバック（優先度最低） */
+const STATE_JUDGMENT_YELLOW_FALLBACK = (s) =>
+  `現在の症状から見ると、緊急性が高そうなサインは今のところ見られていません。\n体調がいつもと違うと心配になりますよね。\nただ、${s} ため、今の状態は深刻な状況ではなさそうです。\n無理をせず、体調の変化を見ながら過ごしてみてください。`;
+
+/** 🟡③: 経過が「数時間前・一日前」を選択した時のみ */
+const STATE_JUDGMENT_YELLOW_DURATION_SPECIFIC = (s) =>
+  `現時点の情報では、危険なサインは特に見当たりません。\n症状が続くと不安になりますよね。\nただ、${s} ことから、今すぐ大きな問題につながる可能性は低そうです。\n体調を気にかけながら様子を見ていきましょう。`;
+
+function isDurationHoursOrDay(state) {
+  const durationRaw = String(
+    getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "")
+  ).trim();
+  return /(数時間|一日|昨日)/.test(durationRaw);
+}
+
 function buildStateAboutLine(state, level) {
-  // 🟢/🟡：固定テンプレート（①危険サインなし ②共感 ③symptomInfo ④様子見）をランダムで使用
-  if (level === "🟢" || level === "🟡") {
+  if (level === "🟢") {
     const symptomInfo = pickSymptomInfoForJudgment(state);
-    const template = STATE_JUDGMENT_TEMPLATES[Math.floor(Math.random() * STATE_JUDGMENT_TEMPLATES.length)];
+    const template = STATE_JUDGMENT_TEMPLATES_GREEN[Math.floor(Math.random() * STATE_JUDGMENT_TEMPLATES_GREEN.length)];
+    return template(symptomInfo);
+  }
+  if (level === "🟡") {
+    const symptomInfo = pickSymptomInfoForJudgment(state);
+    const painScore = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
+    const canUsePainHigh = painScore !== null && painScore >= 7;
+    const canUseDurationSpecific = isDurationHoursOrDay(state);
+
+    const candidates = [];
+    if (canUsePainHigh) candidates.push(STATE_JUDGMENT_YELLOW_PAIN_HIGH);
+    if (canUseDurationSpecific) candidates.push(STATE_JUDGMENT_YELLOW_DURATION_SPECIFIC);
+    if (candidates.length === 0) candidates.push(STATE_JUDGMENT_YELLOW_FALLBACK);
+
+    const template = candidates[Math.floor(Math.random() * candidates.length)];
     return template(symptomInfo);
   }
   return "なので、今は様子を見る判断で大丈夫そうです。";
@@ -6119,7 +6229,7 @@ function buildReassuranceBulletsForPatterns(state) {
     bullets.push("・強い付随症状は今のところ目立たない");
   }
   const painScore = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
-  if (Number.isFinite(painScore) && painScore <= 7) {
+  if (Number.isFinite(painScore) && painScore <= 6) {
     bullets.push("・痛みスコアが極端な高値ではない");
   }
   const duration = getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "");
@@ -7359,13 +7469,36 @@ function buildExternalActionSearchQuery(concrete, features) {
   return parts.replace(/\s{2,}/g, " ").trim().slice(0, 420);
 }
 
+function isGoogleCustomSearchConfigured() {
+  const key =
+    process.env.GOOGLE_SEARCH_API_KEY ||
+    process.env.GOOGLE_CUSTOM_SEARCH_API_KEY ||
+    process.env.GOOGLE_API_KEY;
+  const cx = process.env.GOOGLE_SEARCH_CX || process.env.GOOGLE_CUSTOM_SEARCH_CX;
+  return !!(key && cx);
+}
+
+let _hasWarnedSearchApi = false;
+function warnIfSearchApiNotConfigured() {
+  if (_hasWarnedSearchApi) return;
+  if (!isGoogleCustomSearchConfigured()) {
+    _hasWarnedSearchApi = true;
+    console.warn(
+      "[今すぐやること] Google Custom Search API が未設定です。検索結果が使えず汎用フォールバックになります。.env に GOOGLE_SEARCH_API_KEY と GOOGLE_SEARCH_CX（または GOOGLE_CUSTOM_SEARCH_API_KEY / GOOGLE_CUSTOM_SEARCH_CX）を設定してください。"
+    );
+  }
+}
+
 async function fetchGoogleCustomSearchResults(query, language = "ja", retries = 2, skipLanguageRestriction = false) {
   const key =
     process.env.GOOGLE_SEARCH_API_KEY ||
     process.env.GOOGLE_CUSTOM_SEARCH_API_KEY ||
     process.env.GOOGLE_API_KEY;
   const cx = process.env.GOOGLE_SEARCH_CX || process.env.GOOGLE_CUSTOM_SEARCH_CX;
-  if (!key || !cx) return [];
+  if (!key || !cx) {
+    warnIfSearchApiNotConfigured();
+    return [];
+  }
   const q = String(query || "").trim();
   if (!q) return [];
   const params = new URLSearchParams({
@@ -7511,7 +7644,7 @@ function extractFeatures(stateText) {
   const painMatch = text.match(/(\d{1,2})\s*\/\s*10|痛み[はが]?\s*(\d{1,2})/);
   const painScore = Number(painMatch?.[1] || painMatch?.[2] || NaN);
   if (Number.isFinite(painScore)) {
-    severityHint = painScore >= 8 ? "high" : painScore >= 5 ? "medium" : "low";
+    severityHint = painScore >= 7 ? "high" : painScore >= 5 ? "medium" : "low";
   } else if (/(動けないほど|38度以上|激痛|強い息苦しさ)/.test(normalized)) {
     severityHint = "high";
   } else if (/(少しつらい|37度台|つらい)/.test(normalized)) {
@@ -7927,35 +8060,59 @@ function normalizeContextLocation(location) {
   return normalizeAdviceTopic(location);
 }
 
-async function generateImmediateActionsFromContextOnly(state, context) {
+async function generateImmediateActionsFromContextOnly(state, context, useSimplePrompt = false) {
   if (!context) return [];
-  try {
-    const stateAboutFacts = buildStateFactsBullets(state).map((line) => toBulletText(line)).join(" / ") || context?.stateAboutQuery || "";
-    const llmPrompt = [
-      "Generate 3 immediate self-care actions based on the user's symptom context. No search results available.",
-      "Use ONLY currentStateContext and stateAboutForActions. Do not diagnose.",
-      "CRITICAL: Do NOT lump main symptom and user answers into 'associated symptoms'. Treat main symptom as main symptom, reflect each slot distinctly in action/reason.",
-      "No vague expressions (e.g. '安静に' alone is forbidden). Use concrete actions with 'what and how much' plus light reason.",
-      "Reason: do NOT use ・. No numbering (1) 1️⃣). No medical procedure instructions, dangerous acts, or professional procedures.",
-      "Return strict JSON: {\"actions\":[{\"title\":\"...\",\"reason\":\"...\",\"isOtc\":false}]}",
-      "Use recommending tone: 〜してください or 〜するといいです. Avoid 〜します.",
-      "Make actions specific to the symptom (head/stomach/throat/skin). OTC max 1.",
-    ].join("\n");
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: llmPrompt },
-        { role: "user", content: JSON.stringify({ currentStateContext: context, stateAboutForActions: stateAboutFacts }) },
-      ],
-      temperature: 0.3,
-      max_tokens: 500,
-    });
-    const parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
-    const actions = Array.isArray(parsed?.actions) ? parsed.actions : [];
-    return actions.filter((a) => a && a.title && a.reason).slice(0, 3);
-  } catch (_) {
-    return [];
+  const mainSymptom = String(context?.mainSymptom || context?.location || "症状").trim();
+  const stateAboutFacts = buildStateFactsBullets(state).map((line) => toBulletText(line)).join(" / ") || context?.stateAboutQuery || "";
+  const userInput = [
+    mainSymptom && `主症状: ${mainSymptom}`,
+    stateAboutFacts && `状態: ${stateAboutFacts}`,
+    context?.features && Object.keys(context.features).length > 0
+      ? `回答: ${JSON.stringify(context.features)}`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
+    try {
+      const useSimple = useSimplePrompt || attempt >= 2;
+      let llmPrompt;
+      if (useSimple) {
+        llmPrompt = [
+          `主症状「${mainSymptom}」に合わせて、今すぐできるセルフケアを2つ生成してください。`,
+          "各行動は「・<行動>」「→ <理由>」形式。曖昧表現禁止。医療行為・危険行為禁止。",
+          "JSONのみ返す: {\"actions\":[{\"title\":\"・...\",\"reason\":\"→ ...\",\"isOtc\":false}]}",
+        ].join("\n");
+      } else {
+        llmPrompt = [
+          "Generate 2-3 immediate self-care actions from the user's symptom context. No search results.",
+          "CRITICAL: Do NOT lump main symptom into 'associated symptoms'. Reflect main symptom and each slot distinctly.",
+          "No vague expressions. Concrete actions with 'what and how much' plus brief reason.",
+          "Reason: no ・. No numbering. No medical/dangerous procedures. Tone: 〜してください / 〜するといいです.",
+          "Return strict JSON: {\"actions\":[{\"title\":\"...\",\"reason\":\"...\",\"isOtc\":false}]}. OTC max 1.",
+        ].join("\n");
+      }
+
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: llmPrompt },
+          { role: "user", content: useSimple ? userInput : JSON.stringify({ currentStateContext: context, stateAboutForActions: stateAboutFacts }) },
+        ],
+        temperature: 0.2 + attempt * 0.05,
+        max_tokens: 600,
+      });
+      const raw = completion?.choices?.[0]?.message?.content || "";
+      const parsed = parseJsonObjectFromText(raw);
+      const actions = Array.isArray(parsed?.actions) ? parsed.actions : [];
+      const valid = actions.filter((a) => a && a.title && a.reason).slice(0, 3);
+      if (valid.length > 0) return valid;
+    } catch (_) {
+      /* retry */
+    }
   }
+  return [];
 }
 
 async function buildImmediateActionHypothesisPlan(state, historyText = "", summarySection = "") {
@@ -7970,6 +8127,15 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
   const queryLevels = buildImmediateActionSearchQueries(currentStateContext);
 
   try {
+    if (!isGoogleCustomSearchConfigured()) {
+      const contextOnlyActions = await generateImmediateActionsFromContextOnly(state, currentStateContext);
+      return await buildImmediateActionFallbackPlanFromState(state, {
+        actions: contextOnlyActions && contextOnlyActions.length > 0 ? contextOnlyActions : undefined,
+        currentStateContext,
+        searchQuery,
+        concreteMessage: concrete.message,
+      });
+    }
     const allQueries = [
       ...queryLevels.ja.map((q) => ({ q, lang: "ja" })),
       ...queryLevels.en.map((q) => ({ q, lang: "en" })),
@@ -8148,7 +8314,7 @@ function normalizeStateBlockForGreenYellow(text, state) {
   return [...lines.slice(0, start), ...newBlock, ...lines.slice(sliceEnd)].join("\n");
 }
 
-function buildLocalSummaryFallback(level, history, state) {
+async function buildLocalSummaryFallback(level, history, state) {
   const historyText = history
     .filter((msg) => msg.role === "user")
     .map((msg) => msg.content)
@@ -8176,10 +8342,11 @@ function buildLocalSummaryFallback(level, history, state) {
     other: "今の話を聞く限りだと、「体がだるくてつらい感じ」に近そうですね。",
   };
 
+  const immediateBlock = await buildImmediateActionsBlock(level, state, historyText, null);
   const baseBlocks = [
     `${level} ここまでの情報を整理します\n${buildSummaryIntroTemplate()}`,
     `🤝 今の状態について\n${buildStateFactsBullets(state).join("\n")}\n\n${buildStateAboutLine(state, level)}\n${buildStateDecisionLine(state, level)}`,
-    buildImmediateActionsBlock(level, state, historyText),
+    immediateBlock,
     `⏳ 今後の見通し\nこのタイプの症状は、時間の経過で変化することがあります。\n・もし明日の朝も同じ痛みが続いていたら\n・もし痛みが7以上に強くなったら\nそのタイミングで、もう一度Kairoに聞いてください。`,
   ];
   const closing = `🌱 最後に\nまた不安になったら、いつでもここで聞いてください。`;
@@ -8530,7 +8697,7 @@ function mapRiskLevelToSeverityScore(riskLevel) {
 function getPainSeverityScore(state) {
   const pain = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
   if (pain !== null) {
-    if (pain >= 8) return 3;
+    if (pain >= 7) return 3;
     if (pain >= 5) return 1;
     return 0;
   }
@@ -8796,7 +8963,7 @@ async function generateSummaryForConfirmation(conversationId) {
       immediateActionPlan = await buildImmediateActionFallbackPlanFromState(state);
     }
     aiResponse = normalizeStateBlockForGreenYellow(aiResponse, state);
-    aiResponse = ensureImmediateActionsBlock(aiResponse, level, state, historyTextForOtc, immediateActionPlan);
+    aiResponse = await ensureImmediateActionsBlock(aiResponse, level, state, historyTextForOtc, immediateActionPlan);
   }
   if (level === "🔴") {
     state.decisionLevel = "🔴";
@@ -8815,14 +8982,14 @@ async function generateSummaryForConfirmation(conversationId) {
   }
   state.summaryText = aiResponse;
   if (level === "🔴" && state.hospitalRecommendation?.name && (!aiResponse.includes(state.hospitalRecommendation.name) || !aiResponse.includes("タイプ：") || !aiResponse.includes("理由："))) {
-    aiResponse = buildLocalSummaryFallback(level, history, state);
+    aiResponse = await buildLocalSummaryFallback(level, history, state);
   }
   if (!validateSummaryAgainstNormalized(aiResponse, state)) {
-    aiResponse = buildLocalSummaryFallback(level, history, state);
+    aiResponse = await buildLocalSummaryFallback(level, history, state);
   }
   aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
   if (!hasAllSummaryBlocks(aiResponse)) {
-    aiResponse = buildLocalSummaryFallback(level, history, state);
+    aiResponse = await buildLocalSummaryFallback(level, history, state);
   }
   aiResponse = ensureRestMcDecisionBlock(aiResponse, level, state);
   aiResponse = sanitizeGeneralPhrases(aiResponse);
@@ -8830,7 +8997,7 @@ async function generateSummaryForConfirmation(conversationId) {
   aiResponse = simplifyPossibilityPhrases(aiResponse);
   aiResponse = correctKanjiAndTypos(aiResponse);
   aiResponse = enforceSummaryIntroTemplate(aiResponse);
-  aiResponse = enforceSummaryStructureStrict(aiResponse, level, history, state);
+  aiResponse = await enforceSummaryStructureStrict(aiResponse, level, history, state);
   aiResponse = stripInfectionOnlineClinicGuidance(aiResponse, state);
   aiResponse = stripHospitalMapLinks(aiResponse);
   aiResponse = stripMcForRed(aiResponse, level);
@@ -9024,7 +9191,7 @@ app.post("/api/chat", async (req, res) => {
     if (conversationState[conversationId].confirmationPending || conversationState[conversationId].expectsCorrectionReason) {
       const msg = String(message || "").trim();
       const isRejection = /違う|間違っている|違います|違ってる|違ってます/.test(msg);
-      const isOk = /^(はい|うん|ええ|大丈夫|OK|ok|よろしい|合ってる|合っている|あってる|あっている|いいです|問題ない|それでいい|それでいいです|大丈夫です)$/i.test(msg);
+      const isOk = isConfirmationOnlyAnswer(msg);
 
       if (conversationState[conversationId].confirmationPending && isRejection) {
         conversationState[conversationId].confirmationPending = false;
@@ -9126,7 +9293,7 @@ app.post("/api/chat", async (req, res) => {
       const rawScore = normalizePainScoreInput(message);
       let weight = 1.5;
       if (rawScore !== null) {
-        if (rawScore >= 8) weight = 2.0;
+        if (rawScore >= 7) weight = 2.0;
         else if (rawScore >= 5) weight = 1.5;
         else weight = 1.0;
       }
@@ -9701,7 +9868,7 @@ app.post("/api/chat", async (req, res) => {
           aiResponse,
           conversationState[conversationId]
         );
-        aiResponse = ensureImmediateActionsBlock(
+        aiResponse = await ensureImmediateActionsBlock(
           aiResponse,
           level,
           conversationState[conversationId],
@@ -9739,7 +9906,7 @@ app.post("/api/chat", async (req, res) => {
         const hasType = aiResponse.includes("タイプ：");
         const hasReason = aiResponse.includes("理由：");
         if (hospitalName && (!aiResponse.includes(hospitalName) || !hasType || !hasReason)) {
-          aiResponse = buildLocalSummaryFallback(
+          aiResponse = await buildLocalSummaryFallback(
             level,
             conversationHistory[conversationId],
             conversationState[conversationId]
@@ -9747,7 +9914,7 @@ app.post("/api/chat", async (req, res) => {
         }
       }
       if (!validateSummaryAgainstNormalized(aiResponse, conversationState[conversationId])) {
-        aiResponse = buildLocalSummaryFallback(
+        aiResponse = await buildLocalSummaryFallback(
           level,
           conversationHistory[conversationId],
           conversationState[conversationId]
@@ -9755,7 +9922,7 @@ app.post("/api/chat", async (req, res) => {
       }
       aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
       if (!hasAllSummaryBlocks(aiResponse)) {
-        aiResponse = buildLocalSummaryFallback(
+        aiResponse = await buildLocalSummaryFallback(
           level,
           conversationHistory[conversationId],
           conversationState[conversationId]
@@ -9772,7 +9939,7 @@ app.post("/api/chat", async (req, res) => {
       aiResponse = simplifyPossibilityPhrases(aiResponse);
       aiResponse = correctKanjiAndTypos(aiResponse);
       aiResponse = enforceSummaryIntroTemplate(aiResponse);
-      aiResponse = enforceSummaryStructureStrict(
+      aiResponse = await enforceSummaryStructureStrict(
         aiResponse,
         level,
         conversationHistory[conversationId],
@@ -10088,8 +10255,9 @@ app.post("/api/chat", async (req, res) => {
     const filled = state ? countFilledSlots(state.slotFilled, state) : 0;
     if (state && filled >= getRequiredSlotCount(state)) {
       const level = state.decisionLevel || finalizeRiskLevel(state);
-      const fallbackSummary = enforceSummaryStructureStrict(
-        buildLocalSummaryFallback(level, history, state),
+      const localFallback = await buildLocalSummaryFallback(level, history, state);
+      const fallbackSummary = await enforceSummaryStructureStrict(
+        localFallback,
         level,
         history,
         state
