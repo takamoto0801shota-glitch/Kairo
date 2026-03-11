@@ -13,6 +13,7 @@ const FIRST_QUESTION_KEY = "kairo_first_question";
 const SUBJECTIVE_ALERT_WORDS = ["気になります", "引っかかります", "心配です", "注意が必要です"];
 const FEATURE_SHOW_LOCATION_EXPLANATION = false;
 const QUESTION_DELAY_MS = 500;
+const DEFAULT_FOLLOW_UP_QUESTION = "今は少し休むだけでも良さそうです。\nこのまま休みますか？\nそれとも、もう少し詳しく確認しますか？";
 
 const appState = {
   riskLevel: null,
@@ -1115,6 +1116,29 @@ function clearSummaryContainer() {
   summaryCard.innerHTML = "";
 }
 
+const SUMMARY_CARD_TEMPLATES = {
+  green: [
+    "今は大きな心配なさそうです",
+    "落ち着いて様子を見られそうです",
+    "今のところ安心して過ごせそうです",
+  ],
+  yellow: [
+    "今は注意して様子を見てください",
+    "少し注意しながら様子を見ましょう",
+    "安心しながら様子を見てください",
+  ],
+  red: [
+    "早めの受診をおすすめします",
+    "医療機関での確認が必要そうです",
+    "今日中の受診を検討してください",
+  ],
+};
+
+function pickSummaryCardText(level) {
+  const templates = SUMMARY_CARD_TEMPLATES[level] || SUMMARY_CARD_TEMPLATES.yellow;
+  return templates[Math.floor(Math.random() * templates.length)];
+}
+
 function renderSummaryBase(text) {
   const summaryCard = document.getElementById("summaryCard");
   if (!summaryCard) return;
@@ -1129,19 +1153,23 @@ function renderSummaryBase(text) {
 }
 
 function renderRedCard() {
-  renderSummaryBase("🔴 病院を推奨します");
+  const text = pickSummaryCardText("red");
+  renderSummaryBase(`🔴 ${text}`);
 }
 
 function renderYellowCard() {
-  renderSummaryBase("🟡 注意して様子見をしてください");
+  const text = pickSummaryCardText("yellow");
+  renderSummaryBase(`🟡 ${text}`);
 }
 
 function renderGreenCard() {
-  renderSummaryBase("🟢 様子を見ましょう");
+  const text = pickSummaryCardText("green");
+  renderSummaryBase(`🟢 ${text}`);
 }
 
 function renderSafeFallback() {
-  renderSummaryBase("🟡 注意して様子見をしてください");
+  const text = pickSummaryCardText("yellow");
+  renderSummaryBase(`🟡 ${text}`);
 }
 
 function renderSummary() {
@@ -1312,7 +1340,7 @@ async function handleUserInput() {
       if (!triageState.is_final) {
         hideSummaryCard();
         appState.riskLevel = null;
-      } else if (!isFirstResponse) {
+      } else if (!isFirstResponse && !aiResponse.isPreSummaryConfirmation) {
         const level = triageState.triage_level || (aiResponse.judgeMeta?.judgement === "🔴" ? "red" : aiResponse.judgeMeta?.judgement === "🟡" ? "yellow" : "green");
         appState.riskLevel = level === "red" ? "RED" : level === "yellow" ? "YELLOW" : "GREEN";
       }
@@ -1322,32 +1350,36 @@ async function handleUserInput() {
       if (shouldShowSections) {
         const firstDelay = QUESTION_DELAY_MS + 600;
         const interval = 800;
-        sections.forEach((sectionText, idx) => {
+        const timerId0 = setTimeout(() => {
+          renderSummary();
+          if (sections[0]) renderSection(sections[0]);
+        }, firstDelay);
+        appState.sectionTimers.push(timerId0);
+        for (let idx = 1; idx < sections.length; idx++) {
           const timerId = setTimeout(() => {
-            if (idx === 0) renderSummary();
-            renderSection(sectionText);
+            renderSection(sections[idx]);
           }, firstDelay + idx * interval);
           appState.sectionTimers.push(timerId);
-        });
+        }
         const tailDelay = firstDelay + sections.length * interval;
         if (aiResponse.followUpMessage) {
           const timerId = setTimeout(() => addMessage(aiResponse.followUpMessage), tailDelay);
           appState.sectionTimers.push(timerId);
         }
-        if (aiResponse.followUpQuestion) {
-          const timerId = setTimeout(() => addMessage(aiResponse.followUpQuestion), tailDelay + 300);
-          appState.sectionTimers.push(timerId);
-        }
+        const fq = aiResponse.followUpQuestion || DEFAULT_FOLLOW_UP_QUESTION;
+        const timerIdFq = setTimeout(() => addMessage(fq), tailDelay + 300);
+        appState.sectionTimers.push(timerIdFq);
       } else {
         setTimeout(() => {
-          if (triageState.is_final && !isFirstResponse && sections.length > 0) renderSummary();
+          if (triageState.is_final && !isFirstResponse && !aiResponse.isPreSummaryConfirmation) {
+            renderSummary();
+          }
           addMessage(aiMessage, false, true, { animateFromTop: !!aiResponse.isPreSummaryConfirmation });
           if (aiResponse.followUpMessage) {
             addMessage(aiResponse.followUpMessage);
           }
-          if (aiResponse.followUpQuestion) {
-            addMessage(aiResponse.followUpQuestion);
-          }
+          const fq = aiResponse.followUpQuestion || (triageState.is_final ? DEFAULT_FOLLOW_UP_QUESTION : null);
+          if (fq) addMessage(fq);
         }, QUESTION_DELAY_MS);
       }
     } catch (error) {

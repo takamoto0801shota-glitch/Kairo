@@ -2845,7 +2845,7 @@ function buildRedModalContent(state, historyText = "", research = null) {
       safeWaitItems = [
         `・${RED_PAIN_INFECTION_SAFE_WAIT_FIRST.title}`,
         `→ ${RED_PAIN_INFECTION_SAFE_WAIT_FIRST.reason}`,
-        ...fallbackActions.slice(0, 1).flatMap((a) => [`・${a.title}`, `→ ${a.reason}`]),
+        ...fallbackActions.slice(0, 2).flatMap((a) => [`・${a.title}`, `→ ${a.reason}`]),
       ];
     } else {
       safeWaitItems = fallbackActions.slice(0, 2).flatMap((a) => [`・${a.title}`, `→ ${a.reason}`]);
@@ -2903,7 +2903,7 @@ function buildRedImmediateActionsBlock(state, historyText, research = null) {
       extra = [
         `・${RED_PAIN_INFECTION_SAFE_WAIT_FIRST.title}`,
         `→ ${RED_PAIN_INFECTION_SAFE_WAIT_FIRST.reason}`,
-        ...fallbackActions.slice(0, 1).flatMap((a) => [`・${a.title}`, `→ ${a.reason}`]),
+        ...fallbackActions.slice(0, 2).flatMap((a) => [`・${a.title}`, `→ ${a.reason}`]),
       ];
     } else {
       extra = fallbackActions.slice(0, 2).flatMap((a) => [`・${a.title}`, `→ ${a.reason}`]);
@@ -3092,8 +3092,9 @@ function formatActionReasonLine(reason) {
 function toConciseActionTitle(title) {
   const raw = String(title || "").replace(/^・\s*/, "").trim();
   if (!raw) return "刺激を減らして体への負担を軽くしてください";
-  const firstSentence = raw.split(/[。!?！？]/)[0].trim();
-  const compact = (firstSentence || raw).replace(/\s{2,}/g, " ");
+  let cleaned = stripNumberingFromText(raw);
+  const firstSentence = cleaned.split(/[。!?！？]/)[0].trim();
+  const compact = (firstSentence || cleaned).replace(/\s{2,}/g, " ");
   return compact.length > 68 ? `${compact.slice(0, 68).trim()}…` : compact;
 }
 
@@ -3107,9 +3108,30 @@ function stripSearchTraceFromReason(text) {
     .trim();
 }
 
+/** 仕様10.1②：理由行に ・ は使わない */
+function stripBulletFromReason(text) {
+  return String(text || "")
+    .replace(/^・\s*/gm, "")
+    .replace(/\s*・\s*/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+/** 仕様10.1②：番号付き（1) / 1️⃣）は禁止 */
+function stripNumberingFromText(text) {
+  return String(text || "")
+    .replace(/^[0-9]+[)）]\s*/g, "")
+    .replace(/^[①②③④⑤⑥⑦⑧⑨⑩]\s*/g, "")
+    .replace(/[\u2460-\u2473]\s*/g, "") // ①〜⑳
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 function ensureReliableReason(reason, evidence = {}) {
   const raw = String(reason || "").trim();
-  const sanitized = stripSearchTraceFromReason(raw);
+  let sanitized = stripSearchTraceFromReason(raw);
+  sanitized = stripBulletFromReason(sanitized);
+  sanitized = stripNumberingFromText(sanitized);
   if (sanitized.length > 15) return sanitized.replace(/。?$/, "。");
   const sourceText = [
     ...(Array.isArray(evidence?.selfCare) ? evidence.selfCare : []),
@@ -3325,6 +3347,59 @@ const PAIN_INFECTION_YELLOW_FIRST_ACTION = {
   isOtc: false,
 };
 
+/**
+ * モーダル・本文共通：doActions を plan から構築する。
+ * @param {object} plan - buildImmediateActionHypothesisPlan の戻り値
+ * @param {object} state - conversationState
+ * @param {string} level - '🟢' | '🟡'
+ * @param {{ forSummary?: boolean, actionsOverride?: Array<{title:string,reason:string}> }} options - forSummary: 本文用。actionsOverride: モーダルLLM出力を渡す
+ */
+function buildDoActionsFromPlan(plan, state, level, options = {}) {
+  const { forSummary = false, actionsOverride } = options;
+  const ctx = plan?.currentStateContext || buildCurrentStateContext(state, state?.historyTextForCare || "", state?.lastConcreteDetailsText || "");
+  const evidence = plan?.evidence || {};
+  const category = resolveQuestionCategoryFromState(state);
+
+  const rawActions = Array.isArray(actionsOverride) ? actionsOverride : (Array.isArray(plan?.actions) ? plan.actions : []);
+  const picked = forSummary ? pickActionsForBlock(plan, 2) : rawActions.slice(0, 4);
+  const doItems = sanitizeImmediateActions(picked, buildSafeImmediateFallbackAction()).map((a) => ({
+    action: toConciseActionTitle(a.title),
+    reason: ensureReliableReason(a.reason, evidence),
+  }));
+
+  const minCount = forSummary ? 2 : 3;
+  const maxCount = forSummary ? 3 : 4;
+  let ensured = ensureMinimumDoActions(
+    doItems.map((x) => ({ title: x.action, reason: x.reason, isOtc: false })),
+    minCount,
+    ctx,
+    evidence
+  ).map((x) => ({ action: toConciseActionTitle(x.title), reason: ensureReliableReason(x.reason, evidence) }));
+
+  if (level === "🟡" && (category === "PAIN" || category === "INFECTION")) {
+    const fixed = { action: PAIN_INFECTION_YELLOW_FIRST_ACTION.title, reason: PAIN_INFECTION_YELLOW_FIRST_ACTION.reason };
+    ensured = [fixed, ...ensured.filter((x) => x.action !== fixed.action)].slice(0, maxCount);
+  }
+  if (level === "🟡" && !forSummary) {
+    if (!ensured.some((x) => /ワセリン|鎮痛薬|整腸剤|のど飴|トローチ|市販/.test(x.action || ""))) {
+      const topic = normalizeContextLocation(ctx?.location || "");
+      ensured = [...ensured, getOtcActionForYellowModal(topic)].slice(0, maxCount);
+    }
+  }
+  if (!forSummary && ensured.length < 3) {
+    const extra = ensureMinimumDoActions(
+      ensured.map((x) => ({ title: x.action, reason: x.reason, isOtc: false })),
+      3,
+      ctx,
+      evidence
+    )
+      .map((x) => ({ action: toConciseActionTitle(x.title), reason: ensureReliableReason(x.reason, evidence) }))
+      .filter((x) => !ensured.some((e) => e.action === x.action));
+    ensured = [...ensured, ...extra].slice(0, maxCount);
+  }
+  return ensured.slice(0, maxCount);
+}
+
 /** ④ 締めの一文（心理的アンカー） */
 function buildClosingLine() {
   const templates = [
@@ -3335,57 +3410,24 @@ function buildClosingLine() {
   return templates[Math.floor(Math.random() * templates.length)];
 }
 
+/** 本文用：モーダルと同じ buildDoActionsFromPlan を使用し、①②③④の枠で出力 */
 function buildImmediateActionsBlock(level, state, historyText = "", research = null) {
-  const context = research?.currentStateContext || buildCurrentStateContext(state, historyText || "", state?.lastConcreteDetailsText || "");
+  const plan = research || {};
+  const context = plan?.currentStateContext || buildCurrentStateContext(state, historyText || "", state?.lastConcreteDetailsText || "");
   const lines = ["✅ 今すぐやること"];
-
-  // ① なぜそれでいいのか
   lines.push(buildWhySection(context));
   lines.push("");
 
-  // ② 今すぐやること（最大3件）※フォールバック時もcontext由来の補足で埋める
-  const plannedActions = sanitizeImmediateActions(
-    pickActionsForBlock(research, 3),
-    buildSafeImmediateFallbackAction()
-  );
-  const sourceNames = Array.isArray(research?.sourceNames)
-    ? research.sourceNames.filter(Boolean).slice(0, 3)
-    : [];
-  const baseActions =
-    plannedActions.length > 0
-      ? plannedActions
-      : ensureActionCount([], 3, context, research?.evidence || {});
-  let finalActions = ensureActionCount(
-    baseActions,
-    3,
-    context,
-    research?.evidence || {}
-  );
-  const category = resolveLockedQuestionCategory(state, historyText || "");
-  if (level === "🟡" && (category === "PAIN" || category === "INFECTION")) {
-    const rest = finalActions.filter(
-      (a) => String(a?.title || "").trim() !== PAIN_INFECTION_YELLOW_FIRST_ACTION.title
-    );
-    finalActions = [PAIN_INFECTION_YELLOW_FIRST_ACTION, ...rest].slice(0, 3);
-  }
-  finalActions.slice(0, 3).forEach((action, idx) => {
-    lines.push(formatActionTitleWithBullet(toConciseActionTitle(action.title)));
-    const reason =
-      idx === 0 && sourceNames.length > 0
-        ? `${ensureReliableReason(action.reason, research?.evidence || {})}（参考: ${sourceNames.join(" / ")}）`
-        : ensureReliableReason(action.reason, research?.evidence || {});
-    lines.push(formatActionReasonLine(reason));
-    if (idx < Math.min(finalActions.length, 3) - 1) lines.push("");
+  const doActions = buildDoActionsFromPlan(plan, state, level, { forSummary: true });
+  doActions.forEach((item, idx) => {
+    lines.push(`・${String(item.action || "").trim()}`);
+    lines.push(`→ ${String(item.reason || "").trim()}`);
+    if (idx < doActions.length - 1) lines.push("");
   });
   lines.push("");
-
-  // ③ 予想経過
   lines.push(buildExpectedCourse(context));
   lines.push("");
-
-  // ④ 締めの一文
   lines.push(buildClosingLine());
-
   return lines.join("\n");
 }
 
@@ -3467,6 +3509,10 @@ function isForbiddenImmediateAction(action = {}) {
     /症状メモを2時間ごとに1回、合計3回（強さ・変化・随伴症状）で記録し、同日中に悪化サインがないか再確認しましょう/,
     /症状メモを2時間ごとに1回、合計3回（強さ・きっかけ・変化）で記録し、今日中に悪化サインがないか再確認しましょう/,
     /現在の状態データを再評価しやすくなり、次の判断の精度を維持できます。/,
+    /^安静にしてください$/,
+    /^安静にしましょう$/,
+    /医療行為の指示|専門処置|注射してください|点滴を/,
+    /危険行為|自己注射|自己処置/,
   ];
   return forbidden.some((re) => re.test(title) || re.test(reason));
 }
@@ -3576,7 +3622,10 @@ async function buildConcreteImmediateActionsDetails(state, actionSection = "") {
     const prompt = [
       "あなたは医療情報を要約して行動を具体化するアシスタントです。",
       "出力はJSONのみ。診断断定は禁止。",
+      "主症状・ユーザーの回答を「付随症状」にまとめない。主症状は主症状として、各スロットの内容を適切に区別して行動・理由に反映する。",
       "行動は勧める口調で（〜してください／〜するといいです）。「〜します」は避ける。",
+      "曖昧表現禁止（例：「安静に」だけは禁止）。「何をどのくらい」が分かる具体動作＋軽い理由をセットで出す。",
+      "理由行に ・ は使わない。番号付き（1) / 1️⃣）は禁止。医療行為の指示・危険行為・専門処置は禁止。",
       "次の形式で返す: {\"cushion\":\"...\",\"do\":[{\"action\":\"...\",\"reason\":\"...\"}],\"dont\":[{\"action\":\"...\",\"reason\":\"...\"}]}",
       "cushionは1文、40〜65文字、保証語・危険語を使わない。",
       "doは最低3件、最大4件。dontは最大2件。各reasonは検索要点と整合する確実な理由にする。",
@@ -3611,53 +3660,10 @@ async function buildConcreteImmediateActionsDetails(state, actionSection = "") {
     const outCushion = String(parsed?.cushion || cushion).trim();
     const outDo = Array.isArray(parsed?.do) ? parsed.do : doActions;
     const outDont = Array.isArray(parsed?.dont) ? parsed.dont : dontActions;
-    const safeDo = sanitizeImmediateActions(
-      outDo.map((x) => ({ title: x.action, reason: x.reason, isOtc: false })),
-      buildSafeImmediateFallbackAction()
-    )
-      .map((x) => ({
-        action: toConciseActionTitle(x.title),
-        reason: ensureReliableReason(x.reason, plan?.evidence || {}),
-      }))
-      .slice(0, 4);
-    let ensuredDo = ensureMinimumDoActions(
-      safeDo.map((x) => ({ title: x.action, reason: x.reason, isOtc: false })),
-      3,
-      plan?.currentStateContext || {},
-      plan?.evidence || {}
-    ).map((x) => ({ action: x.title, reason: x.reason }));
-    const category = resolveQuestionCategoryFromState(state);
-    const level = state?.decisionLevel;
-    if (level === "🟡" && (category === "PAIN" || category === "INFECTION")) {
-      const fixedFirst = {
-        action: PAIN_INFECTION_YELLOW_FIRST_ACTION.title,
-        reason: PAIN_INFECTION_YELLOW_FIRST_ACTION.reason,
-      };
-      const rest = ensuredDo.filter((x) => x.action !== fixedFirst.action);
-      ensuredDo = [fixedFirst, ...rest].slice(0, 4);
-    }
-    if (level === "🟡") {
-      const hasOtc = ensuredDo.some(
-        (x) => /ワセリン|鎮痛薬|整腸剤|のど飴|トローチ|市販/.test(x.action || "")
-      );
-      if (!hasOtc) {
-        const topic = normalizeContextLocation(plan?.currentStateContext?.location || "");
-        const otc = getOtcActionForYellowModal(topic);
-        ensuredDo = [...ensuredDo, otc].slice(0, 4);
-      }
-    }
-    if (ensuredDo.length < 3) {
-      const ctx = plan?.currentStateContext || {};
-      const extra = ensureMinimumDoActions(
-        ensuredDo.map((x) => ({ title: x.action, reason: x.reason, isOtc: false })),
-        3,
-        ctx,
-        plan?.evidence || {}
-      )
-        .map((x) => ({ action: x.title, reason: x.reason }))
-        .filter((x) => !ensuredDo.some((e) => e.action === x.action));
-      ensuredDo = [...ensuredDo, ...extra].slice(0, 4);
-    }
+    const llmActions = outDo.map((x) => ({ title: x.action, reason: x.reason }));
+    const ensuredDo = buildDoActionsFromPlan(plan, state, state?.decisionLevel || "🟢", {
+      actionsOverride: llmActions,
+    });
     const safeDont = (Array.isArray(outDont) ? outDont : [])
       .filter((x) => x && x.action && x.reason)
       .slice(0, 2);
@@ -3668,44 +3674,10 @@ async function buildConcreteImmediateActionsDetails(state, actionSection = "") {
       sourceNames: plan?.sourceNames || [],
     };
   } catch (_) {
-    let fallbackDo = ensureMinimumDoActions(
-      doActions.map((x) => ({ title: x.action, reason: x.reason, isOtc: false })),
-      3,
-      plan?.currentStateContext || {},
-      plan?.evidence || {}
-    ).map((x) => ({ action: x.title, reason: x.reason }));
-    const category = resolveQuestionCategoryFromState(state);
-    const level = state?.decisionLevel;
-    if (level === "🟡" && (category === "PAIN" || category === "INFECTION")) {
-      const fixedFirst = {
-        action: PAIN_INFECTION_YELLOW_FIRST_ACTION.title,
-        reason: PAIN_INFECTION_YELLOW_FIRST_ACTION.reason,
-      };
-      const rest = fallbackDo.filter((x) => x.action !== fixedFirst.action);
-      fallbackDo = [fixedFirst, ...rest].slice(0, 4);
-    }
-    if (level === "🟡") {
-      const hasOtc = fallbackDo.some(
-        (x) => /ワセリン|鎮痛薬|整腸剤|のど飴|トローチ|市販/.test(x.action || "")
-      );
-      if (!hasOtc) {
-        const topic = normalizeContextLocation(plan?.currentStateContext?.location || "");
-        const otc = getOtcActionForYellowModal(topic);
-        fallbackDo = [...fallbackDo, otc].slice(0, 4);
-      }
-    }
-    if (fallbackDo.length < 3) {
-      const ctx = plan?.currentStateContext || {};
-      const extra = ensureMinimumDoActions(
-        fallbackDo.map((x) => ({ title: x.action, reason: x.reason, isOtc: false })),
-        3,
-        ctx,
-        plan?.evidence || {}
-      )
-        .map((x) => ({ action: x.title, reason: x.reason }))
-        .filter((x) => !fallbackDo.some((e) => e.action === x.action));
-      fallbackDo = [...fallbackDo, ...extra].slice(0, 4);
-    }
+    const fallbackActions = doActions.map((x) => ({ title: x.action, reason: x.reason }));
+    const fallbackDo = buildDoActionsFromPlan(plan, state, state?.decisionLevel || "🟢", {
+      actionsOverride: fallbackActions,
+    });
     const appendMc = shouldAppendMcLinesToModal(state);
     return {
       message: renderActionDetailMessage(cushion, fallbackDo, dontActions, appendMc),
@@ -3864,23 +3836,41 @@ function isDecline(text) {
 
 /** 🔴質問①：「ここで整理」を選んだか（整理・まとめ・準備・診察まで・最初・前者・1・一つ目 等） */
 function isRedChoicePrepare(text) {
-  const t = (text || "").trim();
-  return /^(整理|まとめ|準備|診察まで|最初|前者|1|一つ目|ひとつ目|左)/.test(t) ||
-    /(ここで整理|診察までの準備|整理して|まとめて|準備を)/.test(t);
+  const t = (text || "").trim().replace(/\s+/g, " ");
+  if (!t) return false;
+  const preparePatterns = [
+    /^(整理|まとめ|準備|診察まで|最初|前者|1|一つ目|ひとつ目|左|いち|1番|一番)/,
+    /^(はい|うん|そう|お願い|お願いします)(\s|　)*(整理|まとめ|準備)/,
+    /(ここで整理|診察までの準備|整理して|まとめて|準備を|整理したい|まとめたい|準備したい)/,
+    /(診察までに|受診までに).*(できること|やること|準備)/,
+    /(できること|やること).*(整理|まとめ)/,
+  ];
+  return preparePatterns.some((re) => re.test(t));
 }
 
 /** 🔴質問①：「英語」を選んだか（英語・伝え方・後者・2・二つ目 等） */
 function isRedChoiceEnglish(text) {
-  const t = (text || "").trim();
-  return /^(英語|伝え方|後者|2|二つ目|ふたつ目|右)/.test(t) ||
-    /(英語で|伝え方を|英語の)/.test(t);
+  const t = (text || "").trim().replace(/\s+/g, " ");
+  if (!t) return false;
+  const englishPatterns = [
+    /^(英語|伝え方|後者|2|二|二つ目|ふたつ目|右|2番|二番)/,
+    /^(はい|うん|そう|お願い|お願いします)(\s|　)*(英語|伝え方)/,
+    /(英語で|伝え方を|英語の|英語で伝え|英語で話)/,
+    /(病院で|受診先で|クリニックで).*(英語|伝え)/,
+    /(英語|伝え方).*(考え|教え|お願い)/,
+  ];
+  return englishPatterns.some((re) => re.test(t));
 }
 
 /** 🔴質問①：「どっちも」を選んだか（両方・どっちも・両方とも・両方お願い 等） */
 function isRedChoiceBoth(text) {
-  const t = (text || "").trim();
-  return /^(両方|どっちも|両方とも|両方お願い|両方お願いします|両方したい)/.test(t) ||
-    /(両方|どっちも|両方とも)/.test(t);
+  const t = (text || "").trim().replace(/\s+/g, " ");
+  if (!t) return false;
+  return (
+    /^(両方|どっちも|両方とも|両方お願い|両方お願いします|両方したい|両方とも)/.test(t) ||
+    /(両方|どっちも|両方とも).*(お願い|したい|します)/.test(t) ||
+    /^(両方|どっちも)/.test(t)
+  );
 }
 
 function isRestChoice(text) {
@@ -4215,9 +4205,16 @@ function buildNextFlow(decisionType) {
 
 const FOLLOW_UP_SUFFIX = "\n\n他にも気になることがあればなんでも言ってください";
 
+/** 🟢/🟡まとめ直後のフォロー質問（固定） */
+const WATCHFUL_FOLLOW_UP_QUESTION = "今は少し休むだけでも良さそうです。\nこのまま休みますか？\nそれとも、もう少し詳しく確認しますか？";
+
 /** 🔴質問①（A_HOSPITAL用）：診察前準備 or 英語伝え方の選択 */
 function buildRedFollowUpQuestion() {
-  return `診察までの間にできることを、今ここで整理できますか？　それとも受診先で英語でどう伝えたらいいか、一緒に考えますか？${FOLLOW_UP_SUFFIX}`;
+  return `今の症状から見ると、念のため病院で確認してもらうと安心そうです。
+診察までの間にできることを、
+ここで整理しますか？
+それとも受診先で英語でどう伝えるか、
+一緒に考えますか？`;
 }
 
 function buildFollowUpQuestion1(destinationName) {
@@ -4397,7 +4394,7 @@ function handleFollowUpFlow(message, state) {
   }
 
   if (decisionType === "C_WATCHFUL_WAITING") {
-    const qWatchful = `このまま少し休みますか？\nそれとも、もう少し詳しく確認しますか？${FOLLOW_UP_SUFFIX}`;
+    const qWatchful = WATCHFUL_FOLLOW_UP_QUESTION;
     const qCheckbox = buildWatchfulCheckboxQuestion(state);
 
     if (state.followUpStep <= 1) {
@@ -5946,13 +5943,13 @@ function pickSymptomInfoForJudgment(state) {
 
 const STATE_JUDGMENT_TEMPLATES = [
   (s) =>
-    `今の情報を見る限り、\n急いで受診する必要がありそうなサインは見当たりません。\n\n痛みはつらいと思いますが、\n${s} ことから、\n\nまずは少し様子を見ても大丈夫そうです。`,
+    `今の情報を見る限り、急いで受診する必要がありそうなサインは見当たりません。痛みはつらいと思いますが、${s} ことから、今は大きく心配する状況ではなさそうです。`,
   (s) =>
-    `現在の症状から見ると、\n緊急性が高そうなサインは今のところ見られていません。\n\n不安になると思いますが、\n${s} ため、\n\n今は落ち着いて様子を見る判断でも問題なさそうです。`,
+    `現在の症状から見ると、緊急性が高そうなサインは今のところ見られていません。不安になると思いますが、${s} ため、今の状態は大きな心配はなさそうです。`,
   (s) =>
-    `現時点の情報では、\n危険なサインは特に見当たりません。\n\nつらい症状があると不安になると思いますが、\n${s} ことから、\n\n今は様子を見る判断で問題なさそうです。`,
+    `現時点の情報では、危険なサインは特に見当たりません。つらい症状があると不安になると思いますが、${s} ことから、今は大きく心配する状況ではなさそうです。`,
   (s) =>
-    `今の症状を総合して見ると、\n急いで受診が必要な状況ではなさそうです。\n\n痛みや違和感があると心配になりますよね。\nただ、${s} ため、\n\nまずは少し様子を見て大丈夫そうです。`,
+    `今の症状を総合して見ると、急いで受診が必要な状況ではなさそうです。痛みや違和感があると心配になりますよね。ただ、${s} ため、今の状態は大きな心配はなさそうです。`,
 ];
 
 function buildStateAboutLine(state, level) {
@@ -7937,7 +7934,9 @@ async function generateImmediateActionsFromContextOnly(state, context) {
     const llmPrompt = [
       "Generate 3 immediate self-care actions based on the user's symptom context. No search results available.",
       "Use ONLY currentStateContext and stateAboutForActions. Do not diagnose.",
-      "CRITICAL: Actions must be personalized to the user's specific state (stateAboutForActions). Reference pain level, duration, triggers, etc. in reasons.",
+      "CRITICAL: Do NOT lump main symptom and user answers into 'associated symptoms'. Treat main symptom as main symptom, reflect each slot distinctly in action/reason.",
+      "No vague expressions (e.g. '安静に' alone is forbidden). Use concrete actions with 'what and how much' plus light reason.",
+      "Reason: do NOT use ・. No numbering (1) 1️⃣). No medical procedure instructions, dangerous acts, or professional procedures.",
       "Return strict JSON: {\"actions\":[{\"title\":\"...\",\"reason\":\"...\",\"isOtc\":false}]}",
       "Use recommending tone: 〜してください or 〜するといいです. Avoid 〜します.",
       "Make actions specific to the symptom (head/stomach/throat/skin). OTC max 1.",
@@ -8027,9 +8026,10 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
         "You convert medical search evidence into immediate actions.",
         "Use ONLY provided currentStateContext and extractedSearchEvidence.",
         "Do not invent sources. Do not diagnose.",
-        "CRITICAL: Actions must be personalized to the user's specific state. Use summaryFacts/stateAboutQuery from currentStateContext.",
+        "CRITICAL: Do NOT lump main symptom and user answers into 'associated symptoms'. Treat main symptom as main symptom, and reflect each slot's content distinctly in action/reason.",
         "Each action must reference or address the user's specific symptoms (e.g., pain level, duration, triggers, associated symptoms).",
-        "Avoid generic advice. The reason for each action must explain why it fits THIS user's situation.",
+        "Avoid generic advice. No vague expressions (e.g. '安静に' alone is forbidden). Use concrete actions with 'what and how much' plus light reason.",
+        "Reason line: do NOT use ・. No numbering (1) 1️⃣). No medical procedure instructions, dangerous acts, or professional procedures.",
         "Return strict JSON: {\"topic\":\"...\",\"actions\":[{\"title\":\"...\",\"reason\":\"...\",\"isOtc\":false}]}",
         "actions max 3, OTC max 1.",
         "Keep Japanese output. Use recommending tone: 〜してください or 〜するといいです. Avoid 〜します.",
@@ -8856,7 +8856,7 @@ async function generateSummaryForConfirmation(conversationId) {
   } else {
     state.followUpPhase = "questioning";
     state.followUpStep = 1;
-    followUpQuestion = `このまま少し休みますか？\nそれとも、もう少し詳しく確認しますか？${FOLLOW_UP_SUFFIX}`;
+    followUpQuestion = WATCHFUL_FOLLOW_UP_QUESTION;
   }
   return { message: aiResponse, followUpQuestion, followUpMessage: null };
 }
@@ -9077,6 +9077,9 @@ app.post("/api/chat", async (req, res) => {
           : await generateSummaryForConfirmation(conversationId);
         conversationState[conversationId].summaryGenerationPromise = null;
         conversationHistory[conversationId].push({ role: "assistant", content: summaryMsg });
+        if (fq) {
+          conversationHistory[conversationId].push({ role: "assistant", content: fq });
+        }
         const finalRisk = conversationState[conversationId].decisionLevel || finalizeRiskLevel(conversationState[conversationId]);
         const slotsFilledCount = countFilledSlots(state.slotFilled, state);
         const decisionAllowed = slotsFilledCount >= getRequiredSlotCount(state);
@@ -9101,7 +9104,7 @@ app.post("/api/chat", async (req, res) => {
           sections: extractSectionsBySpecs(summaryMsg, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text),
           questionPayload: null,
           normalizedAnswer: state.lastNormalizedAnswer || null,
-          followUpQuestion: null,
+          followUpQuestion: fq || null,
           followUpMessage: null,
           locationPromptMessage,
           locationRePromptMessage: null,
@@ -9812,7 +9815,7 @@ app.post("/api/chat", async (req, res) => {
       } else {
         conversationState[conversationId].followUpPhase = "questioning";
         conversationState[conversationId].followUpStep = 1;
-        followUpQuestion = `このまま少し休みますか？\nそれとも、もう少し詳しく確認しますか？${FOLLOW_UP_SUFFIX}`;
+        followUpQuestion = WATCHFUL_FOLLOW_UP_QUESTION;
       }
     }
 
@@ -9999,11 +10002,23 @@ app.post("/api/chat", async (req, res) => {
     aiResponse = simplifyPossibilityPhrases(aiResponse);
     aiResponse = correctKanjiAndTypos(aiResponse);
 
-    // Add AI response to history（フォロー文はまとめ出し終え後にユーザー応答時のみ表示）
+    // Add AI response to history
     conversationHistory[conversationId].push({
       role: "assistant",
       content: aiResponse,
     });
+    if (followUpMessage) {
+      conversationHistory[conversationId].push({
+        role: "assistant",
+        content: followUpMessage,
+      });
+    }
+    if (followUpQuestion) {
+      conversationHistory[conversationId].push({
+        role: "assistant",
+        content: followUpQuestion,
+      });
+    }
 
     const finalRisk = conversationState[conversationId].decisionLevel || level;
     const finalScore = conversationState[conversationId].totalScore;
@@ -10053,8 +10068,8 @@ app.post("/api/chat", async (req, res) => {
       sections,
       questionPayload,
       normalizedAnswer,
-      followUpQuestion: null,
-      followUpMessage: null,
+      followUpQuestion: followUpQuestion || null,
+      followUpMessage: followUpMessage || null,
       locationPromptMessage,
       locationRePromptMessage: locationRePromptBeforeSummary,
       locationSnapshot: conversationState[conversationId].locationSnapshot,
@@ -10090,6 +10105,10 @@ app.post("/api/chat", async (req, res) => {
         fallbackSummary,
         getSummarySectionSpecsByJudgement(level)
       ).map((entry) => entry.text);
+      const fallbackFq =
+        level === "🔴"
+          ? buildRedFollowUpQuestion()
+          : WATCHFUL_FOLLOW_UP_QUESTION;
       return res.status(200).json({
         conversationId: cid,
         message: fallbackSummary,
@@ -10097,6 +10116,10 @@ app.post("/api/chat", async (req, res) => {
         triage,
         triage_state,
         sections,
+        questionPayload: null,
+        normalizedAnswer: state?.lastNormalizedAnswer || null,
+        followUpQuestion: fallbackFq,
+        followUpMessage: null,
         judgeMeta: {
           judgement: level,
           confidence: state.confidence || 0,
@@ -10110,8 +10133,6 @@ app.post("/api/chat", async (req, res) => {
           rawScore: state.lastPainScore ?? null,
           painScoreRatio: state.lastPainWeight ?? null,
         },
-        questionPayload: null,
-        normalizedAnswer: state.lastNormalizedAnswer || null,
       });
     }
     const safeMessage = "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。";
