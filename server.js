@@ -3084,6 +3084,35 @@ function replaceSummaryBlock(text, header, block) {
   return updated.join("\n");
 }
 
+/** 追加情報・違う等のとき、「今の状態について」ブロックのみ差し替え（他ブロックはそのまま） */
+function replaceStateAboutBlockOnly(summaryText, state, historyText = "") {
+  if (!summaryText || !state) return summaryText;
+  const hasRedStateBlock = summaryText.includes("📝 今の状態について") || summaryText.includes("📝 いまの状態を整理します");
+  if (hasRedStateBlock) {
+    const judgment = buildHospitalConcernPoint(historyText);
+    const memoLines = [
+      "📝 今の状態について",
+      ...buildStateFactsBullets(state),
+      "",
+      judgment,
+    ].join("\n");
+    let result = replaceSummaryBlock(normalizeHospitalMemoHeaderText(summaryText), "📝 いまの状態を整理します", memoLines);
+    result = replaceSummaryBlock(result, "📝 今の状態について", memoLines);
+    return result;
+  }
+  const level = state?.decisionLevel === "🟡" ? "🟡" : "🟢";
+  const aboutLine = buildStateAboutLine(state, level);
+  const decisionLine = buildStateDecisionLine(state, level);
+  const newBlock = [
+    "🤝 今の状態について",
+    ...buildStateFactsBullets(state),
+    "",
+    ...(aboutLine ? [aboutLine] : []),
+    ...(decisionLine ? [decisionLine] : []),
+  ].join("\n");
+  return replaceSummaryBlock(summaryText, "🤝 今の状態について", newBlock);
+}
+
 function ensureOutlookBlock(text, state) {
   return replaceSummaryBlock(text, "⏳ 今後の見通し", buildOutlookBlock(state));
 }
@@ -5898,6 +5927,7 @@ function buildStateFactsBullets(state) {
     const s = String(f).trim();
     if (!s) return;
     if (isConfirmationOnlyAnswer(s)) return;
+    if (isRejectionOnlyAnswer(s)) return;
     pushIfValid(lines, s.startsWith("・") ? s : `・${s}`);
   });
 
@@ -5913,6 +5943,12 @@ function isConfirmationOnlyAnswer(text) {
   if (/^(はい|うん|ええ)[、,]?\s*(あってる|あっています|合ってる|合っています|大丈夫|大丈夫です|そうです|その通り)/i.test(t)) return true;
   if (/^(はい|うん|ええ)[、,]?\s*(特にない|特にありません|ないです|ありません)/i.test(t)) return true;
   return false;
+}
+
+/** 確認文への否定のみの返答（違う等。箇条書きには書かず、まとめ再生成のトリガーにする） */
+function isRejectionOnlyAnswer(text) {
+  const t = String(text || "").trim();
+  return /^(違う|間違っている|違います|違ってる|違ってます|ちょっと違う|少し違う)$/i.test(t);
 }
 
 const PRE_SUMMARY_CONFIRMATION_PHRASES = [
@@ -9219,62 +9255,35 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    // Pre-summary confirmation: 6 slots filled, waiting for user response
+    // Pre-summary confirmation: ユーザーが確認文の後に何かしら言ったら、必ずまとめのみ出す。それ以外は強制的に出さない。
+    // あっている・大丈夫・ない・特にない・はい等の肯定のみ→既存まとめを使用。追加情報・違う等→「今の状態について」ブロックのみ差し替え。
     if (conversationState[conversationId].confirmationPending || conversationState[conversationId].expectsCorrectionReason) {
       const msg = String(message || "").trim();
-      const isRejection = /違う|間違っている|違います|違ってる|違ってます/.test(msg);
-      const isOk = isConfirmationOnlyAnswer(msg);
-
-      if (conversationState[conversationId].confirmationPending && isRejection) {
-        conversationState[conversationId].confirmationPending = false;
-        conversationState[conversationId].expectsCorrectionReason = true;
-        conversationState[conversationId].summaryGenerationPromise = null;
-        const reply = "他に気になることがあれば、なんでも言ってください。";
-        conversationHistory[conversationId].push({ role: "user", content: message });
-        conversationHistory[conversationId].push({ role: "assistant", content: reply });
-        const slotsFilledCount = countFilledSlots(state.slotFilled, state);
-        const level = finalizeRiskLevel(state);
-        return res.json({
-          message: reply,
-          response: reply,
-          judgeMeta: {
-            judgement: level,
-            confidence: state.confidence,
-            ratio: state.decisionRatio || 0,
-            shouldJudge: true,
-            slotsFilledCount,
-            decisionAllowed: true,
-            questionCount: state.questionCount,
-            summaryLine: null,
-            questionType: null,
-            rawScore: state.lastPainScore,
-            painScoreRatio: state.lastPainWeight,
-          },
-          triage_state: buildTriageState(true, level, slotsFilledCount),
-          questionPayload: null,
-          normalizedAnswer: state.lastNormalizedAnswer || null,
-          locationPromptMessage,
-          locationRePromptMessage,
-          locationSnapshot: state.locationSnapshot,
-          conversationId,
-        });
-      }
+      const isConfirmationOnly = isConfirmationOnlyAnswer(msg);
 
       conversationState[conversationId].confirmationPending = false;
       conversationState[conversationId].expectsCorrectionReason = false;
-      const hasAddedInfo = !isOk && msg.length > 2;
+      const hasAddedInfo = !isConfirmationOnly;
       if (hasAddedInfo) {
         (conversationState[conversationId].confirmationExtraFacts =
           conversationState[conversationId].confirmationExtraFacts || []).push(msg);
-        conversationState[conversationId].summaryGenerationPromise = null;
       }
-      if (isOk || !conversationState[conversationId].confirmationPending) {
+      {
         conversationHistory[conversationId].push({ role: "user", content: message });
         const promise = conversationState[conversationId].summaryGenerationPromise;
-        const { message: summaryMsg, followUpQuestion: fq } = promise
+        const { message: rawSummaryMsg, followUpQuestion: fq } = promise
           ? await promise
           : await generateSummaryForConfirmation(conversationId);
         conversationState[conversationId].summaryGenerationPromise = null;
+        let summaryMsg = rawSummaryMsg;
+        if (hasAddedInfo) {
+          const historyText = (conversationHistory[conversationId] || [])
+            .filter((m) => m.role === "user")
+            .map((m) => m.content)
+            .join("\n");
+          summaryMsg = replaceStateAboutBlockOnly(rawSummaryMsg, state, historyText);
+        }
+        conversationState[conversationId].summaryText = summaryMsg;
         conversationHistory[conversationId].push({ role: "assistant", content: summaryMsg });
         const finalRisk = conversationState[conversationId].decisionLevel || finalizeRiskLevel(conversationState[conversationId]);
         const sections = extractSectionsBySpecs(summaryMsg, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text);
@@ -9312,7 +9321,6 @@ app.post("/api/chat", async (req, res) => {
           conversationId,
         });
       }
-      // isRejection: user message will be pushed below in normal flow
     }
 
     // ユーザー回答のスコアを集計
