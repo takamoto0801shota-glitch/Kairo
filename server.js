@@ -91,7 +91,7 @@ AI：「頭が痛いのはつらいですよね。
 	・	締め付けられる感じ」
 
 【絶対に守ること】
-- 「あなたの不安と体調を一番に、一緒に考えます」というメッセージは、会話中には絶対に表示しない
+- 「体調の不安を、安心に変えます」というメッセージは、会話中には絶対に表示しない
 - このメッセージは初回画面専用なので、AIの返答には絶対に含めない
 - messages.length === 2 の場合のみ「症状入力後の最初の返答」として扱う
 - それ以外の会話（messages.length > 2）では、通常の質問を続ける
@@ -2478,6 +2478,15 @@ function sanitizeSummaryQuestions(text) {
   return text.replace(/[？?]/g, "。");
 }
 
+/** 「どちらにしますか？「休む」か「詳しく確認」か、どちらか教えてください。」を強制除去（出さない） */
+function stripForbiddenFollowUpMessage(text) {
+  if (!text) return text;
+  return text
+    .replace(/どちらにしますか？.*休む.*詳しく確認.*どちらか教えてください。?/gs, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 /** LLM出力の簡潔化：「〜の可能性があります」→「〜の可能性」など */
 function simplifyPossibilityPhrases(text) {
   if (!text) return text;
@@ -4479,7 +4488,8 @@ function handleFollowUpFlow(message, state) {
         state.followUpPhase = "closed";
         return { message: buildClosingMessage() };
       }
-      return { message: "どちらにしますか？「休む」か「詳しく確認」か、どちらか教えてください。" };
+      state.followUpPhase = "closed";
+      return { message: buildClosingMessage() };
     }
 
     if (state.followUpStep === 2) {
@@ -8994,6 +9004,7 @@ async function generateSummaryForConfirmation(conversationId) {
   aiResponse = ensureRestMcDecisionBlock(aiResponse, level, state);
   aiResponse = sanitizeGeneralPhrases(aiResponse);
   aiResponse = sanitizeSummaryQuestions(aiResponse);
+  aiResponse = stripForbiddenFollowUpMessage(aiResponse);
   aiResponse = simplifyPossibilityPhrases(aiResponse);
   aiResponse = correctKanjiAndTypos(aiResponse);
   aiResponse = enforceSummaryIntroTemplate(aiResponse);
@@ -9156,20 +9167,41 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
+    const FORBIDDEN_FOLLOW_UP = /どちらにしますか？.*休む.*詳しく確認/;
     const followUpResult = handleFollowUpFlow(message, state);
     if (followUpResult) {
+      const outMessage = followUpResult.message;
+      if (FORBIDDEN_FOLLOW_UP.test(outMessage || "")) {
+        // 禁止メッセージは置き換えず、出さない（会話履歴にも追加しない）
+        conversationHistory[conversationId].push({ role: "user", content: message });
+        const judgeMeta = buildFollowUpJudgeMeta(state);
+        return res.json({
+          message: "",
+          response: "",
+          judgeMeta,
+          triage_state: buildTriageState(true, judgeMeta.judgement, judgeMeta.slotsFilledCount),
+          triage: { judgement: judgeMeta.judgement, confidence: judgeMeta.confidence, ratio: judgeMeta.ratio },
+          sections: [],
+          questionPayload: null,
+          normalizedAnswer: state.lastNormalizedAnswer || null,
+          locationPromptMessage,
+          locationRePromptMessage,
+          locationSnapshot: state.locationSnapshot,
+          conversationId,
+        });
+      }
       conversationHistory[conversationId].push({
         role: "user",
         content: message,
       });
       conversationHistory[conversationId].push({
         role: "assistant",
-        content: followUpResult.message,
+        content: outMessage,
       });
       const judgeMeta = buildFollowUpJudgeMeta(state);
       return res.json({
-        message: followUpResult.message,
-        response: followUpResult.message,
+        message: outMessage,
+        response: outMessage,
         judgeMeta,
         triage_state: buildTriageState(true, judgeMeta.judgement, judgeMeta.slotsFilledCount),
         triage: {
@@ -9244,10 +9276,11 @@ app.post("/api/chat", async (req, res) => {
           : await generateSummaryForConfirmation(conversationId);
         conversationState[conversationId].summaryGenerationPromise = null;
         conversationHistory[conversationId].push({ role: "assistant", content: summaryMsg });
-        if (fq) {
+        const finalRisk = conversationState[conversationId].decisionLevel || finalizeRiskLevel(conversationState[conversationId]);
+        const sections = extractSectionsBySpecs(summaryMsg, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text);
+        if (fq && shouldSendFollowUpQuestion(sections)) {
           conversationHistory[conversationId].push({ role: "assistant", content: fq });
         }
-        const finalRisk = conversationState[conversationId].decisionLevel || finalizeRiskLevel(conversationState[conversationId]);
         const slotsFilledCount = countFilledSlots(state.slotFilled, state);
         const decisionAllowed = slotsFilledCount >= getRequiredSlotCount(state);
         return res.json({
@@ -9268,10 +9301,10 @@ app.post("/api/chat", async (req, res) => {
           },
           triage: { judgement: finalRisk, confidence: state.confidence, ratio: state.decisionRatio ?? 0, shouldJudge: true },
           triage_state: buildTriageState(true, finalRisk, slotsFilledCount),
-          sections: extractSectionsBySpecs(summaryMsg, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text),
+          sections,
           questionPayload: null,
           normalizedAnswer: state.lastNormalizedAnswer || null,
-          followUpQuestion: fq || null,
+          followUpQuestion: shouldSendFollowUpQuestion(sections) ? (fq || null) : null,
           followUpMessage: null,
           locationPromptMessage,
           locationRePromptMessage: null,
@@ -9936,6 +9969,7 @@ app.post("/api/chat", async (req, res) => {
       );
       aiResponse = sanitizeGeneralPhrases(aiResponse);
       aiResponse = sanitizeSummaryQuestions(aiResponse);
+      aiResponse = stripForbiddenFollowUpMessage(aiResponse);
       aiResponse = simplifyPossibilityPhrases(aiResponse);
       aiResponse = correctKanjiAndTypos(aiResponse);
       aiResponse = enforceSummaryIntroTemplate(aiResponse);
@@ -10174,20 +10208,23 @@ app.post("/api/chat", async (req, res) => {
       role: "assistant",
       content: aiResponse,
     });
+    const finalRisk = conversationState[conversationId].decisionLevel || level;
+    const sections =
+      shouldJudgeNow
+        ? extractSectionsBySpecs(aiResponse, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text)
+        : [];
     if (followUpMessage) {
       conversationHistory[conversationId].push({
         role: "assistant",
         content: followUpMessage,
       });
     }
-    if (followUpQuestion) {
+    if (followUpQuestion && shouldSendFollowUpQuestion(sections)) {
       conversationHistory[conversationId].push({
         role: "assistant",
         content: followUpQuestion,
       });
     }
-
-    const finalRisk = conversationState[conversationId].decisionLevel || level;
     const finalScore = conversationState[conversationId].totalScore;
     console.log("FINAL RISK:", finalRisk);
     console.log("FINAL SCORE:", finalScore);
@@ -10219,13 +10256,6 @@ app.post("/api/chat", async (req, res) => {
       shouldJudge: shouldJudgeNow,
     };
     const triage_state = buildTriageState(shouldJudgeNow, finalRisk, slotsFilledCount);
-    const sections =
-      shouldJudgeNow
-        ? extractSectionsBySpecs(
-            aiResponse,
-            getSummarySectionSpecsByJudgement(finalRisk)
-          ).map((entry) => entry.text)
-        : [];
     res.json({
       message: aiResponse,
       response: aiResponse,
@@ -10235,7 +10265,7 @@ app.post("/api/chat", async (req, res) => {
       sections,
       questionPayload,
       normalizedAnswer,
-      followUpQuestion: followUpQuestion || null,
+      followUpQuestion: shouldSendFollowUpQuestion(sections) ? (followUpQuestion || null) : null,
       followUpMessage: followUpMessage || null,
       locationPromptMessage,
       locationRePromptMessage: locationRePromptBeforeSummary,
@@ -10286,7 +10316,7 @@ app.post("/api/chat", async (req, res) => {
         sections,
         questionPayload: null,
         normalizedAnswer: state?.lastNormalizedAnswer || null,
-        followUpQuestion: fallbackFq,
+        followUpQuestion: shouldSendFollowUpQuestion(sections) ? fallbackFq : null,
         followUpMessage: null,
         judgeMeta: {
           judgement: level,
@@ -10525,6 +10555,15 @@ function getSummarySectionSpecsByJudgement(judgement) {
     { id: 4, title: "⏳ 今後の見通し", patterns: [/^⏳\s*今後の見通し/, /^⏳\s*この先の見通し/] },
     { id: 5, title: "🌱 最後に", patterns: [/^🌱\s*最後に/] },
   ];
+}
+
+/** フォロー文を送る条件: 最後のセクションが「最後に」の絵文字（🌱 or 💬）で始まる時のみ。エンコーディング耐性のためUnicode正規化とコードポイントで判定 */
+function shouldSendFollowUpQuestion(sections) {
+  if (!Array.isArray(sections) || sections.length === 0) return false;
+  const lastSection = sections[sections.length - 1];
+  const normalized = String(lastSection || "").normalize("NFC").trim();
+  const firstLine = normalized.split("\n")[0] || "";
+  return /^[\u{1F331}\u{1F4AC}]\s*最後に/u.test(firstLine) || /^[🌱💬]\s*最後に/.test(firstLine);
 }
 
 function extractSectionsBySpecs(text, specs) {

@@ -15,6 +15,35 @@ const FEATURE_SHOW_LOCATION_EXPLANATION = false;
 const QUESTION_DELAY_MS = 500;
 const DEFAULT_FOLLOW_UP_QUESTION = "今は少し休むだけでも良さそうです。\nこのまま休みますか？\nそれとも、もう少し詳しく確認しますか？";
 
+/** フォロー文かどうか判定。未確認経路（履歴復元等）からのフォロー表示をブロックするため */
+function isFollowUpContent(text) {
+  if (!text || typeof text !== "string") return false;
+  const t = String(text).normalize("NFC").trim();
+  return (
+    (t.includes("このまま休みますか？") && t.includes("それとも、もう少し詳しく確認しますか？")) ||
+    (t.includes("ここで整理しますか？") && t.includes("一緒に考えますか？")) ||
+    t.includes("伝え方を一緒に考えますか？") ||
+    t.startsWith("今は少し休むだけでも良さそうです") ||
+    t.startsWith("今の症状から見ると、念のため病院で") ||
+    t.startsWith("もしよろしければ、")
+  );
+}
+
+/** メッセージ末尾のフォロー文を除去（LLM出力に混入した場合の対策） */
+function stripFollowUpFromMessage(text) {
+  if (!text || typeof text !== "string") return text;
+  let t = String(text).normalize("NFC").trim();
+  const patterns = [
+    /\n\n今は少し休むだけでも良さそうです。\s*\nこのまま休みますか？\s*\nそれとも、もう少し詳しく確認しますか？\s*$/,
+    /\n\n今の症状から見ると、念のため病院で[\s\S]*?一緒に考えますか？\s*$/,
+    /\n\nもしよろしければ、[\s\S]*?一緒に考えましょうか？[\s\S]*$/,
+  ];
+  for (const p of patterns) {
+    t = t.replace(p, "");
+  }
+  return t.trim();
+}
+
 const appState = {
   riskLevel: null,
   userHasSubmitted: false,
@@ -286,7 +315,7 @@ function saveHistory() {
   localStorage.setItem(HISTORY_KEY, JSON.stringify(messages));
 }
 
-// Load conversation history (再描画は行わない)
+// Load conversation history (再描画は行わない。将来実装する場合も、addMessageのフォローガードにより未許可経路からのフォロー表示はブロックされる)
 function loadHistory() {
   return;
 }
@@ -905,8 +934,10 @@ function extractSummary(text) {
 // Add message to chat (AIは即時表示)
 let isCollecting = true;
 function addMessage(text, isUser = false, save = true, options = {}) {
+  const raw = String(text || "");
+  if (!isUser && !raw.trim()) return;
+  if (!isUser && isFollowUpContent(raw) && !options.fromFollowUpTrigger) return;
   if (!isUser) {
-    const raw = String(text || "");
     if (
       FEATURE_SHOW_LOCATION_EXPLANATION !== true &&
       (raw.includes("より正確な案内のため") ||
@@ -1201,7 +1232,7 @@ function renderSummary() {
 
 // Show initial message
 function showInitialMessage() {
-  const initialMessage = `あなたの不安と体調を一番に、一緒に考えます`;
+  const initialMessage = `体調の不安を、安心に変えます`;
   setTimeout(() => addMessage(initialMessage), QUESTION_DELAY_MS);
 }
 
@@ -1345,35 +1376,49 @@ async function handleUserInput() {
         appState.riskLevel = level === "red" ? "RED" : level === "yellow" ? "YELLOW" : "GREEN";
       }
 
+      // フォロー文トリガー: 「最後に」の絵文字（🌱 or 💬）が実際に出力された時のみ。それ以外は絶対に出さない。
+      // エンコーディング耐性: Unicode正規化(NFC) + コードポイント(\u{1F331}=\u{1F4AC})で判定
+      const isLastSectionEmojiOutput = (sectionText) => {
+        if (!sectionText || typeof sectionText !== "string") return false;
+        const normalized = String(sectionText).normalize("NFC").trim();
+        const firstLine = normalized.split("\n")[0] || "";
+        return /^[\u{1F331}\u{1F4AC}]\s*最後に/u.test(firstLine) || /^[🌱💬]\s*最後に/.test(firstLine);
+      };
+
       const sections = Array.isArray(aiResponse.sections) ? aiResponse.sections.filter(Boolean) : [];
       const shouldShowSections = !isFirstResponse && triageState.is_final && sections.length > 0;
+
       if (shouldShowSections) {
         const firstDelay = QUESTION_DELAY_MS + 600;
         const interval = 800;
         const followUpMessage = aiResponse.followUpMessage;
         const followUpQuestion = aiResponse.followUpQuestion || DEFAULT_FOLLOW_UP_QUESTION;
-        const triggerFollowUpAfterLastSection = () => {
-          if (followUpMessage) addMessage(followUpMessage);
-          addMessage(followUpQuestion);
+
+        const onSectionRendered = (sectionText) => {
+          if (!isLastSectionEmojiOutput(sectionText)) return;
+          if (followUpMessage) addMessage(followUpMessage, false, true, { fromFollowUpTrigger: true });
+          addMessage(followUpQuestion, false, true, { fromFollowUpTrigger: true });
         };
+
         const timerId0 = setTimeout(() => {
           renderSummary();
           if (sections[0]) {
             renderSection(sections[0]);
             if (sections.length === 1) {
-              const followUpTimerId = setTimeout(triggerFollowUpAfterLastSection, 300);
-              appState.sectionTimers.push(followUpTimerId);
+              const t = setTimeout(() => onSectionRendered(sections[0]), 300);
+              appState.sectionTimers.push(t);
             }
           }
         }, firstDelay);
         appState.sectionTimers.push(timerId0);
+
         for (let idx = 1; idx < sections.length; idx++) {
-          const isLastSection = idx === sections.length - 1;
+          const isLast = idx === sections.length - 1;
           const timerId = setTimeout(() => {
             renderSection(sections[idx]);
-            if (isLastSection) {
-              const followUpTimerId = setTimeout(triggerFollowUpAfterLastSection, 300);
-              appState.sectionTimers.push(followUpTimerId);
+            if (isLast) {
+              const t = setTimeout(() => onSectionRendered(sections[idx]), 300);
+              appState.sectionTimers.push(t);
             }
           }, firstDelay + idx * interval);
           appState.sectionTimers.push(timerId);
@@ -1383,12 +1428,9 @@ async function handleUserInput() {
           if (triageState.is_final && !isFirstResponse && !aiResponse.isPreSummaryConfirmation) {
             renderSummary();
           }
-          addMessage(aiMessage, false, true, { animateFromTop: !!aiResponse.isPreSummaryConfirmation });
-          if (aiResponse.followUpMessage) {
-            addMessage(aiResponse.followUpMessage);
-          }
-          const fq = aiResponse.followUpQuestion || (triageState.is_final ? DEFAULT_FOLLOW_UP_QUESTION : null);
-          if (fq) addMessage(fq);
+          const msgToShow = stripFollowUpFromMessage(aiMessage);
+          addMessage(msgToShow, false, true, { animateFromTop: !!aiResponse.isPreSummaryConfirmation });
+          // フォローは出さない（「最後に」の絵文字が出力されていない）
         }, QUESTION_DELAY_MS);
       }
     } catch (error) {
