@@ -1368,10 +1368,11 @@ async function handleUserInput() {
         appState.riskLevel = null;
         appState.conversationStep = 1;
       }
+      const sections = Array.isArray(aiResponse.sections) ? aiResponse.sections.filter(Boolean) : [];
       if (!triageState.is_final) {
         hideSummaryCard();
         appState.riskLevel = null;
-      } else if (!isFirstResponse && !aiResponse.isPreSummaryConfirmation) {
+      } else if (!isFirstResponse) {
         const level = triageState.triage_level || (aiResponse.judgeMeta?.judgement === "🔴" ? "red" : aiResponse.judgeMeta?.judgement === "🟡" ? "yellow" : "green");
         appState.riskLevel = level === "red" ? "RED" : level === "yellow" ? "YELLOW" : "GREEN";
       }
@@ -1385,7 +1386,6 @@ async function handleUserInput() {
         return /^[\u{1F331}\u{1F4AC}]\s*最後に/u.test(firstLine) || /^[🌱💬]\s*最後に/.test(firstLine);
       };
 
-      const sections = Array.isArray(aiResponse.sections) ? aiResponse.sections.filter(Boolean) : [];
       const shouldShowSections = !isFirstResponse && triageState.is_final && sections.length > 0;
 
       if (shouldShowSections) {

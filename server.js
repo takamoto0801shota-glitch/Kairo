@@ -5856,6 +5856,7 @@ function validateSummaryAgainstNormalized(text, state) {
   return true;
 }
 
+/** 情報整理ブロック：転記ではなく解釈で生成。医療的に意味のある形に変換する */
 function buildStateFactsBullets(state) {
   const answers = state?.slotAnswers || {};
   const val = (statusKey, fallback = "") => getSlotStatusValue(state, statusKey, fallback);
@@ -5863,75 +5864,154 @@ function buildStateFactsBullets(state) {
     /^(ない|なし|特にない|特になし|これ以外は特にない|わからない|分からない|不明|思い当たらない|特に思い当たらない)$/i.test(
       String(text || "").trim()
     );
-  const pushIfValid = (bucket, line) => {
+  const shouldHide = (text) =>
+    /^(ない|なし|わからない|分からない|不明|思い当たらない|特に思い当たらない)$/i.test(
+      String(text || "").trim()
+    );
+  const lines = [];
+  const pushIfValid = (line) => {
     const normalized = String(line || "").trim();
     if (!normalized) return;
     if (/^・\s*$/.test(normalized)) return;
-    if (/^・\s*(ない|なし|特にない|特になし|わからない|分からない|不明)\s*$/i.test(normalized)) return;
-    if (!bucket.includes(normalized)) bucket.push(normalized);
+    if (!lines.includes(normalized)) lines.push(normalized);
   };
 
-  // 1) 痛みスコア（先頭固定）
+  // 1) 痛みスコア（解釈）
   const painScore = Number.isFinite(state?.lastPainScore)
     ? state.lastPainScore
     : (() => {
         const m = String(val("severity", answers.pain_score)).match(/(\d{1,2})/);
         return m ? Number(m[1]) : null;
       })();
-  let painLine = "";
   if (Number.isFinite(painScore)) {
-    painLine = `・痛みは${painScore}/10程度`;
+    const level =
+      painScore <= 3 ? "軽め" : painScore <= 6 ? "中程度" : painScore <= 8 ? "やや強め" : "強め";
+    pushIfValid(`・痛みは${level}（${painScore}/10）`);
   } else {
     const rawSeverity = val("severity", answers.pain_score);
-    painLine = !rawSeverity || isUnknownLike(rawSeverity)
-      ? "・痛みは中等度"
-      : `・痛みは${String(rawSeverity).replace(/^痛み(は|が)?/, "").trim()}`;
-  }
-  const lines = [painLine];
-
-  const worsening = val("worsening", answers.worsening);
-  if (worsening && !isUnknownLike(worsening)) {
-    pushIfValid(lines, `・痛み方は${worsening}`);
-  }
-
-  const duration = val("duration", answers.duration);
-  if (duration && !isUnknownLike(duration)) {
-    pushIfValid(lines, `・始まりは${duration}`);
-  }
-
-  const worseningTrend = val("worsening_trend", answers.worsening_trend);
-  if (worseningTrend && !isUnknownLike(worseningTrend)) {
-    pushIfValid(lines, `・方向性は${worseningTrend}`);
-  }
-
-  const impact = val("impact", answers.daily_impact);
-  if (impact && !isUnknownLike(impact)) {
-    pushIfValid(lines, `・${impact}`);
-  }
-
-  if (!state?.associatedSymptomsFromFirstMessage) {
-    const associated = val("associated", answers.associated_symptoms);
-    if (associated && !isUnknownLike(associated)) {
-      const a = String(associated).trim();
-      pushIfValid(lines, `・${a}`);
+    if (rawSeverity && !isUnknownLike(rawSeverity)) {
+      const extracted = String(rawSeverity).replace(/^痛み(は|が)?/, "").trim();
+      pushIfValid(`・痛みは${extracted}`);
     }
   }
 
-  const cause = val("cause_category", state?.causeDetailText || answers.cause_category);
-  if (cause && !isUnknownLike(cause)) {
-    pushIfValid(lines, `・きっかけは${cause}`);
+  // 2) 痛み方（解釈：ユーザー語を活かしてフォーマット）
+  const worsening = val("worsening", answers.worsening);
+  if (worsening && !isUnknownLike(worsening)) {
+    const w = String(worsening).trim().replace(/です$|ます$/, "");
+    if (/締め付け/.test(w)) {
+      pushIfValid(`・${w}ような痛み`);
+    } else if (/重い/.test(w)) {
+      pushIfValid(`・${w}${/感じ/.test(w) ? "" : "感じ"}の痛み`);
+    } else if (/ズキズキ|キリキリ|ヒリヒリ|チクチク|ジンジン/.test(w)) {
+      const base = w.replace(/する$|ます$/, "");
+      pushIfValid(`・${base}するタイプの痛み`);
+    } else {
+      pushIfValid(`・${w}ような痛み`);
+    }
   }
 
+  // 3) 経過時間（解釈）
+  const duration = val("duration", answers.duration);
+  if (duration && !isUnknownLike(duration)) {
+    const d = String(duration).trim();
+    if (/(さっき|今さっき|たった今)/.test(d)) {
+      pushIfValid("・急に始まった症状");
+    } else if (/(数時間|半日)/.test(d)) {
+      pushIfValid("・数時間前から続いている症状");
+    } else if (/(一日|昨日)(前|から)?/.test(d)) {
+      pushIfValid("・一日ほど前から続いている症状");
+    } else if (/(数日|一昨日|二日前|三日前|\d+日前)/.test(d)) {
+      pushIfValid("・数日前から続いている症状");
+    } else {
+      pushIfValid(`・${d}から続いている症状`);
+    }
+  }
+
+  // 3.5) 悪化傾向（さっき以外のみ）
+  if (isDurationNotJustNow(state)) {
+    const trend = val("worsening_trend", answers.worsening_trend);
+    if (trend && !isUnknownLike(trend)) {
+      const t = String(trend).trim();
+      if (/回復|良くなって|改善/.test(t)) {
+        pushIfValid("・症状は回復方向");
+      } else if (/変わらない|変化なし|同じ/.test(t)) {
+        pushIfValid("・症状は大きく変化していない");
+      } else if (/悪化|強くなって|ひどく/.test(t)) {
+        pushIfValid("・発症時より症状が強くなっている");
+      } else {
+        pushIfValid(`・${t}`);
+      }
+    }
+  }
+
+  // 4) 日常生活への影響（カテゴリにより表示）
+  const impact = val("impact", answers.daily_impact);
+  if (impact && !isUnknownLike(impact) && !shouldHide(impact)) {
+    const category = state?.triageCategory || "PAIN";
+    if (category === "INFECTION") {
+      const temp = String(impact).trim();
+      if (/平熱|37度未満/.test(temp)) {
+        pushIfValid("・体温は平熱に近い");
+      } else if (/37|微熱/.test(temp)) {
+        const m = temp.match(/(\d+\.?\d*)\s*度/);
+        pushIfValid(m ? `・体温は${m[1]}度である` : "・微熱（37度台）がある");
+      } else if (/38|高熱/.test(temp)) {
+        pushIfValid("・38度以上の発熱がある");
+      } else {
+        pushIfValid(`・${temp}`);
+      }
+    } else {
+      pushIfValid(`・${impact}`);
+    }
+  }
+
+  // 5) 付随症状（解釈）
+  if (!state?.associatedSymptomsFromFirstMessage) {
+    const associated = val("associated", answers.associated_symptoms);
+    const aNorm = String(associated || "").trim();
+    if (/(特にない|特になし|これ以外は特にない|特にありません|ないです)/.test(aNorm)) {
+      pushIfValid("・吐き気や発熱などの他の症状は今のところ見られていない");
+    } else if (associated && !isUnknownLike(associated)) {
+      if (/吐き気|嘔吐/.test(aNorm)) pushIfValid("・吐き気を伴っている");
+      else if (/だる|発熱|熱/.test(aNorm)) pushIfValid("・だるさや発熱の症状がある");
+      else pushIfValid(`・${aNorm}を伴っている`);
+    }
+  }
+
+  // 6) きっかけ（可能性として表現）
+  const cause = val("cause_category", state?.causeDetailText || answers.cause_category);
+  if (cause && !isUnknownLike(cause)) {
+    const c = String(cause).trim();
+    if (/スマホ|長時間|見た/.test(c)) {
+      pushIfValid("・スマホの長時間使用がきっかけの可能性");
+    } else if (/寝不足|疲れ|睡眠/.test(c)) {
+      pushIfValid("・寝不足や疲れの影響の可能性");
+    } else if (/ストレス|緊張/.test(c)) {
+      pushIfValid("・ストレスや緊張が影響している可能性");
+    } else if (/周り|周囲|咳|感染/.test(c)) {
+      pushIfValid("・周囲からの感染の可能性");
+    } else if (/食|食事|あたり/.test(c)) {
+      pushIfValid("・食事が影響している可能性");
+    } else {
+      pushIfValid(`・${c}がきっかけの可能性`);
+    }
+  }
+
+  // 追加事実（確認で得た情報）
   const extra = (state?.confirmationExtraFacts || []).filter(Boolean);
   extra.forEach((f) => {
     const s = String(f).trim();
     if (!s) return;
     if (isConfirmationOnlyAnswer(s)) return;
     if (isRejectionOnlyAnswer(s)) return;
-    pushIfValid(lines, s.startsWith("・") ? s : `・${s}`);
+    if (shouldHide(s)) return;
+    pushIfValid(s.startsWith("・") ? s : `・${s}`);
   });
 
-  return lines.slice(0, 8);
+  const bullets = lines.slice(0, 8);
+  if (bullets.length === 0) return [];
+  return ["今の情報から見ると、", "", ...bullets, "", "という状況です。"];
 }
 
 /** 確認文への肯定・否定のみの返答（箇条書きに書かない） */
@@ -6027,10 +6107,10 @@ function buildPreSummaryConfirmationMessage(state) {
   const addMore = PRE_SUMMARY_ADD_MORE_PHRASES[
     Math.floor(Math.random() * PRE_SUMMARY_ADD_MORE_PHRASES.length)
   ];
+  const stateBlock =
+    bullets.length > 0 ? bullets : ["今の情報から見ると、", "", "という状況です。"];
   const parts = [
-    "今のところ整理できているのは、",
-    ...bullets,
-    "という点です。",
+    ...stateBlock,
     "",
     empathy,
     judgmentWithConnector,
@@ -6846,10 +6926,15 @@ async function buildDiseaseSafetyFilteredMessage(
   }
   rare_emergency = rare_emergency.slice(0, 2);
 
+  const COMMON_SYMPTOM_REASSURANCE = [
+    "このような症状は、多くの人にも見られる比較的よくあるものです。",
+    "同じような症状は、日常の中で多くの人が経験することがあります。",
+    "この症状は、多くの方にみられるよくあるタイプのものです。",
+  ];
   const reassuranceCommon =
     level === "🔴"
       ? "今のあなたは🟡の可能性もないとは言えません。なので、確認をするためにも受診をおすすめします。"
-      : `${mainSymptom}のほとんどは命に関わるものではありません。特に、急激な悪化や神経症状がなければ、よくあるタイプの可能性が高いです。`;
+      : `${mainSymptom}のほとんどは命に関わるものではありません。特に、急激な悪化や神経症状がなければ、よくあるタイプの可能性が高いです。\n\n${COMMON_SYMPTOM_REASSURANCE[Math.floor(Math.random() * COMMON_SYMPTOM_REASSURANCE.length)]}`;
 
   const redVisitReasonsBullets = level === "🔴" && state ? buildRedVisitReasonsBullets(state) : [];
 
