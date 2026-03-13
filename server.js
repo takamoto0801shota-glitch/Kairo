@@ -5864,7 +5864,50 @@ function validateSummaryAgainstNormalized(text, state) {
   return true;
 }
 
-/** 箇条書きフィルタ：誤りや日本語として不自然な箇条を検出し、修正する。修正不可なら除外。 */
+/** 自由記述をそのまま出していないか検出。型テンプレート構造を含む場合は false（整形済み） */
+function isRawFreeText(text) {
+  const s = String(text || "").replace(/^・/, "").trim();
+  if (!s || s.length > 80) return false;
+  const hasTypeTemplate =
+    /に症状が始まった|症状は急に始まった|程度である|を伴っている|がきっかけの可能性|ような痛みが出ている|タイプの痛みが出ている|症状は.*に向かっている|症状は大きく変化していない|発症時より症状が強くなっている|症状は.*に変わっている|体温は.*度である|見られていない|^痛みは/i.test(s);
+  if (hasTypeTemplate) return false;
+  return true;
+}
+
+/** 自由記述を型に合わせて整形。整形できない場合は null を返す（フィルタで除外） */
+function formatRawBulletToType(text) {
+  const s = String(text || "").replace(/^・/, "").trim();
+  if (!s || s.length > 60) return null;
+  if (!isRawFreeText(`・${s}`)) return null;
+  const t = s.replace(/です$|ます$|から$|だっ?た$/, "").trim();
+  if (/(さっき|今さっき|たった今|数分)/.test(t)) return "・症状は急に始まった";
+  if (/(三日前|二日前|一昨日|数日前|\d+日前|昨日|一日前|数時間前|数時間|今朝|昨夜)/.test(t)) {
+    const m = t.match(/(三日前|二日前|一昨日|数日前|\d+日前|昨日|一日前|数時間前|数時間|今朝|昨夜)/);
+    return m ? `・${m[1]}に症状が始まった` : `・${t}に症状が始まった`;
+  }
+  if (/(動けない|寝込|仕事できない|学校休んだ)/.test(t)) return "・日常生活は動けないほどつらい程度である";
+  if (/(少しつらい|つらいが動ける|無理すれば)/.test(t)) return "・日常生活は少しつらいが動ける程度である";
+  if (/(普通に動ける|問題なく|大丈夫)/.test(t)) return "・日常生活は普通に動ける程度である";
+  if (/(平熱|37度未満)/.test(t)) return "・体温は平熱に近い";
+  if (/(37|微熱)/.test(t)) return "・微熱（37度台）がある";
+  if (/(38|高熱)/.test(t)) return "・38度以上の発熱がある";
+  if (/(悪化|ひどく|強くなって)/.test(t)) return "・発症時より症状が強くなっている";
+  if (/(回復|良くなって|ましに|改善)/.test(t)) return "・症状は回復方向に向かっている";
+  if (/(変わらない|横ばい|同じ)/.test(t)) return "・症状は大きく変化していない";
+  if (/(吐き気|嘔吐)/.test(t)) return "・吐き気を伴っている";
+  if (/(だる|発熱|熱)/.test(t)) return "・だるさや発熱の症状がある";
+  if (/(ストレス|緊張)/.test(t)) return "・ストレスや緊張が影響している可能性";
+  if (/(寝不足|疲れ|睡眠)/.test(t)) return "・寝不足や疲れの影響の可能性";
+  if (/(スマホ|長時間|見た)/.test(t)) return "・スマホの長時間使用がきっかけの可能性";
+  if (/(食|食事|あたり)/.test(t)) return "・食事が影響している可能性";
+  if (/(ズキズキ|キリキリ|ヒリヒリ|チクチク|重い|締め付け)/.test(t)) {
+    const w = t.replace(/する$/, "");
+    return `・${w}ような痛みが出ている`;
+  }
+  return null;
+}
+
+/** 箇条書きフィルタ：誤りや日本語として不自然な箇条を検出し、修正する。自由記述をそのまま出していないかもチェック。 */
 function sanitizeBulletPoints(bullets) {
   if (!Array.isArray(bullets)) return [];
   return bullets
@@ -5873,6 +5916,11 @@ function sanitizeBulletPoints(bullets) {
       if (!s) return null;
       if (!/^・/.test(s)) s = `・${s}`;
       if (s.length <= 2) return null;
+      if (isRawFreeText(s)) {
+        const formatted = formatRawBulletToType(s);
+        if (formatted) s = formatted;
+        else return null;
+      }
       // 重複助詞の修正
       s = s.replace(/([はがをにでの])\1+/g, "$1");
       s = s.replace(/のの/g, "の").replace(/がが/g, "が").replace(/はは/g, "は").replace(/をを/g, "を").replace(/にに/g, "に").replace(/でで/g, "で");
@@ -5945,24 +5993,18 @@ function buildStateFactsBullets(state) {
     }
   }
 
-  // 3) 経過時間（症状の状態を説明：「症状は〜」）
+  // 3) 経過時間（型に合わせて出力。自由記述をそのまま出さず「〜に症状が始まった」形式に整形）
   const duration = val("duration", answers.duration);
   if (duration && !isUnknownLike(duration)) {
     const d = String(duration).trim();
     if (/(さっき|今さっき|たった今)/.test(d)) {
-      pushIfValid("・症状は急に始まっている");
-    } else if (/(数時間|半日)/.test(d)) {
-      pushIfValid("・症状は数時間前から続いている");
-    } else if (/(一日|昨日)(前|から)?/.test(d)) {
-      pushIfValid("・症状は一日ほど前から続いている");
-    } else if (/(数日|一昨日|二日前|三日前|\d+日前)/.test(d)) {
-      pushIfValid("・症状は数日前から続いている");
+      pushIfValid("・症状は急に始まった");
     } else {
-      pushIfValid(`・症状は${d}から続いている`);
+      pushIfValid(`・${d}に症状が始まった`);
     }
   }
 
-  // 3.5) 悪化傾向（さっき以外のみ。症状の状態を説明）
+  // 3.5) 悪化傾向（さっき以外のみ。型に合わせて出力）
   if (isDurationNotJustNow(state)) {
     const trend = val("worsening_trend", answers.worsening_trend);
     if (trend && !isUnknownLike(trend)) {
@@ -5974,12 +6016,12 @@ function buildStateFactsBullets(state) {
       } else if (/悪化|強くなって|ひどく/.test(t)) {
         pushIfValid("・発症時より症状が強くなっている");
       } else {
-        pushIfValid(`・${t}`);
+        pushIfValid(`・症状は${t}に変わっている`);
       }
     }
   }
 
-  // 4) 日常生活への影響（カテゴリにより表示）
+  // 4) 日常生活への影響（型に合わせて出力）
   const impact = val("impact", answers.daily_impact);
   if (impact && !isUnknownLike(impact) && !shouldHide(impact)) {
     const category = state?.triageCategory || "PAIN";
@@ -5993,10 +6035,10 @@ function buildStateFactsBullets(state) {
       } else if (/38|高熱/.test(temp)) {
         pushIfValid("・38度以上の発熱がある");
       } else {
-        pushIfValid(`・${temp}`);
+        pushIfValid(`・体温は${temp}程度である`);
       }
     } else {
-      pushIfValid(`・${impact}`);
+      pushIfValid(`・日常生活は${impact}程度である`);
     }
   }
 
@@ -6032,7 +6074,7 @@ function buildStateFactsBullets(state) {
     }
   }
 
-  // 追加事実（確認で得た情報）
+  // 追加事実（確認で得た情報）。自由記述をそのまま出さず型に合わせて整形する。
   const extra = (state?.confirmationExtraFacts || []).filter(Boolean);
   extra.forEach((f) => {
     const s = String(f).trim();
@@ -6040,7 +6082,8 @@ function buildStateFactsBullets(state) {
     if (isConfirmationOnlyAnswer(s)) return;
     if (isRejectionOnlyAnswer(s)) return;
     if (shouldHide(s)) return;
-    pushIfValid(s.startsWith("・") ? s : `・${s}`);
+    const toPush = isRawFreeText(`・${s}`) ? formatRawBulletToType(s) : (s.startsWith("・") ? s : `・${s}`);
+    if (toPush) pushIfValid(toPush);
   });
 
   const rawBullets = lines.slice(0, 8);
@@ -9176,7 +9219,7 @@ async function generateSummaryForConfirmation(conversationId) {
   state.summaryShown = true;
   state.hasSummaryBlockGenerated = true;
   state.decisionType = decisionType;
-  state.decisionLevel = level === "🔴" ? "🔴" : "🟢";
+  state.decisionLevel = level === "🔴" ? "🔴" : level === "🟡" ? "🟡" : "🟢";
   if (!state.judgmentSnapshot) {
     state.judgmentSnapshot = buildJudgmentSnapshot(state, history, decisionType);
   }
@@ -9311,6 +9354,10 @@ app.post("/api/chat", async (req, res) => {
     const userMessageCountBefore = (conversationHistory[conversationId] || []).filter((m) => m.role === "user").length;
     applySpontaneousSlotFill(conversationState[conversationId], message, { isFirstMessage: userMessageCountBefore === 0 });
     const isFirstUserMessage = userMessageCountBefore === 0;
+    const isWaitingForConfirmationResponse =
+      conversationState[conversationId].confirmationPending ||
+      conversationState[conversationId].expectsCorrectionReason ||
+      (conversationState[conversationId].confirmationShown && !conversationState[conversationId].summaryShown);
 
     // 絶対防御: 初回ユーザーメッセージではサマリー・フォローを絶対に返さない
     if (isFirstUserMessage) {
@@ -9359,10 +9406,6 @@ app.post("/api/chat", async (req, res) => {
     }
 
     // 確認文の後は必ずまとめ。仕様: 確認文は出すだけ。まとめは確認文表示と同時に生成開始。ユーザー応答時はまとめを出すだけ。
-    const isWaitingForConfirmationResponse =
-      conversationState[conversationId].confirmationPending ||
-      conversationState[conversationId].expectsCorrectionReason ||
-      (conversationState[conversationId].confirmationShown && !conversationState[conversationId].summaryShown);
     if (isWaitingForConfirmationResponse) {
       conversationState[conversationId].confirmationPending = false;
       conversationState[conversationId].expectsCorrectionReason = false;
@@ -10219,7 +10262,7 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].hasSummaryBlockGenerated = true;
       conversationState[conversationId].decisionType = decisionType;
       conversationState[conversationId].decisionLevel =
-        level === "🔴" ? "🔴" : "🟢";
+        level === "🔴" ? "🔴" : level === "🟡" ? "🟡" : "🟢";
       if (!conversationState[conversationId].judgmentSnapshot) {
         conversationState[conversationId].judgmentSnapshot = buildJudgmentSnapshot(
           conversationState[conversationId],
