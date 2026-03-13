@@ -918,6 +918,12 @@ ${stateContext ? `\n${stateContext}\n` : ""}
   - 「だから今日はこれでいいですよ」
 - ⏳ 今後の見通しは「自然な流れの一言 → 具体トリガー1〜2個 → 固定締め文」で構成
 
+🤝 今の状態について（LLM理解レイヤー）：
+- 情報整理は単なる言い換えではなく「症状の状態を説明する文章」として生成する。
+- 禁止：回答をそのまま並べること（例：・ズキズキする、・さっき始まった）
+- OK：症状の意味を短い文章で説明（例：・ズキズキするタイプの痛みが出ている、・症状は急に始まっている）
+- 処理順序：回答 → 状況理解 → 要約。Step1:回答を整理 → Step2:症状の意味を考える → Step3:意味を短い文章にする
+
 🤝 今の状態について（順番厳守）：
 1) ユーザーのつらさ・不安への一文の寄り添い
 2) ユーザーが話した事実の要約（箇条書き・改行）
@@ -4439,6 +4445,8 @@ function buildFollowUpJudgeMeta(state) {
 
 function handleFollowUpFlow(message, state) {
   if (!state?.hasSummaryBlockGenerated) return null;
+  // 確認文の後は必ずまとめ。フォローアップ（閉じメッセージ等）は絶対に返さない。
+  if (state.confirmationShown && !state.summaryShown) return null;
   const trimmed = (message || "").trim();
   if (!state.judgmentSnapshot) {
     state.judgmentSnapshot = buildJudgmentSnapshot(state, [], state.decisionType);
@@ -5856,6 +5864,32 @@ function validateSummaryAgainstNormalized(text, state) {
   return true;
 }
 
+/** 箇条書きフィルタ：誤りや日本語として不自然な箇条を検出し、修正する。修正不可なら除外。 */
+function sanitizeBulletPoints(bullets) {
+  if (!Array.isArray(bullets)) return [];
+  return bullets
+    .map((b) => {
+      let s = String(b || "").trim();
+      if (!s) return null;
+      if (!/^・/.test(s)) s = `・${s}`;
+      if (s.length <= 2) return null;
+      // 重複助詞の修正
+      s = s.replace(/([はがをにでの])\1+/g, "$1");
+      s = s.replace(/のの/g, "の").replace(/がが/g, "が").replace(/はは/g, "は").replace(/をを/g, "を").replace(/にに/g, "に").replace(/でで/g, "で");
+      // 重複接尾の修正（ようなような→ような、感じ感じ→感じ）
+      s = s.replace(/(ような|感じ|タイプの痛み)\1+/g, "$1");
+      s = s.replace(/痛み痛み/g, "痛み").replace(/症状症状/g, "症状");
+      // ・の連続や空行
+      s = s.replace(/^・+/g, "・").replace(/\s{2,}/g, " ");
+      if (s.length <= 2) return null;
+      // 明らかに不自然な終わり方（体言止め以外で不完全な文）
+      if (/[がはをに]$/.test(s)) return null;
+      if (/^・\s*$/.test(s)) return null;
+      return s;
+    })
+    .filter(Boolean);
+}
+
 /** 情報整理ブロック：転記ではなく解釈で生成。医療的に意味のある形に変換する */
 function buildStateFactsBullets(state) {
   const answers = state?.slotAnswers || {};
@@ -5895,46 +5929,46 @@ function buildStateFactsBullets(state) {
     }
   }
 
-  // 2) 痛み方（解釈：ユーザー語を活かしてフォーマット）
+  // 2) 痛み方（症状の状態を説明する文章：「〜が出ている」）
   const worsening = val("worsening", answers.worsening);
   if (worsening && !isUnknownLike(worsening)) {
     const w = String(worsening).trim().replace(/です$|ます$/, "");
     if (/締め付け/.test(w)) {
-      pushIfValid(`・${w}ような痛み`);
+      pushIfValid(`・${w}ような痛みが出ている`);
     } else if (/重い/.test(w)) {
-      pushIfValid(`・${w}${/感じ/.test(w) ? "" : "感じ"}の痛み`);
+      pushIfValid(`・${w}${/感じ/.test(w) ? "" : "感じ"}の痛みが出ている`);
     } else if (/ズキズキ|キリキリ|ヒリヒリ|チクチク|ジンジン/.test(w)) {
       const base = w.replace(/する$|ます$/, "");
-      pushIfValid(`・${base}するタイプの痛み`);
+      pushIfValid(`・${base}するタイプの痛みが出ている`);
     } else {
-      pushIfValid(`・${w}ような痛み`);
+      pushIfValid(`・${w}ような痛みが出ている`);
     }
   }
 
-  // 3) 経過時間（解釈）
+  // 3) 経過時間（症状の状態を説明：「症状は〜」）
   const duration = val("duration", answers.duration);
   if (duration && !isUnknownLike(duration)) {
     const d = String(duration).trim();
     if (/(さっき|今さっき|たった今)/.test(d)) {
-      pushIfValid("・急に始まった症状");
+      pushIfValid("・症状は急に始まっている");
     } else if (/(数時間|半日)/.test(d)) {
-      pushIfValid("・数時間前から続いている症状");
+      pushIfValid("・症状は数時間前から続いている");
     } else if (/(一日|昨日)(前|から)?/.test(d)) {
-      pushIfValid("・一日ほど前から続いている症状");
+      pushIfValid("・症状は一日ほど前から続いている");
     } else if (/(数日|一昨日|二日前|三日前|\d+日前)/.test(d)) {
-      pushIfValid("・数日前から続いている症状");
+      pushIfValid("・症状は数日前から続いている");
     } else {
-      pushIfValid(`・${d}から続いている症状`);
+      pushIfValid(`・症状は${d}から続いている`);
     }
   }
 
-  // 3.5) 悪化傾向（さっき以外のみ）
+  // 3.5) 悪化傾向（さっき以外のみ。症状の状態を説明）
   if (isDurationNotJustNow(state)) {
     const trend = val("worsening_trend", answers.worsening_trend);
     if (trend && !isUnknownLike(trend)) {
       const t = String(trend).trim();
       if (/回復|良くなって|改善/.test(t)) {
-        pushIfValid("・症状は回復方向");
+        pushIfValid("・症状は回復方向に向かっている");
       } else if (/変わらない|変化なし|同じ/.test(t)) {
         pushIfValid("・症状は大きく変化していない");
       } else if (/悪化|強くなって|ひどく/.test(t)) {
@@ -6009,19 +6043,23 @@ function buildStateFactsBullets(state) {
     pushIfValid(s.startsWith("・") ? s : `・${s}`);
   });
 
-  const bullets = lines.slice(0, 8);
+  const rawBullets = lines.slice(0, 8);
+  const bullets = sanitizeBulletPoints(rawBullets);
   if (bullets.length === 0) return [];
   return ["今の情報から見ると、", "", ...bullets, "", "という状況です。"];
 }
 
-/** 確認文への肯定・否定のみの返答（箇条書きに書かない） */
+/** 確認文への肯定・否定のみの返答（箇条書きに書かない）。まとめをそのまま表示する。 */
 function isConfirmationOnlyAnswer(text) {
   const t = String(text || "").trim();
   if (!t) return true;
-  if (/^(ない|なし|特になし)$/i.test(t)) return true;
-  if (/^(はい|うん|ええ|おっけー|おk|OK|ok|よろしい|合ってる|合ってます|合っています|あってる|あってます|あっています|いいです|問題ない|問題ないです|それでいい|それでいいです|大丈夫|大丈夫です|特にない|特にないです|特にありません|ないです|ありません|そうです|そうですね|その通り|そのとおり|その通りです|正しい|正しいです|正解|間違いない|間違いありません|了解|了解です|承知|承知しました|かしこまりました)$/i.test(t)) return true;
+  if (/^(ない|なし|特になし|とくにない|特になく|とくになく)$/i.test(t)) return true;
+  if (/^(ないです|ありません|特にないです|特にありません|別にない|別になし|追加はない|追加なし|全くない|全然ない|何もない)$/i.test(t)) return true;
+  if (/^(はい|うん|ええ|おっけー|おk|OK|ok|オッケー|よろしい|合ってる|合ってます|合っています|あってる|あってます|あっています|いいです|いいよ|問題ない|問題ないです|問題ありません|それでいい|それでいいです|大丈夫|大丈夫です|そうです|そうですね|その通り|そのとおり|その通りです|正しい|正しいです|正解|間違いない|間違いありません|了解|了解です|了解しました|承知|承知しました|かしこまりました)$/i.test(t)) return true;
+  if (/^(分かりました|わかりました|そのままでいい|そのままで大丈夫|これでお願いします|思い当たらない|特に思い当たらない)$/i.test(t)) return true;
   if (/^(はい|うん|ええ)[、,]?\s*(あってる|あっています|合ってる|合っています|大丈夫|大丈夫です|そうです|その通り)/i.test(t)) return true;
-  if (/^(はい|うん|ええ)[、,]?\s*(特にない|特にありません|ないです|ありません)/i.test(t)) return true;
+  if (/^(はい|うん|ええ)[、,]?\s*(特にない|特にありません|ないです|ありません|特になし)/i.test(t)) return true;
+  if (/^(うん|はい|ええ)[、。]?\s*(ない|なし|特になし)/i.test(t)) return true;
   return false;
 }
 
@@ -9016,12 +9054,13 @@ function getOrInitConversationState(conversationId) {
   return conversationState[conversationId];
 }
 
-/** 確認文表示時にバックグラウンドでまとめを生成。conversationId のみで呼び、conversationState/History を参照する。 */
+/** 確認文表示時にバックグラウンドでまとめを生成。conversationId のみで呼び、conversationState/History を参照する。失敗時は必ず buildLocalSummaryFallback でまとめを返す。 */
 async function generateSummaryForConfirmation(conversationId) {
   const state = conversationState[conversationId];
   const history = conversationHistory[conversationId];
   if (!state || !history) return { message: "", followUpQuestion: null, followUpMessage: null };
   const level = finalizeRiskLevel(state);
+  try {
   const historyTextForCare = history.filter((m) => m.role === "user").map((m) => m.content).join("\n");
   const careDestination = detectCareDestinationFromHistory(historyTextForCare);
   state.careDestination = careDestination;
@@ -9064,7 +9103,7 @@ async function generateSummaryForConfirmation(conversationId) {
     { role: "system", content: pharmacyHint },
     ...summaryContextMessages,
   ];
-  let aiResponse = (await openai.chat.completions.create({ model: "gpt-4o-mini", messages: summaryOnlyMessages, temperature: 0.7, max_tokens: 1000 })).choices[0].message.content;
+  let aiResponse = (await openai.chat.completions.create({ model: "gpt-4o-mini", messages: summaryOnlyMessages, temperature: 0.7, max_tokens: 1000 })).choices?.[0]?.message?.content ?? "";
   if (!hasAllSummaryBlocks(aiResponse)) {
     const strict = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -9072,7 +9111,7 @@ async function generateSummaryForConfirmation(conversationId) {
       temperature: 0.7,
       max_tokens: 1000,
     });
-    aiResponse = strict.choices[0].message.content;
+    aiResponse = strict.choices?.[0]?.message?.content ?? aiResponse ?? "";
   }
   if (level !== "🔴" && isHospitalFlow(aiResponse)) {
     const repair = await openai.chat.completions.create({
@@ -9081,7 +9120,7 @@ async function generateSummaryForConfirmation(conversationId) {
       temperature: 0.7,
       max_tokens: 1000,
     });
-    aiResponse = repair.choices[0].message.content;
+    aiResponse = repair.choices?.[0]?.message?.content ?? aiResponse ?? "";
   }
   aiResponse = normalizeSummaryLevel(aiResponse, level);
   aiResponse = ensureYellowOtcBlock(aiResponse, level, otcCategory, otcWarningIndex, state.pharmacyRecommendation, state.otcExamples, state.pharmacyRecommendation?.preface);
@@ -9157,7 +9196,38 @@ async function generateSummaryForConfirmation(conversationId) {
     state.followUpStep = 1;
     followUpQuestion = WATCHFUL_FOLLOW_UP_QUESTION;
   }
-  return { message: aiResponse, followUpQuestion, followUpMessage: null };
+  if (!aiResponse || !hasAllSummaryBlocks(aiResponse)) {
+    aiResponse = await buildLocalSummaryFallback(level, history, state);
+  }
+  return { message: aiResponse || "", followUpQuestion, followUpMessage: null };
+  } catch (err) {
+    console.error("[generateSummaryForConfirmation Error]", err?.message || err);
+    try {
+      const fallback = await buildLocalSummaryFallback(level, history, state);
+      return { message: fallback || "", followUpQuestion: null, followUpMessage: null };
+    } catch (fallbackErr) {
+      console.error("[generateSummaryForConfirmation Fallback Error]", fallbackErr?.message || fallbackErr);
+      const stateBullets = buildStateFactsBullets(state);
+      const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "今の情報から見ると、\n\nという状況です。";
+      const minimal = [
+        `${level} ここまでの情報を整理します`,
+        buildSummaryIntroTemplate(),
+        "",
+        "🤝 今の状態について",
+        stateBlock,
+        "",
+        "✅ 今すぐやること",
+        "・無理をせず、安静を優先してください",
+        "",
+        "⏳ 今後の見通し",
+        "症状の変化には気をつけて、悪化したら再度ご相談ください。",
+        "",
+        "🌱 最後に",
+        "また不安になったら、いつでもここで聞いてください。",
+      ].join("\n");
+      return { message: minimal, followUpQuestion: null, followUpMessage: null };
+    }
+  }
 }
 
 // Chat API endpoint
@@ -9288,7 +9358,135 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    const FORBIDDEN_FOLLOW_UP = /どちらにしますか？.*休む.*詳しく確認/;
+    // 確認文の後は必ずまとめ。仕様: 確認文は出すだけ。まとめは確認文表示と同時に生成開始。ユーザー応答時はまとめを出すだけ。
+    const isWaitingForConfirmationResponse =
+      conversationState[conversationId].confirmationPending ||
+      conversationState[conversationId].expectsCorrectionReason ||
+      (conversationState[conversationId].confirmationShown && !conversationState[conversationId].summaryShown);
+    if (isWaitingForConfirmationResponse) {
+      conversationState[conversationId].confirmationPending = false;
+      conversationState[conversationId].expectsCorrectionReason = false;
+      conversationHistory[conversationId].push({ role: "user", content: message });
+      const msg = String(message || "").trim();
+      const isConfirmationOnly = isConfirmationOnlyAnswer(msg);
+      const hasAddedInfo = !isConfirmationOnly;
+      if (hasAddedInfo) {
+        (conversationState[conversationId].confirmationExtraFacts =
+          conversationState[conversationId].confirmationExtraFacts || []).push(msg);
+      }
+      let summaryMsg = "";
+      let followUpQ = null;
+      try {
+        const promise = conversationState[conversationId].summaryGenerationPromise;
+        const result = promise
+          ? await promise
+          : await generateSummaryForConfirmation(conversationId);
+        conversationState[conversationId].summaryGenerationPromise = null;
+        summaryMsg = result?.message || "";
+        followUpQ = result?.followUpQuestion || null;
+        if (hasAddedInfo && summaryMsg) {
+          const historyText = (conversationHistory[conversationId] || [])
+            .filter((m) => m.role === "user")
+            .map((m) => m.content)
+            .join("\n");
+          summaryMsg = replaceStateAboutBlockOnly(summaryMsg, state, historyText) || summaryMsg;
+        }
+        if (!summaryMsg || !hasAllSummaryBlocks(summaryMsg)) {
+          const level = finalizeRiskLevel(state);
+          const history = conversationHistory[conversationId] || [];
+          summaryMsg = await buildLocalSummaryFallback(level, history, state);
+        }
+        const sectionsForFq = extractSectionsBySpecs(summaryMsg, getSummarySectionSpecsByJudgement(finalizeRiskLevel(state))).map((e) => e.text);
+        if (followUpQ && shouldSendFollowUpQuestion(sectionsForFq)) {
+          conversationHistory[conversationId].push({ role: "assistant", content: followUpQ });
+        }
+      } catch (summaryError) {
+        console.error("[ConfirmationSummary Error]", summaryError?.message || summaryError);
+        try {
+          const level = finalizeRiskLevel(state);
+          const history = conversationHistory[conversationId] || [];
+          summaryMsg = await buildLocalSummaryFallback(level, history, state);
+        } catch (fallbackError) {
+          console.error("[ConfirmationSummary Fallback Error]", fallbackError?.message || fallbackError);
+          const level = finalizeRiskLevel(state);
+          const stateBullets = buildStateFactsBullets(state);
+          const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "今の情報から見ると、\n\nという状況です。";
+          summaryMsg = [
+            `${level} ここまでの情報を整理します`,
+            buildSummaryIntroTemplate(),
+            "",
+            "🤝 今の状態について",
+            stateBlock,
+            "",
+            "✅ 今すぐやること",
+            "・無理をせず、安静を優先してください",
+            "",
+            "⏳ 今後の見通し",
+            "症状の変化には気をつけて、悪化したら再度ご相談ください。",
+            "",
+            "🌱 最後に",
+            "また不安になったら、いつでもここで聞いてください。",
+          ].join("\n");
+        }
+      }
+      if (!summaryMsg || summaryMsg.trim().length === 0) {
+        const level = finalizeRiskLevel(state);
+        const stateBullets = buildStateFactsBullets(state);
+        const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "今の情報から見ると、\n\nという状況です。";
+        summaryMsg = [
+          `${level} ここまでの情報を整理します`,
+          buildSummaryIntroTemplate(),
+          "",
+          "🤝 今の状態について",
+          stateBlock,
+          "",
+          "✅ 今すぐやること",
+          "・無理をせず、安静を優先してください",
+          "",
+          "⏳ 今後の見通し",
+          "症状の変化には気をつけて、悪化したら再度ご相談ください。",
+          "",
+          "🌱 最後に",
+          "また不安になったら、いつでもここで聞いてください。",
+        ].join("\n");
+      }
+      conversationState[conversationId].summaryText = summaryMsg;
+      conversationHistory[conversationId].push({ role: "assistant", content: summaryMsg });
+      const finalRisk = conversationState[conversationId].decisionLevel || finalizeRiskLevel(conversationState[conversationId]);
+      const sections = extractSectionsBySpecs(summaryMsg, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text);
+      const slotsFilledCount = countFilledSlots(state.slotFilled, state);
+      const decisionAllowed = slotsFilledCount >= getRequiredSlotCount(state);
+      return res.json({
+        message: summaryMsg,
+        response: summaryMsg,
+        judgeMeta: {
+          judgement: finalRisk,
+          confidence: state.confidence,
+          ratio: state.decisionRatio ?? 0,
+          shouldJudge: true,
+          slotsFilledCount,
+          decisionAllowed,
+          questionCount: state.questionCount,
+          summaryLine: extractSummaryLine(summaryMsg),
+          questionType: null,
+          rawScore: state.lastPainScore,
+          painScoreRatio: state.lastPainWeight,
+        },
+        triage: { judgement: finalRisk, confidence: state.confidence, ratio: state.decisionRatio ?? 0, shouldJudge: true },
+        triage_state: buildTriageState(true, finalRisk, slotsFilledCount),
+        sections,
+        questionPayload: null,
+        normalizedAnswer: state.lastNormalizedAnswer || null,
+        followUpQuestion: shouldSendFollowUpQuestion(sections) ? (followUpQ || null) : null,
+        followUpMessage: null,
+        locationPromptMessage,
+        locationRePromptMessage: null,
+        locationSnapshot: state.locationSnapshot,
+        conversationId,
+      });
+    }
+
+    // confirmationShown && !summaryShown の場合は確認待ち。フォローアップで閉じメッセージを返さない。
     const followUpResult = handleFollowUpFlow(message, state);
     if (followUpResult) {
       const outMessage = followUpResult.message;
@@ -9338,74 +9536,6 @@ app.post("/api/chat", async (req, res) => {
         locationSnapshot: state.locationSnapshot,
         conversationId,
       });
-    }
-
-    // Pre-summary confirmation: ユーザーが確認文の後に何かしら言ったら、必ずまとめのみ出す。それ以外は強制的に出さない。
-    // あっている・大丈夫・ない・特にない・はい等の肯定のみ→既存まとめを使用。追加情報・違う等→「今の状態について」ブロックのみ差し替え。
-    if (conversationState[conversationId].confirmationPending || conversationState[conversationId].expectsCorrectionReason) {
-      const msg = String(message || "").trim();
-      const isConfirmationOnly = isConfirmationOnlyAnswer(msg);
-
-      conversationState[conversationId].confirmationPending = false;
-      conversationState[conversationId].expectsCorrectionReason = false;
-      const hasAddedInfo = !isConfirmationOnly;
-      if (hasAddedInfo) {
-        (conversationState[conversationId].confirmationExtraFacts =
-          conversationState[conversationId].confirmationExtraFacts || []).push(msg);
-      }
-      {
-        conversationHistory[conversationId].push({ role: "user", content: message });
-        const promise = conversationState[conversationId].summaryGenerationPromise;
-        const { message: rawSummaryMsg, followUpQuestion: fq } = promise
-          ? await promise
-          : await generateSummaryForConfirmation(conversationId);
-        conversationState[conversationId].summaryGenerationPromise = null;
-        let summaryMsg = rawSummaryMsg;
-        if (hasAddedInfo) {
-          const historyText = (conversationHistory[conversationId] || [])
-            .filter((m) => m.role === "user")
-            .map((m) => m.content)
-            .join("\n");
-          summaryMsg = replaceStateAboutBlockOnly(rawSummaryMsg, state, historyText);
-        }
-        conversationState[conversationId].summaryText = summaryMsg;
-        conversationHistory[conversationId].push({ role: "assistant", content: summaryMsg });
-        const finalRisk = conversationState[conversationId].decisionLevel || finalizeRiskLevel(conversationState[conversationId]);
-        const sections = extractSectionsBySpecs(summaryMsg, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text);
-        if (fq && shouldSendFollowUpQuestion(sections)) {
-          conversationHistory[conversationId].push({ role: "assistant", content: fq });
-        }
-        const slotsFilledCount = countFilledSlots(state.slotFilled, state);
-        const decisionAllowed = slotsFilledCount >= getRequiredSlotCount(state);
-        return res.json({
-          message: summaryMsg,
-          response: summaryMsg,
-          judgeMeta: {
-            judgement: finalRisk,
-            confidence: state.confidence,
-            ratio: state.decisionRatio ?? 0,
-            shouldJudge: true,
-            slotsFilledCount,
-            decisionAllowed,
-            questionCount: state.questionCount,
-            summaryLine: extractSummaryLine(summaryMsg),
-            questionType: null,
-            rawScore: state.lastPainScore,
-            painScoreRatio: state.lastPainWeight,
-          },
-          triage: { judgement: finalRisk, confidence: state.confidence, ratio: state.decisionRatio ?? 0, shouldJudge: true },
-          triage_state: buildTriageState(true, finalRisk, slotsFilledCount),
-          sections,
-          questionPayload: null,
-          normalizedAnswer: state.lastNormalizedAnswer || null,
-          followUpQuestion: shouldSendFollowUpQuestion(sections) ? (fq || null) : null,
-          followUpMessage: null,
-          locationPromptMessage,
-          locationRePromptMessage: null,
-          locationSnapshot: state.locationSnapshot,
-          conversationId,
-        });
-      }
     }
 
     // ユーザー回答のスコアを集計
@@ -9624,15 +9754,17 @@ app.post("/api/chat", async (req, res) => {
     const { ratio, level, confidence, shouldJudge, slotsFilledCount } = judgeDecision(
       conversationState[conversationId]
     );
-    // 強制仕様: 6スロット充填完了時のみ判定・まとめを許可
-    const decisionAllowed = slotsFilledCount >= getRequiredSlotCount(conversationState[conversationId]);
+    // 強制仕様: 全スロット充填完了、または質問が全て完了した時のみ判定・まとめを許可（バックグラウンド先行生成なし）
+    const requiredCount = getRequiredSlotCount(conversationState[conversationId]);
+    const decisionAllowed = slotsFilledCount >= requiredCount;
+    const questionsCompleted = currentQuestionCount >= maxQuestions;
     // 絶対ルール: 初回ユーザーターンでは絶対にまとめを出さない（2ターン未満も禁止）
     const minUserTurnsForSummary = 2;
     const canShowSummary = !isFirstUserTurn && userTurnCount >= minUserTurnsForSummary;
     const shouldJudgeNow =
       shouldJudge &&
-      decisionAllowed &&
-      canShowSummary;
+      canShowSummary &&
+      (decisionAllowed || questionsCompleted);
     const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled, conversationState[conversationId]);
     if (!shouldJudgeNow) {
       const isFirstQuestion =
@@ -9757,7 +9889,7 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    // 6スロット完了時: まとめの前に確認を取る（🟢🟡🔴共通）。確認文表示と同時にまとめをバックグラウンド生成開始。
+    // 6スロット完了時: 確認文を出すだけ。まとめは確認文表示と同時に生成開始（仕様厳守）。
     if (shouldJudgeNow && !conversationState[conversationId].confirmationShown && !conversationState[conversationId].summaryShown) {
       const confirmMsg = buildPreSummaryConfirmationMessage(
         conversationState[conversationId]
@@ -9767,7 +9899,10 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].confirmationShown = true;
       conversationState[conversationId].lastOptions = [];
       conversationState[conversationId].lastQuestionType = null;
-      conversationState[conversationId].summaryGenerationPromise = generateSummaryForConfirmation(conversationId);
+      // 全スロット埋まり or 質問完了時のみここに到達。未開始なら強制的に開始。
+      if (!conversationState[conversationId].summaryGenerationPromise) {
+        conversationState[conversationId].summaryGenerationPromise = generateSummaryForConfirmation(conversationId);
+      }
       const finalLevel = finalizeRiskLevel(conversationState[conversationId]);
       return res.json({
         message: confirmMsg,
