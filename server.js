@@ -8,8 +8,28 @@ const path = require("path");
 const app = express();
 const PORT = process.env.PORT || 3000;
 const IS_DEBUG = false;
-/** フォールバックを避けるため、LLM 失敗時の最低リトライ回数 */
+/** フォールバックを避けるため、失敗時の最低リトライ回数（3回以上） */
 const LLM_RETRY_COUNT = 5;
+const MIN_RETRY_COUNT = 3;
+
+/** 失敗時に指定回数リトライしてからフォールバック。フォールバック回避のため全操作で3回以上リトライする */
+async function withRetry(fn, maxAttempts = MIN_RETRY_COUNT, options = {}) {
+  const { delayMs = 300, backoff = 1.5 } = options;
+  let lastError = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const result = await fn(attempt);
+      if (result !== undefined && result !== null) return result;
+    } catch (e) {
+      lastError = e;
+      if (attempt < maxAttempts - 1) {
+        await new Promise((r) => setTimeout(r, delayMs * Math.pow(backoff, attempt)));
+      }
+    }
+  }
+  if (lastError) throw lastError;
+  return undefined;
+}
 
 // Middleware
 app.use(cors());
@@ -91,7 +111,7 @@ AI：「頭が痛いのはつらいですよね。
 	・	締め付けられる感じ」
 
 【絶対に守ること】
-- 「体調の不安を、安心に変えます」というメッセージは、会話中には絶対に表示しない
+- 「体調が気になるとき、まずここで確認」等の初回画面メッセージは、会話中には絶対に表示しない
 - このメッセージは初回画面専用なので、AIの返答には絶対に含めない
 - messages.length === 2 の場合のみ「症状入力後の最初の返答」として扱う
 - それ以外の会話（messages.length > 2）では、通常の質問を続ける
@@ -394,6 +414,9 @@ contextFlag = true の場合、次のKairoの発話のどこかで
   - 「私がここまでの情報を踏まえて判断すると、今は様子見で大丈夫です。」
   - 「現時点では、緊急性はなく安心して大丈夫だと判断します。」
   
+【まとめの出力回数 - 最重要】
+- **まとめは同一セッション中に1回しか出力してはいけない。2回目以降は絶対禁止。**
+
 【まとめブロックの完全性 - 最重要】
 - **まとめは必ず「全ブロック」を出す。途中の1ブロックだけを出すのは禁止。**
 - **（A）の場合は 📝→✅→🏥→💬 の4ブロックを必ず全部出す。**
@@ -3584,11 +3607,39 @@ function buildYellowPsychologicalCushionLine() {
   return "いまの経過なら、判断を急がず体の負担を整えながら落ち着いて様子を見られる段階と捉えられます。";
 }
 
+/** PAIN系・INFECTION系で🟡のとき、今すぐやること1件目を固定（仕様厳守） */
+function ensurePainInfectionYellowFirstAction(text, level, state) {
+  if (!text || level !== "🟡" || !state) return text;
+  const category = resolveQuestionCategoryFromState(state);
+  if (category !== "PAIN" && category !== "INFECTION") return text;
+  const fixedAction = "・今はベッドに入り、横になって数時間ゆっくり過ごしてください";
+  const fixedReason = "→ 体を休息モードに切り替えることで、自然な回復の流れが働きやすくなります。";
+  const lines = text.split("\n");
+  const headerIdx = lines.findIndex((l) => l.startsWith("✅ 今すぐやること"));
+  if (headerIdx === -1) return text;
+  let i = headerIdx + 1;
+  while (i < lines.length && !lines[i].trim()) i++;
+  if (i >= lines.length) return text;
+  const firstActionIdx = i;
+  if (lines[firstActionIdx].trim() === fixedAction) return text;
+  let restStart = firstActionIdx + 1;
+  if (restStart < lines.length && lines[restStart].trim().startsWith("→")) restStart++;
+  while (restStart < lines.length && !lines[restStart].trim()) restStart++;
+  const nextHeaderIdx = lines.findIndex((l, idx) => idx > headerIdx && /^(🟢|🟡|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(l));
+  const blockEnd = nextHeaderIdx >= 0 ? nextHeaderIdx : lines.length;
+  const beforeBlock = lines.slice(0, firstActionIdx);
+  const restOfBlock = lines.slice(restStart, blockEnd);
+  const newBlock = [...beforeBlock, fixedAction, fixedReason, "", ...restOfBlock];
+  return [...lines.slice(0, headerIdx), ...newBlock, ...lines.slice(blockEnd)].join("\n");
+}
+
 async function ensureImmediateActionsBlock(text, level, state, historyText = "", research = null) {
   if (!text) return text;
   if (level !== "🟡" && level !== "🟢") return text;
   const block = await buildImmediateActionsBlock(level, state, historyText, research);
-  return replaceSummaryBlock(text, "✅ 今すぐやること", block);
+  let result = replaceSummaryBlock(text, "✅ 今すぐやること", block);
+  result = ensurePainInfectionYellowFirstAction(result, level, state);
+  return result;
 }
 
 async function generateMinimalActionsLastResort(context) {
@@ -4324,6 +4375,18 @@ function buildRedFollowUpQuestion() {
 一緒に考えますか？`;
 }
 
+/** まとめ後の初期フォロー質問を仕様通りに返す（handleFollowUpFlowがnullの時のフォールバック） */
+function getInitialFollowUpQuestionBySpec(state) {
+  if (!state) return null;
+  const decisionType =
+    state.decisionType ||
+    (state.decisionLevel === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING");
+  if (decisionType === "A_HOSPITAL") {
+    return buildRedFollowUpQuestion();
+  }
+  return WATCHFUL_FOLLOW_UP_QUESTION;
+}
+
 function buildFollowUpQuestion1(destinationName) {
   return `もしよろしければ、${destinationName}でどう伝えればいいか、一緒に考えましょうか？${FOLLOW_UP_SUFFIX}`;
 }
@@ -4448,10 +4511,13 @@ function handleFollowUpFlow(message, state) {
   // 確認文の後は必ずまとめ。フォローアップ（閉じメッセージ等）は絶対に返さない。
   if (state.confirmationShown && !state.summaryShown) return null;
   const trimmed = (message || "").trim();
+  const decisionType =
+    state?.decisionType ||
+    (state?.decisionLevel === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING");
+  if (!state.decisionType) state.decisionType = decisionType;
   if (!state.judgmentSnapshot) {
-    state.judgmentSnapshot = buildJudgmentSnapshot(state, [], state.decisionType);
+    state.judgmentSnapshot = buildJudgmentSnapshot(state, [], decisionType);
   }
-  const decisionType = state?.decisionType;
   const rawDestinationName =
     state?.followUpDestinationName ||
     (decisionType === "A_HOSPITAL"
@@ -5152,7 +5218,7 @@ function applySpontaneousSlotFill(state, message, opts = {}) {
         state.associatedSymptomsFromFirstMessage = true;
       }
       const raw = String(associated.raw || "").toLowerCase();
-      if (/(だるさや発熱|発熱がある|頭が熱い|頭があつい|ねつがある|熱がある|熱っぽい|熱が出)/.test(raw)) {
+      if (/(咳や発熱|咳がある|咳が|咳が出|だるさや発熱|発熱がある|頭が熱い|頭があつい|ねつがある|熱がある|熱っぽい|熱が出)/.test(raw)) {
         state.triageCategory = "INFECTION";
       }
       added += 1;
@@ -5438,6 +5504,16 @@ function buildPainQualityOptions(category) {
   return ["ズキズキする", "チクチクする", "重だるい感じ"];
 }
 
+/** 喉・のどが主症状かどうか（喉が痛い、のどの違和感など） */
+function isThroatMainSymptom(text) {
+  if (!text || typeof text !== "string") return false;
+  const n = String(text).replace(/\s+/g, "");
+  return (
+    /(喉|のど)(が|の)?(痛|違和|いたい|痛い|痛む|炎症|腫れ|腫れた|赤い|乾燥|カラカラ|イガイガ)/.test(n) ||
+    /(咽頭痛|のどの痛み|喉の痛み|のどの違和感|喉の違和感)/.test(n)
+  );
+}
+
 function detectQuestionCategory4(text) {
   const normalized = (text || "").replace(/\s+/g, "");
   if (/(腹痛|お腹|下痢|吐き気|胃|嘔吐|便)/.test(normalized)) return "GI";
@@ -5459,6 +5535,11 @@ function resolveLockedQuestionCategory(state, historyText = "") {
     return fromState;
   }
   const detected = detectQuestionCategory4(historyText);
+  // 喉が痛いなど、喉的なものが主症状の時は必ず初めからずっとINFECTION系にする
+  if (isThroatMainSymptom(historyText)) {
+    state.triageCategory = "INFECTION";
+    return "INFECTION";
+  }
   if (detected === "INFECTION") {
     state.triageCategory = "PAIN";
     return "PAIN";
@@ -5533,7 +5614,7 @@ function hasFeverMentionInHistory(historyText) {
 function buildPainInfectionAssociatedOptions(historyText) {
   const hasFever = hasFeverMentionInHistory(historyText);
   const base = ["これ以外は特にない", "吐き気がある"];
-  const third = hasFever ? "だるさがある" : "だるさや発熱がある";
+  const third = hasFever ? "咳がある" : "咳や発熱がある";
   return [...base, third];
 }
 
@@ -5895,6 +5976,7 @@ function formatRawBulletToType(text) {
   if (/(回復|良くなって|ましに|改善)/.test(t)) return "・症状は回復方向に向かっている";
   if (/(変わらない|横ばい|同じ)/.test(t)) return "・症状は大きく変化していない";
   if (/(吐き気|嘔吐)/.test(t)) return "・吐き気を伴っている";
+  if (/(咳や発熱|咳.*発熱)/.test(t)) return "・咳や発熱の症状がある";
   if (/(だる|発熱|熱)/.test(t)) return "・だるさや発熱の症状がある";
   if (/(ストレス|緊張)/.test(t)) return "・ストレスや緊張が影響している可能性";
   if (/(寝不足|疲れ|睡眠)/.test(t)) return "・寝不足や疲れの影響の可能性";
@@ -6050,6 +6132,7 @@ function buildStateFactsBullets(state) {
       pushIfValid("・吐き気や発熱などの他の症状は今のところ見られていない");
     } else if (associated && !isUnknownLike(associated)) {
       if (/吐き気|嘔吐/.test(aNorm)) pushIfValid("・吐き気を伴っている");
+      else if (/咳や発熱|咳.*発熱/.test(aNorm)) pushIfValid("・咳や発熱の症状がある");
       else if (/だる|発熱|熱/.test(aNorm)) pushIfValid("・だるさや発熱の症状がある");
       else pushIfValid(`・${aNorm}を伴っている`);
     }
@@ -6202,8 +6285,8 @@ function buildPreSummaryConfirmationMessage(state) {
   return parts.join("\n");
 }
 
-/** 🟢/🟡用：symptomInfo を緊急度が低い順に1つ選ぶ */
-function pickSymptomInfoForJudgment(state) {
+/** 🟢/🟡用：symptomInfo を緊急度が低い順に1つ選ぶ。きっかけは🟢のみ。4つに当てはまらない場合は null（嘘のフォールバック禁止） */
+function pickSymptomInfoForJudgment(state, level) {
   const answers = state?.slotAnswers || {};
   const worseningTrend = String(
     getSlotStatusValue(state, "worsening_trend", answers.worsening_trend) ||
@@ -6220,34 +6303,54 @@ function pickSymptomInfoForJudgment(state) {
     return "他に強い症状が見られていない";
   }
   const cause = pickCauseTextForConcreteMode(state, []);
-  if (cause) {
+  if (cause && level === "🟢") {
     return `きっかけは${cause}の可能性がある`;
   }
-  return "他に強い症状が見られていない";
+  const durationRaw = String(
+    getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "")
+  ).trim();
+  if (/(さっき|今さっき|たった今|数分|数十分)/.test(durationRaw)) {
+    return "症状が先ほどから始まった";
+  }
+  return null;
 }
 
 const STATE_JUDGMENT_TEMPLATES_GREEN = [
   (s) =>
-    `今の情報を見る限り、急いで受診する必要がありそうなサインは見当たりません。\n痛みはつらいと思いますが、${s} ことから、今は大きく心配する状況ではなさそうです。`,
+    s != null
+      ? `今の情報を見る限り、急いで受診する必要がありそうなサインは見当たりません。\n痛みはつらいと思いますが、${s} ことから、今は大きく心配する状況ではなさそうです。`
+      : `今の情報を見る限り、急いで受診する必要がありそうなサインは見当たりません。\n痛みはつらいと思いますが、今は大きく心配する状況ではなさそうです。`,
   (s) =>
-    `現在の症状から見ると、緊急性が高そうなサインは今のところ見られていません。\n不安になると思いますが、${s} ため、今の状態は大きな心配はなさそうです。`,
+    s != null
+      ? `現在の症状から見ると、緊急性が高そうなサインは今のところ見られていません。\n不安になると思いますが、${s} ため、今の状態は大きな心配はなさそうです。`
+      : `現在の症状から見ると、緊急性が高そうなサインは今のところ見られていません。\n不安になると思いますが、今の状態は大きな心配はなさそうです。`,
   (s) =>
-    `現時点の情報では、危険なサインは特に見当たりません。\nつらい症状があると不安になると思いますが、${s} ことから、今は大きく心配する状況ではなさそうです。`,
+    s != null
+      ? `現時点の情報では、危険なサインは特に見当たりません。\nつらい症状があると不安になると思いますが、${s} ことから、今は大きく心配する状況ではなさそうです。`
+      : `現時点の情報では、危険なサインは特に見当たりません。\nつらい症状があると不安になると思いますが、今は大きく心配する状況ではなさそうです。`,
   (s) =>
-    `今の症状を総合して見ると、急いで受診が必要な状況ではなさそうです。\n痛みや違和感があると心配になりますよね。\nただ、${s} ため、今の状態は大きな心配はなさそうです。`,
+    s != null
+      ? `今の症状を総合して見ると、急いで受診が必要な状況ではなさそうです。\n痛みや違和感があると心配になりますよね。\nただ、${s} ため、今の状態は大きな心配はなさそうです。`
+      : `今の症状を総合して見ると、急いで受診が必要な状況ではなさそうです。\n痛みや違和感があると心配になりますよね。\nただ、今の状態は大きな心配はなさそうです。`,
 ];
 
 /** 🟡①: 痛み7以上のみ */
 const STATE_JUDGMENT_YELLOW_PAIN_HIGH = (s) =>
-  `今の情報を見る限り、危険なサインは今のところ見当たりません。\nつらい症状があると不安になりますよね。\nただ、${s} ことから、今すぐ大きく心配する状況ではなさそうです。\n体調の変化には少し気をつけながら様子を見ていきましょう。`;
+  s != null
+    ? `今の情報を見る限り、危険なサインは今のところ見当たりません。\nつらい症状があると不安になりますよね。\nただ、${s} ことから、今すぐ大きく心配する状況ではなさそうです。\n体調の変化には少し気をつけながら様子を見ていきましょう。`
+    : `今の情報を見る限り、危険なサインは今のところ見当たりません。\nつらい症状があると不安になりますよね。\nただ、今すぐ大きく心配する状況ではなさそうです。\n体調の変化には少し気をつけながら様子を見ていきましょう。`;
 
 /** 🟡②: フォールバック（優先度最低） */
 const STATE_JUDGMENT_YELLOW_FALLBACK = (s) =>
-  `現在の症状から見ると、緊急性が高そうなサインは今のところ見られていません。\n体調がいつもと違うと心配になりますよね。\nただ、${s} ため、今の状態は深刻な状況ではなさそうです。\n無理をせず、体調の変化を見ながら過ごしてみてください。`;
+  s != null
+    ? `現在の症状から見ると、緊急性が高そうなサインは今のところ見られていません。\n体調がいつもと違うと心配になりますよね。\nただ、${s} ため、今の状態は深刻な状況ではなさそうです。\n無理をせず、体調の変化を見ながら過ごしてみてください。`
+    : `現在の症状から見ると、緊急性が高そうなサインは今のところ見られていません。\n体調がいつもと違うと心配になりますよね。\nただ、今の状態は深刻な状況ではなさそうです。\n無理をせず、体調の変化を見ながら過ごしてみてください。`;
 
 /** 🟡③: 経過が「数時間前・一日前」を選択した時のみ */
 const STATE_JUDGMENT_YELLOW_DURATION_SPECIFIC = (s) =>
-  `現時点の情報では、危険なサインは特に見当たりません。\n症状が続くと不安になりますよね。\nただ、${s} ことから、今すぐ大きな問題につながる可能性は低そうです。\n体調を気にかけながら様子を見ていきましょう。`;
+  s != null
+    ? `現時点の情報では、危険なサインは特に見当たりません。\n症状が続くと不安になりますよね。\nただ、${s} ことから、今すぐ大きな問題につながる可能性は低そうです。\n体調を気にかけながら様子を見ていきましょう。`
+    : `現時点の情報では、危険なサインは特に見当たりません。\n症状が続くと不安になりますよね。\nただ、今すぐ大きな問題につながる可能性は低そうです。\n体調を気にかけながら様子を見ていきましょう。`;
 
 function isDurationHoursOrDay(state) {
   const durationRaw = String(
@@ -6258,12 +6361,12 @@ function isDurationHoursOrDay(state) {
 
 function buildStateAboutLine(state, level) {
   if (level === "🟢") {
-    const symptomInfo = pickSymptomInfoForJudgment(state);
+    const symptomInfo = pickSymptomInfoForJudgment(state, "🟢");
     const template = STATE_JUDGMENT_TEMPLATES_GREEN[Math.floor(Math.random() * STATE_JUDGMENT_TEMPLATES_GREEN.length)];
     return template(symptomInfo);
   }
   if (level === "🟡") {
-    const symptomInfo = pickSymptomInfoForJudgment(state);
+    const symptomInfo = pickSymptomInfoForJudgment(state, "🟡");
     const painScore = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
     const canUsePainHigh = painScore !== null && painScore >= 7;
     const canUseDurationSpecific = isDurationHoursOrDay(state);
@@ -7073,11 +7176,18 @@ async function buildDiseaseFocusedModalMessage(searchResults = [], mainSymptom =
     return Array.isArray(parsed?.diseases) ? parsed.diseases : [];
   };
   let diseases = [];
-  try {
-    diseases = await tryExtract(false);
-    if (diseases.length < 2) {
-      diseases = await tryExtract(true);
+  for (let attempt = 0; attempt < MIN_RETRY_COUNT; attempt++) {
+    try {
+      diseases = await tryExtract(false);
+      if (diseases.length === 0) diseases = await tryExtract(true);
+      if (diseases.length >= 2) break;
+    } catch (_) {
+      if (attempt < MIN_RETRY_COUNT - 1) {
+        await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+      }
     }
+  }
+  try {
     if (diseases.length === 1 && fallbackPair[1]) {
       diseases.push({ name: fallbackPair[1].name, description: fallbackPair[1].desc });
     }
@@ -8398,43 +8508,48 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
     ).slice(0, 3);
 
     let parsed = null;
-    try {
-      const stateAboutFacts = buildStateFactsBullets(state).map((line) => toBulletText(line)).join(" / ") || currentStateContext?.stateAboutQuery || "";
-      const llmPrompt = [
-        "You convert medical search evidence into immediate actions.",
-        "Use ONLY provided currentStateContext and extractedSearchEvidence.",
-        "Do not invent sources. Do not diagnose.",
-        "CRITICAL: Do NOT lump main symptom and user answers into 'associated symptoms'. Treat main symptom as main symptom, and reflect each slot's content distinctly in action/reason.",
-        "Each action must reference or address the user's specific symptoms (e.g., pain level, duration, triggers, associated symptoms).",
-        "Avoid generic advice. No vague expressions (e.g. '安静に' alone is forbidden). Use concrete actions with 'what and how much' plus light reason.",
-        "Reason line: do NOT use ・. No numbering (1) 1️⃣). No medical procedure instructions, dangerous acts, or professional procedures.",
-        "Return strict JSON: {\"topic\":\"...\",\"actions\":[{\"title\":\"...\",\"reason\":\"...\",\"isOtc\":false}]}",
-        "actions max 3, OTC max 1.",
-        "Keep Japanese output. Use recommending tone: 〜してください or 〜するといいです. Avoid 〜します.",
-      ].join("\n");
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: llmPrompt },
-          {
-            role: "user",
-            content: JSON.stringify({
-              currentStateContext,
-              stateAboutForActions: stateAboutFacts,
-              extractedSearchEvidence: {
-                selfCare: evidence.selfCare,
-                observe: evidence.observe,
-                danger: evidence.danger,
-              },
-            }),
-          },
-        ],
-        temperature: 0.2,
-        max_tokens: 500,
-      });
-      parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
-    } catch (_) {
-      parsed = null;
+    for (let llmAttempt = 0; llmAttempt < MIN_RETRY_COUNT && !parsed?.actions?.length; llmAttempt++) {
+      try {
+        const stateAboutFacts = buildStateFactsBullets(state).map((line) => toBulletText(line)).join(" / ") || currentStateContext?.stateAboutQuery || "";
+        const llmPrompt = [
+          "You convert medical search evidence into immediate actions.",
+          "Use ONLY provided currentStateContext and extractedSearchEvidence.",
+          "Do not invent sources. Do not diagnose.",
+          "CRITICAL: Do NOT lump main symptom and user answers into 'associated symptoms'. Treat main symptom as main symptom, and reflect each slot's content distinctly in action/reason.",
+          "Each action must reference or address the user's specific symptoms (e.g., pain level, duration, triggers, associated symptoms).",
+          "Avoid generic advice. No vague expressions (e.g. '安静に' alone is forbidden). Use concrete actions with 'what and how much' plus light reason.",
+          "Reason line: do NOT use ・. No numbering (1) 1️⃣). No medical procedure instructions, dangerous acts, or professional procedures.",
+          "Return strict JSON: {\"topic\":\"...\",\"actions\":[{\"title\":\"...\",\"reason\":\"...\",\"isOtc\":false}]}",
+          "actions max 3, OTC max 1.",
+          "Keep Japanese output. Use recommending tone: 〜してください or 〜するといいです. Avoid 〜します.",
+        ].join("\n");
+        const completion = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: [
+            { role: "system", content: llmPrompt },
+            {
+              role: "user",
+              content: JSON.stringify({
+                currentStateContext,
+                stateAboutForActions: stateAboutFacts,
+                extractedSearchEvidence: {
+                  selfCare: evidence.selfCare,
+                  observe: evidence.observe,
+                  danger: evidence.danger,
+                },
+              }),
+            },
+          ],
+          temperature: 0.2 + llmAttempt * 0.05,
+          max_tokens: 500,
+        });
+        const p = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
+        if (Array.isArray(p?.actions) && p.actions.length > 0) parsed = p;
+      } catch (_) {
+        if (llmAttempt < MIN_RETRY_COUNT - 1) {
+          await new Promise((r) => setTimeout(r, 300 * (llmAttempt + 1)));
+        }
+      }
     }
 
     const candidateActions = Array.isArray(parsed?.actions)
@@ -8564,16 +8679,15 @@ async function buildLocalSummaryFallback(level, history, state) {
   const closing = `🌱 最後に\nまた不安になったら、いつでもここで聞いてください。`;
 
   if (level === "🟡") {
-    return sanitizeSummaryBullets(
-      [
-        baseBlocks[0],
-        baseBlocks[1],
-        baseBlocks[2],
-        baseBlocks[3],
-        closing,
-      ].join("\n"),
-      state
-    );
+    let fallbackText = [
+      baseBlocks[0],
+      baseBlocks[1],
+      baseBlocks[2],
+      baseBlocks[3],
+      closing,
+    ].join("\n");
+    fallbackText = ensurePainInfectionYellowFirstAction(fallbackText, level, state);
+    return sanitizeSummaryBullets(fallbackText, state);
   }
   if (level === "🔴") {
     state.decisionLevel = "🔴";
@@ -8806,7 +8920,7 @@ function mapFreeTextToOptionIndex(answer, options, type) {
   if (type === "associated_symptoms") {
     if (none.test(text)) return 0;
     if (indexOf("吐き気がある") >= 0 && /吐き気|嘔吐|むかむか/.test(text)) return 1;
-    if ((indexOf("だるさや発熱がある") >= 0 || indexOf("だるさがある") >= 0) &&
+    if ((indexOf("咳や発熱がある") >= 0 || indexOf("咳がある") >= 0 || indexOf("だるさや発熱がある") >= 0 || indexOf("だるさがある") >= 0) &&
         /だるさ|発熱|熱|頭が熱い|頭があつい|ねつ|熱っぽい/.test(text)) return 2;
     if (severe.test(text)) return Math.min(2, options.length - 1);
     return options.length >= 3 ? 1 : 0;
@@ -9146,15 +9260,31 @@ async function generateSummaryForConfirmation(conversationId) {
     { role: "system", content: pharmacyHint },
     ...summaryContextMessages,
   ];
-  let aiResponse = (await openai.chat.completions.create({ model: "gpt-4o-mini", messages: summaryOnlyMessages, temperature: 0.7, max_tokens: 1000 })).choices?.[0]?.message?.content ?? "";
-  if (!hasAllSummaryBlocks(aiResponse)) {
-    const strict = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "system", content: buildRepairPrompt(level, state) + "\n\n不足ブロックがある場合は必ず補完して、全ブロックを完成させてください。" }, ...summaryContextMessages],
-      temperature: 0.7,
-      max_tokens: 1000,
-    });
-    aiResponse = strict.choices?.[0]?.message?.content ?? aiResponse ?? "";
+  let aiResponse = "";
+  try {
+    aiResponse = await withRetry(async () => {
+      const r = await openai.chat.completions.create({ model: "gpt-4o-mini", messages: summaryOnlyMessages, temperature: 0.7, max_tokens: 1000 });
+      const content = r.choices?.[0]?.message?.content ?? "";
+      if (!content) throw new Error("Empty summary response");
+      return content;
+    }, MIN_RETRY_COUNT);
+  } catch (_) {}
+  if (!aiResponse || !hasAllSummaryBlocks(aiResponse)) {
+    for (let repairAttempt = 0; repairAttempt < MIN_RETRY_COUNT; repairAttempt++) {
+      try {
+        const strict = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: [{ role: "system", content: buildRepairPrompt(level, state) + "\n\n不足ブロックがある場合は必ず補完して、全ブロックを完成させてください。" }, ...summaryContextMessages],
+          temperature: 0.7,
+          max_tokens: 1000,
+        });
+        const repaired = strict.choices?.[0]?.message?.content ?? "";
+        if (repaired && hasAllSummaryBlocks(repaired)) {
+          aiResponse = repaired;
+          break;
+        }
+      } catch (_) {}
+    }
   }
   if (level !== "🔴" && isHospitalFlow(aiResponse)) {
     const repair = await openai.chat.completions.create({
@@ -9170,9 +9300,17 @@ async function generateSummaryForConfirmation(conversationId) {
   aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
   let immediateActionPlan = null;
   if (level === "🟢" || level === "🟡") {
-    try {
-      immediateActionPlan = await buildImmediateActionHypothesisPlan(state, historyTextForOtc, aiResponse);
-    } catch (e) {
+    for (let attempt = 0; attempt < MIN_RETRY_COUNT; attempt++) {
+      try {
+        immediateActionPlan = await buildImmediateActionHypothesisPlan(state, historyTextForOtc, aiResponse);
+        if (immediateActionPlan?.actions?.length) break;
+      } catch (e) {
+        if (attempt < MIN_RETRY_COUNT - 1) {
+          await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+        }
+      }
+    }
+    if (!immediateActionPlan?.actions?.length) {
       immediateActionPlan = await buildImmediateActionFallbackPlanFromState(state);
     }
     aiResponse = normalizeStateBlockForGreenYellow(aiResponse, state);
@@ -9180,10 +9318,15 @@ async function generateSummaryForConfirmation(conversationId) {
   }
   if (level === "🔴") {
     state.decisionLevel = "🔴";
-    try {
-      immediateActionPlan = await buildImmediateActionHypothesisPlan(state, historyTextForOtc, aiResponse);
-    } catch (_) {
-      immediateActionPlan = null;
+    for (let attempt = 0; attempt < MIN_RETRY_COUNT; attempt++) {
+      try {
+        immediateActionPlan = await buildImmediateActionHypothesisPlan(state, historyTextForOtc, aiResponse);
+        if (immediateActionPlan?.actions?.length) break;
+      } catch (_) {
+        if (attempt < MIN_RETRY_COUNT - 1) {
+          await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+        }
+      }
     }
   }
   aiResponse = ensureOutlookBlock(aiResponse, state);
@@ -9245,40 +9388,54 @@ async function generateSummaryForConfirmation(conversationId) {
   return { message: aiResponse || "", followUpQuestion, followUpMessage: null };
   } catch (err) {
     console.error("[generateSummaryForConfirmation Error]", err?.message || err);
-    try {
-      const fallback = await buildLocalSummaryFallback(level, history, state);
-      return { message: fallback || "", followUpQuestion: null, followUpMessage: null };
-    } catch (fallbackErr) {
-      console.error("[generateSummaryForConfirmation Fallback Error]", fallbackErr?.message || fallbackErr);
-      const stateBullets = buildStateFactsBullets(state);
-      const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "今の情報から見ると、\n\nという状況です。";
-      const minimal = [
-        `${level} ここまでの情報を整理します`,
-        buildSummaryIntroTemplate(),
-        "",
-        "🤝 今の状態について",
-        stateBlock,
-        "",
-        "✅ 今すぐやること",
-        "・無理をせず、安静を優先してください",
-        "",
-        "⏳ 今後の見通し",
-        "症状の変化には気をつけて、悪化したら再度ご相談ください。",
-        "",
-        "🌱 最後に",
-        "また不安になったら、いつでもここで聞いてください。",
-      ].join("\n");
-      return { message: minimal, followUpQuestion: null, followUpMessage: null };
+    for (let retryAttempt = 0; retryAttempt < MIN_RETRY_COUNT; retryAttempt++) {
+      try {
+        if (retryAttempt > 0) await new Promise((r) => setTimeout(r, 500 * retryAttempt));
+        const fallback = await buildLocalSummaryFallback(level, history, state);
+        if (fallback) {
+          const fq = state.decisionLevel === "🔴" ? buildRedFollowUpQuestion() : WATCHFUL_FOLLOW_UP_QUESTION;
+          return { message: fallback, followUpQuestion: fq, followUpMessage: null };
+        }
+      } catch (fallbackErr) {
+        if (retryAttempt === MIN_RETRY_COUNT - 1) {
+          console.error("[generateSummaryForConfirmation Fallback Error]", fallbackErr?.message || fallbackErr);
+        }
+      }
     }
+    const stateBullets = buildStateFactsBullets(state);
+    const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "今の情報から見ると、\n\nという状況です。";
+    const minimal = [
+      `${level} ここまでの情報を整理します`,
+      buildSummaryIntroTemplate(),
+      "",
+      "🤝 今の状態について",
+      stateBlock,
+      "",
+      "✅ 今すぐやること",
+      "・無理をせず、安静を優先してください",
+      "",
+      "⏳ 今後の見通し",
+      "症状の変化には気をつけて、悪化したら再度ご相談ください。",
+      "",
+      "🌱 最後に",
+      "また不安になったら、いつでもここで聞いてください。",
+    ].join("\n");
+    return { message: minimal, followUpQuestion: null, followUpMessage: null };
   }
 }
 
 // Chat API endpoint
 app.post("/api/chat", async (req, res) => {
   try {
-  const { message, conversationId: rawConversationId, location, clientMeta } = req.body;
+  const { message, conversationId: rawConversationId, location, clientMeta, resetSession } = req.body;
   const conversationId =
     rawConversationId || `conv_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
+  // 最重要: 初回送信時にサーバー側の古い状態を完全リセット。まとめスロット埋まりのままリセットされていない欠陥を防ぐ。
+  if (resetSession && conversationId) {
+    delete conversationHistory[conversationId];
+    delete conversationState[conversationId];
+  }
   let followUpQuestion = null;
   let followUpMessage = null;
   let locationRePromptBeforeSummary = null;
@@ -9318,10 +9475,24 @@ app.post("/api/chat", async (req, res) => {
         { role: "system", content: SYSTEM_PROMPT },
       ];
     }
-    const state = getOrInitConversationState(conversationId);
+    let state = getOrInitConversationState(conversationId);
+    const userMessageCountBefore = (conversationHistory[conversationId] || []).filter((m) => m.role === "user").length;
+    // フォールバック: 初回メッセージなのに古い状態（まとめ済み・スロット埋まり）が残っている場合は強制リセット
+    if (userMessageCountBefore === 0 && state && (state.summaryShown || countFilledSlots(state.slotFilled, state) >= 6)) {
+      delete conversationHistory[conversationId];
+      delete conversationState[conversationId];
+      conversationHistory[conversationId] = [{ role: "system", content: SYSTEM_PROMPT }];
+      state = initConversationState({ conversationId });
+      conversationState[conversationId] = state;
+    }
     if (!state.triageCategory) {
       const detected = detectQuestionCategory4(message);
-      state.triageCategory = detected === "INFECTION" ? "PAIN" : detected;
+      // 喉が痛いなど、喉的なものが主症状の時は必ず初めからずっとINFECTION系にする
+      state.triageCategory = isThroatMainSymptom(message)
+        ? "INFECTION"
+        : detected === "INFECTION"
+          ? "PAIN"
+          : detected;
     }
     console.log("[DEBUG] request init", {
       conversationId,
@@ -9351,7 +9522,6 @@ app.post("/api/chat", async (req, res) => {
     const locationRePromptMessage = null;
     ensureSlotFilledConsistency(conversationState[conversationId]);
     const filledBeforeTurn = countFilledSlots(conversationState[conversationId].slotFilled, conversationState[conversationId]);
-    const userMessageCountBefore = (conversationHistory[conversationId] || []).filter((m) => m.role === "user").length;
     applySpontaneousSlotFill(conversationState[conversationId], message, { isFirstMessage: userMessageCountBefore === 0 });
     const isFirstUserMessage = userMessageCountBefore === 0;
     const isWaitingForConfirmationResponse =
@@ -9406,7 +9576,8 @@ app.post("/api/chat", async (req, res) => {
     }
 
     // 確認文の後は必ずまとめ。仕様: 確認文は出すだけ。まとめは確認文表示と同時に生成開始。ユーザー応答時はまとめを出すだけ。
-    if (isWaitingForConfirmationResponse) {
+    // 最重要: まとめは1回しか出力しない。summaryShown が既に true なら絶対にまとめを出さない。
+    if (isWaitingForConfirmationResponse && !conversationState[conversationId].summaryShown) {
       conversationState[conversationId].confirmationPending = false;
       conversationState[conversationId].expectsCorrectionReason = false;
       conversationHistory[conversationId].push({ role: "user", content: message });
@@ -9494,6 +9665,8 @@ app.post("/api/chat", async (req, res) => {
         ].join("\n");
       }
       conversationState[conversationId].summaryText = summaryMsg;
+      conversationState[conversationId].summaryShown = true;
+      conversationState[conversationId].hasSummaryBlockGenerated = true;
       conversationHistory[conversationId].push({ role: "assistant", content: summaryMsg });
       const finalRisk = conversationState[conversationId].decisionLevel || finalizeRiskLevel(conversationState[conversationId]);
       const sections = extractSectionsBySpecs(summaryMsg, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text);
@@ -9531,6 +9704,41 @@ app.post("/api/chat", async (req, res) => {
 
     // confirmationShown && !summaryShown の場合は確認待ち。フォローアップで閉じメッセージを返さない。
     const followUpResult = handleFollowUpFlow(message, state);
+    if (state.summaryShown && !followUpResult) {
+      // 仕様8.2通り：フォロー質問は固定テンプレ。🔴は質問①、🟢🟡は質問②を返す。
+      const specFollowUp = getInitialFollowUpQuestionBySpec(state);
+      const outMessage = specFollowUp || buildClosingMessage();
+      if (!state.hasSummaryBlockGenerated) {
+        state.hasSummaryBlockGenerated = true;
+      }
+      if (!state.decisionType && state.decisionLevel) {
+        state.decisionType = state.decisionLevel === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING";
+      }
+      if (!state.judgmentSnapshot) {
+        state.judgmentSnapshot = buildJudgmentSnapshot(state, [], state.decisionType);
+      }
+      if (state.followUpStep <= 0) {
+        state.followUpPhase = "questioning";
+        state.followUpStep = 1;
+      }
+      conversationHistory[conversationId].push({ role: "user", content: message });
+      conversationHistory[conversationId].push({ role: "assistant", content: outMessage });
+      const judgeMeta = buildFollowUpJudgeMeta(state);
+      return res.json({
+        message: outMessage,
+        response: outMessage,
+        judgeMeta,
+        triage_state: buildTriageState(true, judgeMeta.judgement, judgeMeta.slotsFilledCount),
+        triage: { judgement: judgeMeta.judgement, confidence: judgeMeta.confidence, ratio: judgeMeta.ratio },
+        sections: [],
+        questionPayload: null,
+        normalizedAnswer: state.lastNormalizedAnswer || null,
+        locationPromptMessage,
+        locationRePromptMessage,
+        locationSnapshot: state.locationSnapshot,
+        conversationId,
+      });
+    }
     if (followUpResult) {
       const outMessage = followUpResult.message;
       if (FORBIDDEN_FOLLOW_UP.test(outMessage || "")) {
@@ -9697,9 +9905,9 @@ app.post("/api/chat", async (req, res) => {
         if (type === "associated_symptoms") {
           const selectedOpt = lastOptionsSnapshot[selectedIndex] || valueForDisplay || "";
           const answerText = (valueForDisplay || selectedOpt || "").toLowerCase();
-          const isFeverAnswer = /だるさや発熱|発熱がある|頭が熱い|頭があつい|ねつがある|熱がある|熱っぽい|熱が出/.test(selectedOpt) ||
-            /だるさや発熱|発熱がある|頭が熱い|頭があつい|ねつがある|熱がある|熱っぽい|熱が出/.test(answerText);
-          if (isFeverAnswer) {
+          const isCoughOrFeverAnswer = /咳や発熱|咳がある|咳が|咳が出|だるさや発熱|発熱がある|頭が熱い|頭があつい|ねつがある|熱がある|熱っぽい|熱が出/.test(selectedOpt) ||
+            /咳や発熱|咳がある|咳が|咳が出|だるさや発熱|発熱がある|頭が熱い|頭があつい|ねつがある|熱がある|熱っぽい|熱が出/.test(answerText);
+          if (isCoughOrFeverAnswer) {
             conversationState[conversationId].triageCategory = "INFECTION";
           }
         }
@@ -10008,16 +10216,26 @@ app.post("/api/chat", async (req, res) => {
       conversationHistory[conversationId],
       conversationState[conversationId]
     );
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini", // Cost-effective model
-      messages: [
-        ...structuredConversation,
-        { role: "system", content: scoreContext },
-      ],
-      temperature: 0.7,
-      max_tokens: 1000,
-    });
-    let aiResponse = completion.choices[0].message.content;
+    let aiResponse = "";
+    for (let llmAttempt = 0; llmAttempt < MIN_RETRY_COUNT; llmAttempt++) {
+      try {
+        const completion = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: [
+            ...structuredConversation,
+            { role: "system", content: scoreContext },
+          ],
+          temperature: 0.7,
+          max_tokens: 1000,
+        });
+        aiResponse = completion?.choices?.[0]?.message?.content ?? "";
+        if (aiResponse) break;
+      } catch (_) {
+        if (llmAttempt < MIN_RETRY_COUNT - 1) {
+          await new Promise((r) => setTimeout(r, 300 * (llmAttempt + 1)));
+        }
+      }
+    }
 
     // 判定確定トリガー発動時は、まとめを強制生成（初回のみ）
     if (shouldJudgeNow && !conversationState[conversationId].summaryShown) {

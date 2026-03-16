@@ -60,6 +60,7 @@ const appState = {
   painLevel: null,
   location: null,
   redFlagDetected: false,
+  hasUserSentMessageThisSession: false,
 };
 
 function resetConversation() {
@@ -76,6 +77,7 @@ function resetConversation() {
   appState.userHasSubmitted = false;
   appState.painScore = null;
   appState.slots = {};
+  appState.hasUserSentMessageThisSession = false;
 }
 
 const INTRO_TEMPLATE_TEXTS = {
@@ -1232,7 +1234,11 @@ function renderSummary() {
 
 // Show initial message
 function showInitialMessage() {
-  const initialMessage = `体調の不安を、安心に変えます`;
+  const initialMessage = `体調が気になるとき、
+まずここで確認
+
+症状を教えてください。
+1分で状況を整理します。`;
   setTimeout(() => addMessage(initialMessage), QUESTION_DELAY_MS);
 }
 
@@ -1247,11 +1253,11 @@ function hideSummaryCard() {
 }
 
 // Call OpenAI API
-async function callOpenAI(message) {
+async function callOpenAI(message, resetSession = false) {
   const conversationId = getConversationId();
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   let lastError = null;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       const response = await fetch(API_URL, {
         method: "POST",
@@ -1261,6 +1267,7 @@ async function callOpenAI(message) {
         body: JSON.stringify({
           message: message,
           conversationId: conversationId,
+          resetSession: !!resetSession,
           location: getLocationPayload(),
           clientMeta: {
             lang: navigator.language || "",
@@ -1298,8 +1305,8 @@ async function callOpenAI(message) {
       return data;
     } catch (error) {
       lastError = error;
-      if (attempt === 0) {
-        await sleep(1000);
+      if (attempt < 2) {
+        await sleep(300 * (attempt + 1));
         continue;
       }
     }
@@ -1339,6 +1346,8 @@ async function handleUserInput() {
 
   if (!userText) return;
   appState.userHasSubmitted = true;
+  const resetSession = !appState.hasUserSentMessageThisSession;
+  appState.hasUserSentMessageThisSession = true;
 
   // Disable input
   input.disabled = true;
@@ -1351,7 +1360,7 @@ async function handleUserInput() {
 
     try {
       // 質問フェーズは従来どおり通常APIで即時応答
-      const data = await callOpenAI(userText);
+      const data = await callOpenAI(userText, resetSession);
       console.log("[DEBUG] full aiResponse", data);
       const aiResponse = data;
       if (aiResponse.conversationId) {
