@@ -6020,8 +6020,8 @@ function sanitizeBulletPoints(bullets) {
     .filter(Boolean);
 }
 
-/** 情報整理ブロック：転記ではなく解釈で生成。医療的に意味のある形に変換する */
-function buildStateFactsBullets(state) {
+/** 情報整理ブロック：転記ではなく解釈で生成。医療的に意味のある形に変換する。options.forConfirmation=true のときのみ「今の情報から見ると、」と「という状況です。」で囲む */
+function buildStateFactsBullets(state, options = {}) {
   const answers = state?.slotAnswers || {};
   const val = (statusKey, fallback = "") => getSlotStatusValue(state, statusKey, fallback);
   const isUnknownLike = (text) =>
@@ -6171,8 +6171,18 @@ function buildStateFactsBullets(state) {
 
   const rawBullets = lines.slice(0, 8);
   const bullets = sanitizeBulletPoints(rawBullets);
-  if (bullets.length === 0) return [];
-  return ["今の情報から見ると、", "", ...bullets, "", "という状況です。"];
+  // まとめ前の確認文のみ「今の情報から見ると、」と「という状況です。」で囲む。まとめ本文では箇条書きのみ。
+  if (options?.forConfirmation) {
+    return bullets.length > 0
+      ? ["今の情報から見ると、", "", ...bullets, "", "という状況です。"]
+      : ["今の情報から見ると、", "", "という状況です。"];
+  }
+  return bullets.length > 0 ? bullets : [];
+}
+
+/** まとめ前確認用：buildStateFactsBullets の forConfirmation 版 */
+function buildStateFactsBulletsForConfirmation(state) {
+  return buildStateFactsBullets(state, { forConfirmation: true });
 }
 
 /** 確認文への肯定・否定のみの返答（箇条書きに書かない）。まとめをそのまま表示する。 */
@@ -6258,7 +6268,7 @@ function buildPreSummaryConfirmationJudgment(state, level) {
 }
 
 function buildPreSummaryConfirmationMessage(state) {
-  const bullets = buildStateFactsBullets(state);
+  const bullets = buildStateFactsBulletsForConfirmation(state);
   const level = finalizeRiskLevel(state);
   const empathy = pickEmpathyForConfirmation(state);
   const judgmentLine = buildPreSummaryConfirmationJudgment(state, level);
@@ -7110,15 +7120,19 @@ async function buildDiseaseSafetyFilteredMessage(
   }
   rare_emergency = rare_emergency.slice(0, 2);
 
-  const COMMON_SYMPTOM_REASSURANCE = [
-    "このような症状は、多くの人にも見られる比較的よくあるものです。",
-    "同じような症状は、日常の中で多くの人が経験することがあります。",
-    "この症状は、多くの方にみられるよくあるタイプのものです。",
+  const COMMON_SYMPTOM_REASSURANCE_PRIORITY = "このような症状は、多くの人にも見られる比較的よくあるものです。";
+  const COMMON_SYMPTOM_REASSURANCE_OTHERS = [
+    "今回のような症状は、特別なものではなく、日常的によく見られるケースのひとつです。",
+    "このパターンの症状は、多くの方が経験する一般的なものに当てはまる可能性があります。",
   ];
+  const reassuranceText =
+    Math.random() < 0.6
+      ? COMMON_SYMPTOM_REASSURANCE_PRIORITY
+      : COMMON_SYMPTOM_REASSURANCE_OTHERS[Math.floor(Math.random() * COMMON_SYMPTOM_REASSURANCE_OTHERS.length)];
   const reassuranceCommon =
     level === "🔴"
       ? "今のあなたは🟡の可能性もないとは言えません。なので、確認をするためにも受診をおすすめします。"
-      : `${mainSymptom}のほとんどは命に関わるものではありません。特に、急激な悪化や神経症状がなければ、よくあるタイプの可能性が高いです。\n\n${COMMON_SYMPTOM_REASSURANCE[Math.floor(Math.random() * COMMON_SYMPTOM_REASSURANCE.length)]}`;
+      : `${mainSymptom}のほとんどは命に関わるものではありません。特に、急激な悪化や神経症状がなければ、よくあるタイプの可能性が高いです。\n\n${reassuranceText}`;
 
   const redVisitReasonsBullets = level === "🔴" && state ? buildRedVisitReasonsBullets(state) : [];
 
@@ -9403,7 +9417,7 @@ async function generateSummaryForConfirmation(conversationId) {
       }
     }
     const stateBullets = buildStateFactsBullets(state);
-    const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "今の情報から見ると、\n\nという状況です。";
+    const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "";
     const minimal = [
       `${level} ここまでの情報を整理します`,
       buildSummaryIntroTemplate(),
@@ -9624,7 +9638,7 @@ app.post("/api/chat", async (req, res) => {
           console.error("[ConfirmationSummary Fallback Error]", fallbackError?.message || fallbackError);
           const level = finalizeRiskLevel(state);
           const stateBullets = buildStateFactsBullets(state);
-          const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "今の情報から見ると、\n\nという状況です。";
+          const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "";
           summaryMsg = [
             `${level} ここまでの情報を整理します`,
             buildSummaryIntroTemplate(),
@@ -9646,7 +9660,7 @@ app.post("/api/chat", async (req, res) => {
       if (!summaryMsg || summaryMsg.trim().length === 0) {
         const level = finalizeRiskLevel(state);
         const stateBullets = buildStateFactsBullets(state);
-        const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "今の情報から見ると、\n\nという状況です。";
+        const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "";
         summaryMsg = [
           `${level} ここまでの情報を整理します`,
           buildSummaryIntroTemplate(),
