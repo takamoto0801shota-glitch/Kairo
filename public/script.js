@@ -358,7 +358,6 @@ function parseAIMessage(text) {
     { icon: '🤝', name: '今の状態について' },
     { icon: '✅', name: '今すぐやること' },
     { icon: '⏳', name: '今後の見通し' },
-    { icon: '🚨', name: 'もし次の症状が出たら' },
     { icon: '💊', name: '一般的な市販薬' },
     { icon: '🌱', name: '最後に' },
     // 病院をおすすめする場合
@@ -737,7 +736,6 @@ function isDecisionCompleted(text) {
     '🤝 今の状態について',
     '✅ 今すぐやること',
     '⏳ 今後の見通し',
-    '🚨 もし次の症状が出たら',
     '🏥 受診先の候補',
     '📝 今の状態について',
     '📝 いまの状態を整理します',
@@ -1104,7 +1102,6 @@ function addSummaryBlock(messageDiv, fullText) {
     fullText.includes('🤝 今の状態について') ||
     fullText.includes('✅ 今すぐやること') ||
     fullText.includes('⏳ 今後の見通し') ||
-    fullText.includes('🚨 もし次の症状が出たら') ||
     fullText.includes('📝 今の状態について') ||
     fullText.includes('📝 いまの状態を整理します') ||
     fullText.includes('🏥 受診先の候補');
@@ -1429,7 +1426,8 @@ async function handleUserInput() {
         }
       } else {
         setTimeout(() => {
-          if (triageState.is_final && !isFirstResponse && !aiResponse.isPreSummaryConfirmation) {
+          // まとめ後のフォロー応答（sections空）ではrenderSummaryを呼ばない。再度まとめを出さずフォロー文のみ表示。
+          if (triageState.is_final && !isFirstResponse && !aiResponse.isPreSummaryConfirmation && sections.length > 0) {
             renderSummary();
           }
           const msgToShow = stripFollowUpFromMessage(aiMessage);

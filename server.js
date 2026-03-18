@@ -400,7 +400,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 【まとめブロックの完全性 - 最重要】
 - **まとめは必ず「全ブロック」を出す。途中の1ブロックだけを出すのは禁止。**
 - **（A）の場合は 📝→✅→🏥→💬 の4ブロックを必ず全部出す。**
-- **（B）の場合は 🟢→🤝→✅→⏳→🚨→🌱 の6ブロックを必ず全部出す。**
+- **（B）の場合は 🟢→🤝→✅→⏳→🌱 の5ブロックを必ず全部出す。🚨 もし次の症状が出たら は絶対に出さない。**
 - **「🌱 最後に」「💬 最後に」だけを単独で出すのは禁止。**
 - **判断に必要な情報が足りないなら、まとめを出さずに質問を増やす。**
   
@@ -894,7 +894,7 @@ ${stateContext ? `\n${stateContext}\n` : ""}
 要件：
 - 出力はまとめブロックのみ（質問や追加の会話はしない）
 - ブロック構成は必ずフルセット
-  - 様子見/市販薬の場合：🟢→🤝→✅→⏳→🚨→🌱 の6ブロック
+  - 様子見/市販薬の場合：🟢→🤝→✅→⏳→🌱 の5ブロック（🚨は絶対に出さない）
   - 病院推奨の場合：📝→✅→🏥→💬 の4ブロック
 - 🟡は🟢と同じ構成で出力する
 - 文章はテンプレ禁止。会話内容に即して自然に書く
@@ -907,6 +907,7 @@ ${stateContext ? `\n${stateContext}\n` : ""}
 - ❗見出しは必ず以下を全て含める（順番厳守）：
   - 🟢 ここまでの情報を整理します / 🤝 今の状態について / ✅ 今すぐやること / ⏳ 今後の見通し / 🌱 最後に
   - または 📝 今の状態について / ✅ 今すぐやること / 🏥 受診先の候補 / 💬 最後に
+- ❗🟢/🟡 ここまでの情報を整理します の本文は固定文のみ。「教えてもらった内容をもとに、今の状態を一度まとめますね。」または「ここまでに聞いたことを整理して、今の状況を確認しますね。」のどちらか1文のみ。自由生成禁止。
 - 📝 今の状態について は事実のみ・具体的に書く
   - 「ない」「不明」「特になし」だけの記述は禁止
   - 症状・経過・生活影響など具体語を含める
@@ -1089,14 +1090,29 @@ function removeForbiddenSummaryBlocks(text, allowedHeaders) {
   return output.join("\n");
 }
 
+/** 🚨 もし次の症状が出たら ブロックを強制削除（絶対に出さない） */
+function stripEmergencyBlock(text) {
+  if (!text || !text.includes("🚨")) return text;
+  const lines = text.split("\n");
+  const startIdx = lines.findIndex((l) => l.startsWith("🚨 ") || l.includes("🚨 もし次の症状が出たら"));
+  if (startIdx < 0) return text;
+  const nextBlockIdx = lines.findIndex(
+    (l, idx) => idx > startIdx && /^(🟢|🟡|🤝|✅|⏳|💊|🌱|📝|🏥|💬)\s/.test(l)
+  );
+  const endIdx = nextBlockIdx >= 0 ? nextBlockIdx : lines.length;
+  const before = lines.slice(0, startIdx);
+  const after = lines.slice(endIdx);
+  return [...before, ...after].join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 async function enforceSummaryStructureStrict(text, level, history, state) {
-  const normalizedText = normalizeHospitalMemoHeaderText(text);
+  let normalizedText = normalizeHospitalMemoHeaderText(text);
+  normalizedText = stripEmergencyBlock(normalizedText);
   const headers = getRequiredSummaryHeadersByLevel(level);
   const cleaned = removeForbiddenSummaryBlocks(normalizedText, headers);
   const blocks = splitByKnownHeaders(cleaned, headers);
   const hasAll = headers.every((h) => blocks.has(h));
-  const hasEmergencyBlock = String(cleaned || "").includes("🚨");
-  if (!hasAll || hasEmergencyBlock) {
+  if (!hasAll) {
     return await buildLocalSummaryFallback(level, history, state);
   }
   // 強制的に仕様順へ再構成（順序ゆらぎを排除）
@@ -3101,7 +3117,7 @@ function replaceStateAboutBlockOnly(summaryText, state, historyText = "") {
     const judgment = buildHospitalConcernPoint(historyText);
     const memoLines = [
       "📝 今の状態について",
-      ...buildStateFactsBullets(state),
+      ...buildStateFactsBullets(state, { forSummary: true }),
       "",
       judgment,
     ].join("\n");
@@ -3114,7 +3130,7 @@ function replaceStateAboutBlockOnly(summaryText, state, historyText = "") {
   const decisionLine = buildStateDecisionLine(state, level);
   const newBlock = [
     "🤝 今の状態について",
-    ...buildStateFactsBullets(state),
+    ...buildStateFactsBullets(state, { forSummary: true }),
     "",
     ...(aboutLine ? [aboutLine] : []),
     ...(decisionLine ? [decisionLine] : []),
@@ -3587,7 +3603,7 @@ function buildYellowPsychologicalCushionLine() {
   return "いまの経過なら、判断を急がず体の負担を整えながら落ち着いて様子を見られる段階と捉えられます。";
 }
 
-/** PAIN系・INFECTION系で🟡のとき、今すぐやること1件目を固定（仕様厳守） */
+/** PAIN系・INFECTION系で🟡のとき、今すぐやること1件目を固定（仕様厳守）。①なぜそれでいいのかは維持し、②の1件目のみ差し替え。 */
 function ensurePainInfectionYellowFirstAction(text, level, state) {
   if (!text || level !== "🟡" || !state) return text;
   const category = resolveQuestionCategoryFromState(state);
@@ -3597,8 +3613,17 @@ function ensurePainInfectionYellowFirstAction(text, level, state) {
   const lines = text.split("\n");
   const headerIdx = lines.findIndex((l) => l.startsWith("✅ 今すぐやること"));
   if (headerIdx === -1) return text;
+  // ①なぜそれでいいのか（・で始まらない行）をスキップし、②の最初の「・」行を探す
   let i = headerIdx + 1;
-  while (i < lines.length && !lines[i].trim()) i++;
+  while (i < lines.length) {
+    const t = lines[i].trim();
+    if (!t) {
+      i++;
+      continue;
+    }
+    if (t.startsWith("・")) break;
+    i++;
+  }
   if (i >= lines.length) return text;
   const firstActionIdx = i;
   if (lines[firstActionIdx].trim() === fixedAction) return text;
@@ -3948,6 +3973,7 @@ function enforceSummaryIntroTemplate(text) {
       (line.startsWith("🤝 ") ||
         line.startsWith("✅ ") ||
         line.startsWith("⏳ ") ||
+        line.startsWith("🚨 ") ||
         line.startsWith("🏥 ") ||
         line.startsWith("💊 ") ||
         line.startsWith("🌱 ") ||
@@ -5880,6 +5906,32 @@ function buildFactsFromSlotAnswers(state) {
   return facts.map((item) => `・${item}`);
 }
 
+/** まとめの「今の状態について」ブロック内で、確認文用の前後文（今の情報から見ると、／という状況です。）を除去し箇条書きのみにする */
+function stripStateAboutIntroOutro(text) {
+  if (!text) return text;
+  const lines = text.split("\n");
+  const stateAboutHeaders = ["🤝 今の状態について", "📝 今の状態について"];
+  const nextBlockPattern = /^(✅|⏳|🚨|💊|🌱|🏥|💬)\s/;
+  const introOutroPattern = /^(今の情報から見ると、|という状況です。?)\s*$/;
+  let inStateBlock = false;
+  const result = lines.map((line) => {
+    const isHeader = stateAboutHeaders.some((h) => line.startsWith(h));
+    if (isHeader) {
+      inStateBlock = true;
+      return line;
+    }
+    if (inStateBlock) {
+      if (nextBlockPattern.test(line)) {
+        inStateBlock = false;
+        return line;
+      }
+      if (introOutroPattern.test(line.trim())) return null;
+    }
+    return line;
+  });
+  return result.filter((l) => l !== null).join("\n");
+}
+
 function sanitizeSummaryBullets(text, state) {
   if (!text) return text;
   const answers = state?.slotAnswers || {};
@@ -6000,8 +6052,8 @@ function sanitizeBulletPoints(bullets) {
     .filter(Boolean);
 }
 
-/** 情報整理ブロック：転記ではなく解釈で生成。医療的に意味のある形に変換する */
-function buildStateFactsBullets(state) {
+/** 情報整理ブロック：転記ではなく解釈で生成。医療的に意味のある形に変換する。forSummary: true のときは箇条書きのみ（確認文用の前後文を出さない） */
+function buildStateFactsBullets(state, opts = {}) {
   const answers = state?.slotAnswers || {};
   const val = (statusKey, fallback = "") => getSlotStatusValue(state, statusKey, fallback);
   const isUnknownLike = (text) =>
@@ -6152,6 +6204,7 @@ function buildStateFactsBullets(state) {
   const rawBullets = lines.slice(0, 8);
   const bullets = sanitizeBulletPoints(rawBullets);
   if (bullets.length === 0) return [];
+  if (opts?.forSummary) return bullets;
   return ["今の情報から見ると、", "", ...bullets, "", "という状況です。"];
 }
 
@@ -7092,13 +7145,13 @@ async function buildDiseaseSafetyFilteredMessage(
 
   const COMMON_SYMPTOM_REASSURANCE = [
     "このような症状は、多くの人にも見られる比較的よくあるものです。",
-    "同じような症状は、日常の中で多くの人が経験することがあります。",
-    "この症状は、多くの方にみられるよくあるタイプのものです。",
+    "今のような症状は、特別なものではなく、日常的によく見られるケースのひとつです。",
+    "このような症状は、多くの方に見られる一般的なもののひとつです。",
   ];
   const reassuranceCommon =
     level === "🔴"
       ? "今のあなたは🟡の可能性もないとは言えません。なので、確認をするためにも受診をおすすめします。"
-      : `${mainSymptom}のほとんどは命に関わるものではありません。特に、急激な悪化や神経症状がなければ、よくあるタイプの可能性が高いです。\n\n${COMMON_SYMPTOM_REASSURANCE[Math.floor(Math.random() * COMMON_SYMPTOM_REASSURANCE.length)]}`;
+      : `${mainSymptom}のほとんどは命に関わるものではありません。特に、急激な悪化や神経症状がなければ、よくあるタイプの可能性が高いです。\n\n${COMMON_SYMPTOM_REASSURANCE[0]}`;
 
   const redVisitReasonsBullets = level === "🔴" && state ? buildRedVisitReasonsBullets(state) : [];
 
@@ -8601,7 +8654,7 @@ function normalizeStateBlockForGreenYellow(text, state) {
   const decisionLine = buildStateDecisionLine(state, level);
   const newBlock = [
     "🤝 今の状態について",
-    ...buildStateFactsBullets(state),
+    ...buildStateFactsBullets(state, { forSummary: true }),
     "",
     ...(aboutLine ? [aboutLine] : []),
     ...(decisionLine ? [decisionLine] : []),
@@ -8640,7 +8693,7 @@ async function buildLocalSummaryFallback(level, history, state) {
   const immediateBlock = await buildImmediateActionsBlock(level, state, historyText, null);
   const baseBlocks = [
     `${level} ここまでの情報を整理します\n${buildSummaryIntroTemplate()}`,
-    `🤝 今の状態について\n${buildStateFactsBullets(state).join("\n")}\n\n${buildStateAboutLine(state, level)}\n${buildStateDecisionLine(state, level)}`,
+    `🤝 今の状態について\n${buildStateFactsBullets(state, { forSummary: true }).join("\n")}\n\n${buildStateAboutLine(state, level)}\n${buildStateDecisionLine(state, level)}`,
     immediateBlock,
     `⏳ 今後の見通し\nこのタイプの症状は、時間の経過で変化することがあります。\n・もし明日の朝も同じ痛みが続いていたら\n・もし痛みが7以上に強くなったら\nそのタイミングで、もう一度Kairoに聞いてください。`,
   ];
@@ -8668,7 +8721,7 @@ async function buildLocalSummaryFallback(level, history, state) {
     const hospitalBlock = buildHospitalBlock(state, historyText, hospitalRec);
     const memoWithJudgment = [
       "📝 今の状態について",
-      buildStateFactsBullets(state).join("\n"),
+      buildStateFactsBullets(state, { forSummary: true }).join("\n"),
       "",
       buildHospitalConcernPoint(historyText),
     ].join("\n");
@@ -9204,13 +9257,34 @@ async function generateSummaryForConfirmation(conversationId) {
   const otcWarningIndex = Math.floor(Math.random() * 5);
   await resolveLocationContext(state, state.clientMeta);
   const locationContext = state.locationContext || {};
+  const hasLocationSnapshot = !!(state?.locationSnapshot?.lat && state?.locationSnapshot?.lng);
   if (level === "🔴") {
-    state.clinicCandidates = await resolveCareCandidates(state, careDestination);
-    state.hospitalCandidates = await resolveHospitalCandidates(state);
+    if (hasLocationSnapshot) {
+      [state.clinicCandidates, state.hospitalCandidates, state.pharmacyCandidates] = await Promise.all([
+        resolveCareCandidates(state, careDestination),
+        resolveHospitalCandidates(state),
+        resolvePharmacyCandidates(state),
+      ]);
+    } else {
+      [state.clinicCandidates, state.hospitalCandidates] = await Promise.all([
+        resolveCareCandidates(state, careDestination),
+        resolveHospitalCandidates(state),
+      ]);
+      state.pharmacyCandidates = await resolvePharmacyCandidates(state);
+    }
+  } else {
+    // 🟢/🟡: 薬局検索を非同期で行い、まとめ表示を待たせない
+    state.pharmacyCandidates = [];
+    state.pharmacyRecommendation = buildPharmacyRecommendation(state, locationContext, []);
+    void resolvePharmacyCandidates(state).then((candidates) => {
+      state.pharmacyCandidates = candidates;
+      state.pharmacyRecommendation = buildPharmacyRecommendation(state, locationContext, candidates);
+    });
   }
-  state.pharmacyCandidates = await resolvePharmacyCandidates(state);
-  const pharmacyRec = buildPharmacyRecommendation(state, locationContext, state.pharmacyCandidates);
-  state.pharmacyRecommendation = pharmacyRec;
+  const pharmacyRec = level === "🔴"
+    ? buildPharmacyRecommendation(state, locationContext, state.pharmacyCandidates)
+    : state.pharmacyRecommendation;
+  if (level === "🔴") state.pharmacyRecommendation = pharmacyRec;
   const otcExamples = buildOtcExamples(otcCategory, locationContext.country);
   state.otcExamples = otcExamples;
   const hospitalRec = buildHospitalRecommendationDetail(state, locationContext, state.clinicCandidates, state.hospitalCandidates);
@@ -9288,6 +9362,7 @@ async function generateSummaryForConfirmation(conversationId) {
   }
   aiResponse = ensureRestMcDecisionBlock(aiResponse, level, state);
   aiResponse = sanitizeGeneralPhrases(aiResponse);
+  aiResponse = stripStateAboutIntroOutro(aiResponse);
   aiResponse = sanitizeSummaryQuestions(aiResponse);
   aiResponse = stripForbiddenFollowUpMessage(aiResponse);
   aiResponse = simplifyPossibilityPhrases(aiResponse);
@@ -9332,8 +9407,8 @@ async function generateSummaryForConfirmation(conversationId) {
       return { message: fallback || "", followUpQuestion: null, followUpMessage: null };
     } catch (fallbackErr) {
       console.error("[generateSummaryForConfirmation Fallback Error]", fallbackErr?.message || fallbackErr);
-      const stateBullets = buildStateFactsBullets(state);
-      const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "今の情報から見ると、\n\nという状況です。";
+      const stateBullets = buildStateFactsBullets(state, { forSummary: true });
+      const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "";
       const minimal = [
         `${level} ここまでの情報を整理します`,
         buildSummaryIntroTemplate(),
@@ -9541,6 +9616,8 @@ app.post("/api/chat", async (req, res) => {
           const history = conversationHistory[conversationId] || [];
           summaryMsg = await buildLocalSummaryFallback(level, history, state);
         }
+        summaryMsg = stripEmergencyBlock(summaryMsg);
+        summaryMsg = enforceSummaryIntroTemplate(summaryMsg);
         const sectionsForFq = extractSectionsBySpecs(summaryMsg, getSummarySectionSpecsByJudgement(finalizeRiskLevel(state))).map((e) => e.text);
         if (followUpQ && shouldSendFollowUpQuestion(sectionsForFq)) {
           conversationHistory[conversationId].push({ role: "assistant", content: followUpQ });
@@ -9554,8 +9631,8 @@ app.post("/api/chat", async (req, res) => {
         } catch (fallbackError) {
           console.error("[ConfirmationSummary Fallback Error]", fallbackError?.message || fallbackError);
           const level = finalizeRiskLevel(state);
-          const stateBullets = buildStateFactsBullets(state);
-          const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "今の情報から見ると、\n\nという状況です。";
+          const stateBullets = buildStateFactsBullets(state, { forSummary: true });
+          const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "";
           summaryMsg = [
             `${level} ここまでの情報を整理します`,
             buildSummaryIntroTemplate(),
@@ -9576,8 +9653,8 @@ app.post("/api/chat", async (req, res) => {
       }
       if (!summaryMsg || summaryMsg.trim().length === 0) {
         const level = finalizeRiskLevel(state);
-        const stateBullets = buildStateFactsBullets(state);
-        const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "今の情報から見ると、\n\nという状況です。";
+        const stateBullets = buildStateFactsBullets(state, { forSummary: true });
+        const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "";
         summaryMsg = [
           `${level} ここまでの情報を整理します`,
           buildSummaryIntroTemplate(),
@@ -10188,35 +10265,55 @@ app.post("/api/chat", async (req, res) => {
         conversationState[conversationId].clientMeta
       );
       const locationContext = conversationState[conversationId].locationContext || {};
+      const stateForPlaces = conversationState[conversationId];
+      const hasLocationSnapshot = !!(stateForPlaces?.locationSnapshot?.lat && stateForPlaces?.locationSnapshot?.lng);
       if (level === "🔴") {
-        const state = conversationState[conversationId];
         console.log("[Places] 🔴 受診先検索開始", {
-          hasLocationSnapshot: !!(state?.locationSnapshot?.lat && state?.locationSnapshot?.lng),
+          hasLocationSnapshot,
           hasPlacesKey: !!getPlacesApiKey(),
-          locationSnapshot: state?.locationSnapshot ? { lat: state.locationSnapshot.lat, lng: state.locationSnapshot.lng } : null,
+          locationSnapshot: stateForPlaces?.locationSnapshot ? { lat: stateForPlaces.locationSnapshot.lat, lng: stateForPlaces.locationSnapshot.lng } : null,
         });
-        // 症状に合わせて受診先候補を選ぶ（歯痛→歯科、耳/鼻/喉→耳鼻科、基本はGP）
-        conversationState[conversationId].clinicCandidates = await resolveCareCandidates(
-          conversationState[conversationId],
-          careDestination
-        );
-        // 「病院」候補は引き続き別枠で取得（重症時の選択肢として保持）
-        conversationState[conversationId].hospitalCandidates = await resolveHospitalCandidates(
-          conversationState[conversationId]
-        );
-        const clinicLen = (conversationState[conversationId].clinicCandidates || []).length;
-        const hospLen = (conversationState[conversationId].hospitalCandidates || []).length;
+        if (hasLocationSnapshot) {
+          [stateForPlaces.clinicCandidates, stateForPlaces.hospitalCandidates, stateForPlaces.pharmacyCandidates] = await Promise.all([
+            resolveCareCandidates(stateForPlaces, careDestination),
+            resolveHospitalCandidates(stateForPlaces),
+            resolvePharmacyCandidates(stateForPlaces),
+          ]);
+        } else {
+          [stateForPlaces.clinicCandidates, stateForPlaces.hospitalCandidates] = await Promise.all([
+            resolveCareCandidates(stateForPlaces, careDestination),
+            resolveHospitalCandidates(stateForPlaces),
+          ]);
+          stateForPlaces.pharmacyCandidates = await resolvePharmacyCandidates(stateForPlaces);
+        }
+        const clinicLen = (stateForPlaces.clinicCandidates || []).length;
+        const hospLen = (stateForPlaces.hospitalCandidates || []).length;
         console.log("[Places] 🔴 受診先検索結果", { clinicCandidates: clinicLen, hospitalCandidates: hospLen });
+      } else {
+        // 🟢/🟡: 薬局検索を非同期で行い、まとめ表示を待たせない
+        stateForPlaces.pharmacyCandidates = [];
+        stateForPlaces.pharmacyRecommendation = buildPharmacyRecommendation(
+          stateForPlaces,
+          locationContext,
+          []
+        );
+        void resolvePharmacyCandidates(stateForPlaces).then((candidates) => {
+          stateForPlaces.pharmacyCandidates = candidates;
+          stateForPlaces.pharmacyRecommendation = buildPharmacyRecommendation(
+            stateForPlaces,
+            locationContext,
+            candidates
+          );
+        });
       }
-      conversationState[conversationId].pharmacyCandidates = await resolvePharmacyCandidates(
-        conversationState[conversationId]
-      );
-      const pharmacyRec = buildPharmacyRecommendation(
-        conversationState[conversationId],
-        locationContext,
-        conversationState[conversationId].pharmacyCandidates
-      );
-      conversationState[conversationId].pharmacyRecommendation = pharmacyRec;
+      const pharmacyRec = level === "🔴"
+        ? buildPharmacyRecommendation(
+            conversationState[conversationId],
+            locationContext,
+            conversationState[conversationId].pharmacyCandidates
+          )
+        : conversationState[conversationId].pharmacyRecommendation;
+      if (level === "🔴") conversationState[conversationId].pharmacyRecommendation = pharmacyRec;
       const otcExamples = buildOtcExamples(otcCategory, locationContext.country);
       conversationState[conversationId].otcExamples = otcExamples;
       const hospitalRec = buildHospitalRecommendationDetail(
@@ -10378,6 +10475,7 @@ app.post("/api/chat", async (req, res) => {
         conversationState[conversationId]
       );
       aiResponse = sanitizeGeneralPhrases(aiResponse);
+      aiResponse = stripStateAboutIntroOutro(aiResponse);
       aiResponse = sanitizeSummaryQuestions(aiResponse);
       aiResponse = stripForbiddenFollowUpMessage(aiResponse);
       aiResponse = simplifyPossibilityPhrases(aiResponse);
