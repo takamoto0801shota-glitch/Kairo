@@ -1394,7 +1394,8 @@ async function handleUserInput() {
         return /^[\u{1F331}\u{1F4AC}]\s*最後に/u.test(firstLine) || /^[🌱💬]\s*最後に/.test(firstLine);
       };
 
-      const shouldShowSections = !isFirstResponse && triageState.is_final && sections.length > 0;
+      // 絶対ルール8.2: 初回ユーザーメッセージ（1通目）の応答ではサマリー・フォローを絶対に出さない。conversationStep 0 のときは triage 表示禁止。
+      const shouldShowSections = !isFirstResponse && triageState.is_final && sections.length > 0 && !aiResponse.isPreSummaryConfirmation;
 
       if (shouldShowSections) {
         const firstDelay = QUESTION_DELAY_MS + 600;
@@ -1433,6 +1434,7 @@ async function handleUserInput() {
         }
       } else {
         setTimeout(() => {
+          // 絶対ルール8.2: 初回応答・確認文表示時はサマリーカードを出さない。まとめはユーザーが確認文に応答した後のみ。
           if (triageState.is_final && !isFirstResponse && !aiResponse.isPreSummaryConfirmation) {
             renderSummary();
           }
