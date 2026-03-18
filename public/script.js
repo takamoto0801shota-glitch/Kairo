@@ -1233,11 +1233,7 @@ function renderSummary() {
 
 // Show initial message
 function showInitialMessage() {
-  const initialMessage = `体調が気になるとき、
-まずここで確認
-
-症状を教えてください。
-1分で状況を整理します。`;
+  const initialMessage = `体調の不安を、安心に変えます`;
   setTimeout(() => addMessage(initialMessage), QUESTION_DELAY_MS);
 }
 
@@ -1256,7 +1252,7 @@ async function callOpenAI(message, resetSession = false) {
   const conversationId = getConversationId();
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   let lastError = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const response = await fetch(API_URL, {
         method: "POST",
@@ -1304,8 +1300,8 @@ async function callOpenAI(message, resetSession = false) {
       return data;
     } catch (error) {
       lastError = error;
-      if (attempt < 2) {
-        await sleep(300 * (attempt + 1));
+      if (attempt === 0) {
+        await sleep(1000);
         continue;
       }
     }

@@ -8,28 +8,8 @@ const path = require("path");
 const app = express();
 const PORT = process.env.PORT || 3000;
 const IS_DEBUG = false;
-/** フォールバックを避けるため、失敗時の最低リトライ回数（3回以上） */
+/** フォールバックを避けるため、LLM 失敗時の最低リトライ回数 */
 const LLM_RETRY_COUNT = 5;
-const MIN_RETRY_COUNT = 3;
-
-/** 失敗時に指定回数リトライしてからフォールバック。フォールバック回避のため全操作で3回以上リトライする */
-async function withRetry(fn, maxAttempts = MIN_RETRY_COUNT, options = {}) {
-  const { delayMs = 300, backoff = 1.5 } = options;
-  let lastError = null;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try {
-      const result = await fn(attempt);
-      if (result !== undefined && result !== null) return result;
-    } catch (e) {
-      lastError = e;
-      if (attempt < maxAttempts - 1) {
-        await new Promise((r) => setTimeout(r, delayMs * Math.pow(backoff, attempt)));
-      }
-    }
-  }
-  if (lastError) throw lastError;
-  return undefined;
-}
 
 // Middleware
 app.use(cors());
@@ -111,7 +91,7 @@ AI：「頭が痛いのはつらいですよね。
 	・	締め付けられる感じ」
 
 【絶対に守ること】
-- 「体調が気になるとき、まずここで確認」等の初回画面メッセージは、会話中には絶対に表示しない
+- 「体調の不安を、安心に変えます」というメッセージは、会話中には絶対に表示しない
 - このメッセージは初回画面専用なので、AIの返答には絶対に含めない
 - messages.length === 2 の場合のみ「症状入力後の最初の返答」として扱う
 - それ以外の会話（messages.length > 2）では、通常の質問を続ける
@@ -6020,8 +6000,8 @@ function sanitizeBulletPoints(bullets) {
     .filter(Boolean);
 }
 
-/** 情報整理ブロック：転記ではなく解釈で生成。医療的に意味のある形に変換する。options.forConfirmation=true のときのみ「今の情報から見ると、」と「という状況です。」で囲む */
-function buildStateFactsBullets(state, options = {}) {
+/** 情報整理ブロック：転記ではなく解釈で生成。医療的に意味のある形に変換する */
+function buildStateFactsBullets(state) {
   const answers = state?.slotAnswers || {};
   const val = (statusKey, fallback = "") => getSlotStatusValue(state, statusKey, fallback);
   const isUnknownLike = (text) =>
@@ -6171,18 +6151,8 @@ function buildStateFactsBullets(state, options = {}) {
 
   const rawBullets = lines.slice(0, 8);
   const bullets = sanitizeBulletPoints(rawBullets);
-  // まとめ前の確認文のみ「今の情報から見ると、」と「という状況です。」で囲む。まとめ本文では箇条書きのみ。
-  if (options?.forConfirmation) {
-    return bullets.length > 0
-      ? ["今の情報から見ると、", "", ...bullets, "", "という状況です。"]
-      : ["今の情報から見ると、", "", "という状況です。"];
-  }
-  return bullets.length > 0 ? bullets : [];
-}
-
-/** まとめ前確認用：buildStateFactsBullets の forConfirmation 版 */
-function buildStateFactsBulletsForConfirmation(state) {
-  return buildStateFactsBullets(state, { forConfirmation: true });
+  if (bullets.length === 0) return [];
+  return ["今の情報から見ると、", "", ...bullets, "", "という状況です。"];
 }
 
 /** 確認文への肯定・否定のみの返答（箇条書きに書かない）。まとめをそのまま表示する。 */
@@ -6268,7 +6238,7 @@ function buildPreSummaryConfirmationJudgment(state, level) {
 }
 
 function buildPreSummaryConfirmationMessage(state) {
-  const bullets = buildStateFactsBulletsForConfirmation(state);
+  const bullets = buildStateFactsBullets(state);
   const level = finalizeRiskLevel(state);
   const empathy = pickEmpathyForConfirmation(state);
   const judgmentLine = buildPreSummaryConfirmationJudgment(state, level);
@@ -7122,8 +7092,8 @@ async function buildDiseaseSafetyFilteredMessage(
 
   const COMMON_SYMPTOM_REASSURANCE = [
     "このような症状は、多くの人にも見られる比較的よくあるものです。",
-    "今回のような症状は、特別なものではなく、日常的によく見られるケースのひとつです。",
-    "このパターンの症状は、多くの方が経験する一般的なものに当てはまる可能性があります。",
+    "同じような症状は、日常の中で多くの人が経験することがあります。",
+    "この症状は、多くの方にみられるよくあるタイプのものです。",
   ];
   const reassuranceCommon =
     level === "🔴"
@@ -7186,18 +7156,11 @@ async function buildDiseaseFocusedModalMessage(searchResults = [], mainSymptom =
     return Array.isArray(parsed?.diseases) ? parsed.diseases : [];
   };
   let diseases = [];
-  for (let attempt = 0; attempt < MIN_RETRY_COUNT; attempt++) {
-    try {
-      diseases = await tryExtract(false);
-      if (diseases.length === 0) diseases = await tryExtract(true);
-      if (diseases.length >= 2) break;
-    } catch (_) {
-      if (attempt < MIN_RETRY_COUNT - 1) {
-        await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
-      }
-    }
-  }
   try {
+    diseases = await tryExtract(false);
+    if (diseases.length < 2) {
+      diseases = await tryExtract(true);
+    }
     if (diseases.length === 1 && fallbackPair[1]) {
       diseases.push({ name: fallbackPair[1].name, description: fallbackPair[1].desc });
     }
@@ -8518,48 +8481,43 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
     ).slice(0, 3);
 
     let parsed = null;
-    for (let llmAttempt = 0; llmAttempt < MIN_RETRY_COUNT && !parsed?.actions?.length; llmAttempt++) {
-      try {
-        const stateAboutFacts = buildStateFactsBullets(state).map((line) => toBulletText(line)).join(" / ") || currentStateContext?.stateAboutQuery || "";
-        const llmPrompt = [
-          "You convert medical search evidence into immediate actions.",
-          "Use ONLY provided currentStateContext and extractedSearchEvidence.",
-          "Do not invent sources. Do not diagnose.",
-          "CRITICAL: Do NOT lump main symptom and user answers into 'associated symptoms'. Treat main symptom as main symptom, and reflect each slot's content distinctly in action/reason.",
-          "Each action must reference or address the user's specific symptoms (e.g., pain level, duration, triggers, associated symptoms).",
-          "Avoid generic advice. No vague expressions (e.g. '安静に' alone is forbidden). Use concrete actions with 'what and how much' plus light reason.",
-          "Reason line: do NOT use ・. No numbering (1) 1️⃣). No medical procedure instructions, dangerous acts, or professional procedures.",
-          "Return strict JSON: {\"topic\":\"...\",\"actions\":[{\"title\":\"...\",\"reason\":\"...\",\"isOtc\":false}]}",
-          "actions max 3, OTC max 1.",
-          "Keep Japanese output. Use recommending tone: 〜してください or 〜するといいです. Avoid 〜します.",
-        ].join("\n");
-        const completion = await openai.chat.completions.create({
-          model: "gpt-4o-mini",
-          messages: [
-            { role: "system", content: llmPrompt },
-            {
-              role: "user",
-              content: JSON.stringify({
-                currentStateContext,
-                stateAboutForActions: stateAboutFacts,
-                extractedSearchEvidence: {
-                  selfCare: evidence.selfCare,
-                  observe: evidence.observe,
-                  danger: evidence.danger,
-                },
-              }),
-            },
-          ],
-          temperature: 0.2 + llmAttempt * 0.05,
-          max_tokens: 500,
-        });
-        const p = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
-        if (Array.isArray(p?.actions) && p.actions.length > 0) parsed = p;
-      } catch (_) {
-        if (llmAttempt < MIN_RETRY_COUNT - 1) {
-          await new Promise((r) => setTimeout(r, 300 * (llmAttempt + 1)));
-        }
-      }
+    try {
+      const stateAboutFacts = buildStateFactsBullets(state).map((line) => toBulletText(line)).join(" / ") || currentStateContext?.stateAboutQuery || "";
+      const llmPrompt = [
+        "You convert medical search evidence into immediate actions.",
+        "Use ONLY provided currentStateContext and extractedSearchEvidence.",
+        "Do not invent sources. Do not diagnose.",
+        "CRITICAL: Do NOT lump main symptom and user answers into 'associated symptoms'. Treat main symptom as main symptom, and reflect each slot's content distinctly in action/reason.",
+        "Each action must reference or address the user's specific symptoms (e.g., pain level, duration, triggers, associated symptoms).",
+        "Avoid generic advice. No vague expressions (e.g. '安静に' alone is forbidden). Use concrete actions with 'what and how much' plus light reason.",
+        "Reason line: do NOT use ・. No numbering (1) 1️⃣). No medical procedure instructions, dangerous acts, or professional procedures.",
+        "Return strict JSON: {\"topic\":\"...\",\"actions\":[{\"title\":\"...\",\"reason\":\"...\",\"isOtc\":false}]}",
+        "actions max 3, OTC max 1.",
+        "Keep Japanese output. Use recommending tone: 〜してください or 〜するといいです. Avoid 〜します.",
+      ].join("\n");
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: llmPrompt },
+          {
+            role: "user",
+            content: JSON.stringify({
+              currentStateContext,
+              stateAboutForActions: stateAboutFacts,
+              extractedSearchEvidence: {
+                selfCare: evidence.selfCare,
+                observe: evidence.observe,
+                danger: evidence.danger,
+              },
+            }),
+          },
+        ],
+        temperature: 0.2,
+        max_tokens: 500,
+      });
+      parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
+    } catch (_) {
+      parsed = null;
     }
 
     const candidateActions = Array.isArray(parsed?.actions)
@@ -9270,31 +9228,15 @@ async function generateSummaryForConfirmation(conversationId) {
     { role: "system", content: pharmacyHint },
     ...summaryContextMessages,
   ];
-  let aiResponse = "";
-  try {
-    aiResponse = await withRetry(async () => {
-      const r = await openai.chat.completions.create({ model: "gpt-4o-mini", messages: summaryOnlyMessages, temperature: 0.7, max_tokens: 1000 });
-      const content = r.choices?.[0]?.message?.content ?? "";
-      if (!content) throw new Error("Empty summary response");
-      return content;
-    }, MIN_RETRY_COUNT);
-  } catch (_) {}
-  if (!aiResponse || !hasAllSummaryBlocks(aiResponse)) {
-    for (let repairAttempt = 0; repairAttempt < MIN_RETRY_COUNT; repairAttempt++) {
-      try {
-        const strict = await openai.chat.completions.create({
-          model: "gpt-4o-mini",
-          messages: [{ role: "system", content: buildRepairPrompt(level, state) + "\n\n不足ブロックがある場合は必ず補完して、全ブロックを完成させてください。" }, ...summaryContextMessages],
-          temperature: 0.7,
-          max_tokens: 1000,
-        });
-        const repaired = strict.choices?.[0]?.message?.content ?? "";
-        if (repaired && hasAllSummaryBlocks(repaired)) {
-          aiResponse = repaired;
-          break;
-        }
-      } catch (_) {}
-    }
+  let aiResponse = (await openai.chat.completions.create({ model: "gpt-4o-mini", messages: summaryOnlyMessages, temperature: 0.7, max_tokens: 1000 })).choices?.[0]?.message?.content ?? "";
+  if (!hasAllSummaryBlocks(aiResponse)) {
+    const strict = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "system", content: buildRepairPrompt(level, state) + "\n\n不足ブロックがある場合は必ず補完して、全ブロックを完成させてください。" }, ...summaryContextMessages],
+      temperature: 0.7,
+      max_tokens: 1000,
+    });
+    aiResponse = strict.choices?.[0]?.message?.content ?? aiResponse ?? "";
   }
   if (level !== "🔴" && isHospitalFlow(aiResponse)) {
     const repair = await openai.chat.completions.create({
@@ -9310,17 +9252,9 @@ async function generateSummaryForConfirmation(conversationId) {
   aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
   let immediateActionPlan = null;
   if (level === "🟢" || level === "🟡") {
-    for (let attempt = 0; attempt < MIN_RETRY_COUNT; attempt++) {
-      try {
-        immediateActionPlan = await buildImmediateActionHypothesisPlan(state, historyTextForOtc, aiResponse);
-        if (immediateActionPlan?.actions?.length) break;
-      } catch (e) {
-        if (attempt < MIN_RETRY_COUNT - 1) {
-          await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
-        }
-      }
-    }
-    if (!immediateActionPlan?.actions?.length) {
+    try {
+      immediateActionPlan = await buildImmediateActionHypothesisPlan(state, historyTextForOtc, aiResponse);
+    } catch (e) {
       immediateActionPlan = await buildImmediateActionFallbackPlanFromState(state);
     }
     aiResponse = normalizeStateBlockForGreenYellow(aiResponse, state);
@@ -9328,15 +9262,10 @@ async function generateSummaryForConfirmation(conversationId) {
   }
   if (level === "🔴") {
     state.decisionLevel = "🔴";
-    for (let attempt = 0; attempt < MIN_RETRY_COUNT; attempt++) {
-      try {
-        immediateActionPlan = await buildImmediateActionHypothesisPlan(state, historyTextForOtc, aiResponse);
-        if (immediateActionPlan?.actions?.length) break;
-      } catch (_) {
-        if (attempt < MIN_RETRY_COUNT - 1) {
-          await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
-        }
-      }
+    try {
+      immediateActionPlan = await buildImmediateActionHypothesisPlan(state, historyTextForOtc, aiResponse);
+    } catch (_) {
+      immediateActionPlan = null;
     }
   }
   aiResponse = ensureOutlookBlock(aiResponse, state);
@@ -9398,39 +9327,31 @@ async function generateSummaryForConfirmation(conversationId) {
   return { message: aiResponse || "", followUpQuestion, followUpMessage: null };
   } catch (err) {
     console.error("[generateSummaryForConfirmation Error]", err?.message || err);
-    for (let retryAttempt = 0; retryAttempt < MIN_RETRY_COUNT; retryAttempt++) {
-      try {
-        if (retryAttempt > 0) await new Promise((r) => setTimeout(r, 500 * retryAttempt));
-        const fallback = await buildLocalSummaryFallback(level, history, state);
-        if (fallback) {
-          const fq = state.decisionLevel === "🔴" ? buildRedFollowUpQuestion() : WATCHFUL_FOLLOW_UP_QUESTION;
-          return { message: fallback, followUpQuestion: fq, followUpMessage: null };
-        }
-      } catch (fallbackErr) {
-        if (retryAttempt === MIN_RETRY_COUNT - 1) {
-          console.error("[generateSummaryForConfirmation Fallback Error]", fallbackErr?.message || fallbackErr);
-        }
-      }
+    try {
+      const fallback = await buildLocalSummaryFallback(level, history, state);
+      return { message: fallback || "", followUpQuestion: null, followUpMessage: null };
+    } catch (fallbackErr) {
+      console.error("[generateSummaryForConfirmation Fallback Error]", fallbackErr?.message || fallbackErr);
+      const stateBullets = buildStateFactsBullets(state);
+      const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "今の情報から見ると、\n\nという状況です。";
+      const minimal = [
+        `${level} ここまでの情報を整理します`,
+        buildSummaryIntroTemplate(),
+        "",
+        "🤝 今の状態について",
+        stateBlock,
+        "",
+        "✅ 今すぐやること",
+        "・無理をせず、安静を優先してください",
+        "",
+        "⏳ 今後の見通し",
+        "症状の変化には気をつけて、悪化したら再度ご相談ください。",
+        "",
+        "🌱 最後に",
+        "また不安になったら、いつでもここで聞いてください。",
+      ].join("\n");
+      return { message: minimal, followUpQuestion: null, followUpMessage: null };
     }
-    const stateBullets = buildStateFactsBullets(state);
-    const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "";
-    const minimal = [
-      `${level} ここまでの情報を整理します`,
-      buildSummaryIntroTemplate(),
-      "",
-      "🤝 今の状態について",
-      stateBlock,
-      "",
-      "✅ 今すぐやること",
-      "・無理をせず、安静を優先してください",
-      "",
-      "⏳ 今後の見通し",
-      "症状の変化には気をつけて、悪化したら再度ご相談ください。",
-      "",
-      "🌱 最後に",
-      "また不安になったら、いつでもここで聞いてください。",
-    ].join("\n");
-    return { message: minimal, followUpQuestion: null, followUpMessage: null };
   }
 }
 
@@ -9634,7 +9555,7 @@ app.post("/api/chat", async (req, res) => {
           console.error("[ConfirmationSummary Fallback Error]", fallbackError?.message || fallbackError);
           const level = finalizeRiskLevel(state);
           const stateBullets = buildStateFactsBullets(state);
-          const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "";
+          const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "今の情報から見ると、\n\nという状況です。";
           summaryMsg = [
             `${level} ここまでの情報を整理します`,
             buildSummaryIntroTemplate(),
@@ -9656,7 +9577,7 @@ app.post("/api/chat", async (req, res) => {
       if (!summaryMsg || summaryMsg.trim().length === 0) {
         const level = finalizeRiskLevel(state);
         const stateBullets = buildStateFactsBullets(state);
-        const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "";
+        const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "今の情報から見ると、\n\nという状況です。";
         summaryMsg = [
           `${level} ここまでの情報を整理します`,
           buildSummaryIntroTemplate(),
@@ -10226,26 +10147,16 @@ app.post("/api/chat", async (req, res) => {
       conversationHistory[conversationId],
       conversationState[conversationId]
     );
-    let aiResponse = "";
-    for (let llmAttempt = 0; llmAttempt < MIN_RETRY_COUNT; llmAttempt++) {
-      try {
-        const completion = await openai.chat.completions.create({
-          model: "gpt-4o-mini",
-          messages: [
-            ...structuredConversation,
-            { role: "system", content: scoreContext },
-          ],
-          temperature: 0.7,
-          max_tokens: 1000,
-        });
-        aiResponse = completion?.choices?.[0]?.message?.content ?? "";
-        if (aiResponse) break;
-      } catch (_) {
-        if (llmAttempt < MIN_RETRY_COUNT - 1) {
-          await new Promise((r) => setTimeout(r, 300 * (llmAttempt + 1)));
-        }
-      }
-    }
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini", // Cost-effective model
+      messages: [
+        ...structuredConversation,
+        { role: "system", content: scoreContext },
+      ],
+      temperature: 0.7,
+      max_tokens: 1000,
+    });
+    let aiResponse = completion.choices[0].message.content;
 
     // 判定確定トリガー発動時は、まとめを強制生成（初回のみ）
     if (shouldJudgeNow && !conversationState[conversationId].summaryShown) {
