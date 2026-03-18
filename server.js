@@ -676,13 +676,6 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 
 ✅ 今すぐやること
 
-必ず以下の順番で出力すること：
-① なぜそれでいいのか（安心の土台・2文以内）
-  - 現在の状態は一時的な変化である可能性があるという一般的説明
-  - 今の段階では刺激を減らすことが合理的である、という理由提示
-  - 診断・断定禁止。「かもしれません」は最大1回
-② 今すぐやること（具体・最大3項目）
-  - 各項目は「・<行動>」＋「→ <理由>」の2行セット
 
 今日は次の3つだけ意識してください。
 
@@ -966,14 +959,9 @@ ${stateContext ? `\n${stateContext}\n` : ""}
    - 「だから今日はこれでいいですよ」を必ず含める
 4) Kairoとしての判断（「今の情報を見る限り」「現時点では」の前置き必須）
 
-✅ 今すぐやること（順番厳守）：
-① なぜそれでいいのか（安心の土台・2文以内）を必ず先に出す
-  - 現在の状態は一時的な変化である可能性があるという一般的説明
-  - 今の段階では刺激を減らすことが合理的である、という理由提示
-  - 診断・断定禁止。「かもしれません」は最大1回
-② 今すぐやること（具体・最大3項目）
+✅ 今すぐやること：
 - 項目は最大3つ
-- 各項目は「・<行動>」＋「→ <理由>」の2行セット
+- 各項目は「行動 + 理由（1文）」のセット
 ${stateContext ? "- 上記【🤝 今の状態について】の内容を必ず反映し、その状態に即した具体的な行動を出す（テンプレ・汎用表現は禁止）\n" : ""}- 理由は不安を下げる説明に限定（正しさの証明・詳細な医学説明は禁止）
 - 口調はやわらかく、選択肢を残す
   - 「〜してみてください」「〜すると楽になることがあります」を使う
@@ -3371,23 +3359,6 @@ function pickActionsForBlock(plan, maxCount = 3) {
   return picked;
 }
 
-/** 最小フォールバック用：①＋②（1件）＋③＋④の✅ブロック本文 */
-function buildMinimalImmediateBlockContent() {
-  const why = buildWhySection({});
-  const course = buildExpectedCourse({});
-  const closing = buildClosingLine();
-  return [
-    why,
-    "",
-    "・無理をせず、安静を優先してください",
-    "→ 体を休めることで、回復の流れが働きやすくなります。",
-    "",
-    course,
-    "",
-    closing,
-  ].join("\n");
-}
-
 /** ① なぜそれでいいのか（安心の土台・2文以内） */
 function buildWhySection(context = {}) {
   const location = String(context?.location || context?.mainSymptom || "症状").trim();
@@ -3985,38 +3956,26 @@ function buildSummaryIntroTemplate() {
 function enforceSummaryIntroTemplate(text) {
   if (!text) return text;
   const lines = text.split("\n");
-  const headerIndex = lines.findIndex((line) => {
-    const t = line.trim();
-    return t.startsWith("🟢 ここまでの情報を整理します") || t.startsWith("🟡 ここまでの情報を整理します");
-  });
+  const headerIndex = lines.findIndex((line) =>
+    line.startsWith("🟢 ここまでの情報を整理します") ||
+    line.startsWith("🟡 ここまでの情報を整理します")
+  );
   if (headerIndex === -1) return text;
   const templateLine = buildSummaryIntroTemplate();
   const nextBlockIndex = lines.findIndex(
     (line, idx) =>
       idx > headerIndex &&
-      (line.trim().startsWith("🤝") ||
-        line.trim().startsWith("✅") ||
-        line.trim().startsWith("⏳") ||
-        line.trim().startsWith("🏥") ||
-        line.trim().startsWith("💊") ||
-        line.trim().startsWith("🌱") ||
-        line.trim().startsWith("💬"))
+      (line.startsWith("🤝 ") ||
+        line.startsWith("✅ ") ||
+        line.startsWith("⏳ ") ||
+        line.startsWith("🏥 ") ||
+        line.startsWith("💊 ") ||
+        line.startsWith("🌱 ") ||
+        line.startsWith("💬 "))
   );
   const bodyStart = headerIndex + 1;
   const bodyEnd = nextBlockIndex >= 0 ? nextBlockIndex : lines.length;
-  const bodyLines = lines.slice(bodyStart, bodyEnd);
-  const bulletLines = bodyLines.filter((l) => /^[・•]\s*/.test(l.trim()) || /^\s*・\s*/.test(l));
-  const hasBullets = bulletLines.length > 0;
   lines.splice(bodyStart, bodyEnd - bodyStart, templateLine);
-  if (hasBullets) {
-    const handIndex = lines.findIndex(
-      (l, i) => i > bodyStart && l.trim().startsWith("🤝")
-    );
-    if (handIndex >= 0) {
-      const insertAt = handIndex + 1;
-      bulletLines.forEach((bl, i) => lines.splice(insertAt + i, 0, bl));
-    }
-  }
   return lines.join("\n");
 }
 
@@ -7161,19 +7120,15 @@ async function buildDiseaseSafetyFilteredMessage(
   }
   rare_emergency = rare_emergency.slice(0, 2);
 
-  const COMMON_SYMPTOM_REASSURANCE_PRIORITY = "このような症状は、多くの人にも見られる比較的よくあるものです。";
-  const COMMON_SYMPTOM_REASSURANCE_OTHERS = [
+  const COMMON_SYMPTOM_REASSURANCE = [
+    "このような症状は、多くの人にも見られる比較的よくあるものです。",
     "今回のような症状は、特別なものではなく、日常的によく見られるケースのひとつです。",
     "このパターンの症状は、多くの方が経験する一般的なものに当てはまる可能性があります。",
   ];
-  const reassuranceText =
-    Math.random() < 0.6
-      ? COMMON_SYMPTOM_REASSURANCE_PRIORITY
-      : COMMON_SYMPTOM_REASSURANCE_OTHERS[Math.floor(Math.random() * COMMON_SYMPTOM_REASSURANCE_OTHERS.length)];
   const reassuranceCommon =
     level === "🔴"
       ? "今のあなたは🟡の可能性もないとは言えません。なので、確認をするためにも受診をおすすめします。"
-      : `${mainSymptom}のほとんどは命に関わるものではありません。特に、急激な悪化や神経症状がなければ、よくあるタイプの可能性が高いです。\n\n${reassuranceText}`;
+      : `${mainSymptom}のほとんどは命に関わるものではありません。特に、急激な悪化や神経症状がなければ、よくあるタイプの可能性が高いです。\n\n${COMMON_SYMPTOM_REASSURANCE[Math.floor(Math.random() * COMMON_SYMPTOM_REASSURANCE.length)]}`;
 
   const redVisitReasonsBullets = level === "🔴" && state ? buildRedVisitReasonsBullets(state) : [];
 
@@ -9410,10 +9365,6 @@ async function generateSummaryForConfirmation(conversationId) {
   aiResponse = correctKanjiAndTypos(aiResponse);
   aiResponse = enforceSummaryIntroTemplate(aiResponse);
   aiResponse = await enforceSummaryStructureStrict(aiResponse, level, history, state);
-  if (level === "🟢" || level === "🟡") {
-    aiResponse = await ensureImmediateActionsBlock(aiResponse, level, state, historyTextForOtc, immediateActionPlan);
-    aiResponse = ensurePainInfectionYellowFirstAction(aiResponse, level, state);
-  }
   aiResponse = stripInfectionOnlineClinicGuidance(aiResponse, state);
   aiResponse = stripHospitalMapLinks(aiResponse);
   aiResponse = stripMcForRed(aiResponse, level);
@@ -9470,7 +9421,8 @@ async function generateSummaryForConfirmation(conversationId) {
       "🤝 今の状態について",
       stateBlock,
       "",
-      `✅ 今すぐやること\n${buildMinimalImmediateBlockContent()}`,
+      "✅ 今すぐやること",
+      "・無理をせず、安静を優先してください",
       "",
       "⏳ 今後の見通し",
       "症状の変化には気をつけて、悪化したら再度ご相談ください。",
@@ -9635,10 +9587,7 @@ app.post("/api/chat", async (req, res) => {
 
     // 確認文の後は必ずまとめ。仕様: 確認文は出すだけ。まとめは確認文表示と同時に生成開始。ユーザー応答時はまとめを出すだけ。
     // 最重要: まとめは1回しか出力しない。summaryShown が既に true なら絶対にまとめを出さない。
-    // 絶対ルール8.2: 初回ユーザーメッセージ（1通目）ではサマリー・フォローを絶対に返さない。確認文への応答（7通目以降）でのみまとめを出す。
-    const userMessageCountBeforeAdd = (conversationHistory[conversationId] || []).filter((m) => m.role === "user").length;
-    const mayShowSummary = isWaitingForConfirmationResponse && !conversationState[conversationId].summaryShown && userMessageCountBeforeAdd >= 1;
-    if (mayShowSummary) {
+    if (isWaitingForConfirmationResponse && !conversationState[conversationId].summaryShown) {
       conversationState[conversationId].confirmationPending = false;
       conversationState[conversationId].expectsCorrectionReason = false;
       conversationHistory[conversationId].push({ role: "user", content: message });
@@ -9693,7 +9642,8 @@ app.post("/api/chat", async (req, res) => {
             "🤝 今の状態について",
             stateBlock,
             "",
-            `✅ 今すぐやること\n${buildMinimalImmediateBlockContent()}`,
+            "✅ 今すぐやること",
+            "・無理をせず、安静を優先してください",
             "",
             "⏳ 今後の見通し",
             "症状の変化には気をつけて、悪化したら再度ご相談ください。",
@@ -9714,7 +9664,8 @@ app.post("/api/chat", async (req, res) => {
           "🤝 今の状態について",
           stateBlock,
           "",
-          `✅ 今すぐやること\n${buildMinimalImmediateBlockContent()}`,
+          "✅ 今すぐやること",
+          "・無理をせず、安静を優先してください",
           "",
           "⏳ 今後の見通し",
           "症状の変化には気をつけて、悪化したら再度ご相談ください。",
@@ -10527,16 +10478,6 @@ app.post("/api/chat", async (req, res) => {
         conversationHistory[conversationId],
         conversationState[conversationId]
       );
-      if (level === "🟢" || level === "🟡") {
-        aiResponse = await ensureImmediateActionsBlock(
-          aiResponse,
-          level,
-          conversationState[conversationId],
-          historyTextForOtc,
-          immediateActionPlan
-        );
-        aiResponse = ensurePainInfectionYellowFirstAction(aiResponse, level, conversationState[conversationId]);
-      }
       aiResponse = stripInfectionOnlineClinicGuidance(
         aiResponse,
         conversationState[conversationId]
