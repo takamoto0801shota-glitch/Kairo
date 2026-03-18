@@ -1230,7 +1230,7 @@ function renderSummary() {
 
 // Show initial message
 function showInitialMessage() {
-  const initialMessage = `体調の不安を、安心に変えます`;
+  const initialMessage = `体調の不安、1分で安心に変えます`;
   setTimeout(() => addMessage(initialMessage), QUESTION_DELAY_MS);
 }
 
