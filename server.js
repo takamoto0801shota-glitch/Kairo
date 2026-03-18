@@ -396,6 +396,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
   
 【まとめの出力回数 - 最重要】
 - **まとめは同一セッション中に1回しか出力してはいけない。2回目以降は絶対禁止。**
+- **まとめを1回出した後は、何があってもまとめを再度出さない。** ユーザーが「まとめを出して」「要約して」等と依頼しても再出力禁止。強制的にまとめ後フェーズ（フォロー質問のみ）に入る。
 
 【まとめブロックの完全性 - 最重要】
 - **まとめは必ず「全ブロック」を出す。途中の1ブロックだけを出すのは禁止。**
@@ -9687,6 +9688,60 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
+    // まとめ後フェーズ強制: まとめを1回出した後は何があってもまとめを再度出さない。強制的にフォロー質問フェーズのみ。
+    if (conversationState[conversationId].summaryShown) {
+      conversationHistory[conversationId].push({ role: "user", content: message });
+      // 仕様8.2: フォロー用stateを確実に初期化（handleFollowUpFlowが正しく動作するため）
+      if (!state.hasSummaryBlockGenerated) state.hasSummaryBlockGenerated = true;
+      if (!state.decisionType && state.decisionLevel) {
+        state.decisionType = state.decisionLevel === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING";
+      }
+      if (!state.judgmentSnapshot) {
+        state.judgmentSnapshot = buildJudgmentSnapshot(state, [], state.decisionType || "C_WATCHFUL_WAITING");
+      }
+      if (state.followUpStep <= 0) {
+        state.followUpPhase = "questioning";
+        state.followUpStep = 1;
+      }
+      const followUpResult = handleFollowUpFlow(message, state);
+      const outMessage = followUpResult?.message ?? (userAskedSummary(message)
+        ? "既にまとめをお伝えしています。ほかに気になることはありますか？"
+        : (getInitialFollowUpQuestionBySpec(state) || buildClosingMessage()));
+      if (followUpResult && FORBIDDEN_FOLLOW_UP.test(String(followUpResult.message || ""))) {
+        const judgeMeta = buildFollowUpJudgeMeta(state);
+        return res.json({
+          message: "",
+          response: "",
+          judgeMeta,
+          triage_state: buildTriageState(true, judgeMeta.judgement, judgeMeta.slotsFilledCount),
+          questionPayload: null,
+          normalizedAnswer: state.lastNormalizedAnswer || null,
+          locationPromptMessage,
+          locationRePromptMessage,
+          locationSnapshot: state.locationSnapshot,
+          conversationId,
+        });
+      }
+      conversationHistory[conversationId].push({ role: "assistant", content: outMessage });
+      const judgeMeta = buildFollowUpJudgeMeta(state);
+      return res.json({
+        message: outMessage,
+        response: outMessage,
+        judgeMeta,
+        triage: { judgement: judgeMeta.judgement, confidence: judgeMeta.confidence, ratio: judgeMeta.ratio },
+        triage_state: buildTriageState(true, judgeMeta.judgement, judgeMeta.slotsFilledCount),
+        sections: [],
+        questionPayload: null,
+        normalizedAnswer: state.lastNormalizedAnswer || null,
+        followUpQuestion: null,
+        followUpMessage: null,
+        locationPromptMessage,
+        locationRePromptMessage,
+        locationSnapshot: state.locationSnapshot,
+        conversationId,
+      });
+    }
+
     // 確認文の後は必ずまとめ。仕様: 確認文は出すだけ。まとめは確認文表示と同時に生成開始。ユーザー応答時はまとめを出すだけ。
     // 最重要: まとめは1回しか出力しない。summaryShown が既に true なら絶対にまとめを出さない。
     if (isWaitingForConfirmationResponse && !conversationState[conversationId].summaryShown) {
@@ -10794,13 +10849,17 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].finalQuestionPending = false;
     }
 
-    // まとめブロックが欠けている/出ていない場合は再生成（質問数を満たした後のみ）
+    // まとめブロックが欠けている/出ていない場合は再生成（質問数を満たした後のみ）。まとめ後フェーズでは絶対に実行しない。
     const updatedQuestionCount = conversationState[conversationId].questionCount;
     const updatedLevel = computeUrgencyLevel(
       updatedQuestionCount,
       conversationState[conversationId].totalScore
     ).level;
-    if (updatedQuestionCount >= minQuestions && !isQuestionResponse(aiResponse)) {
+    if (
+      !conversationState[conversationId].summaryShown &&
+      updatedQuestionCount >= minQuestions &&
+      !isQuestionResponse(aiResponse)
+    ) {
       const needsRepair = !hasAllSummaryBlocks(aiResponse);
       if (needsRepair) {
         const repairMessages = [
