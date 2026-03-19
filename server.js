@@ -8,8 +8,8 @@ const path = require("path");
 const app = express();
 const PORT = process.env.PORT || 3000;
 const IS_DEBUG = false;
-/** フォールバックを廃止。LLM で必ず成功するようリトライ・工夫する。 */
-const LLM_RETRY_COUNT = 15;
+/** フォールバックを廃止。LLM で必ず成功するようリトライ・工夫する。失敗時は10回までリトライ。 */
+const LLM_RETRY_COUNT = 11;
 
 // Middleware
 app.use(cors());
@@ -9749,7 +9749,7 @@ app.post("/api/chat", async (req, res) => {
     let state = getOrInitConversationState(conversationId);
     const userMessageCountBefore = (conversationHistory[conversationId] || []).filter((m) => m.role === "user").length;
     // フォールバック: 初回メッセージなのに古い状態（まとめ済み・スロット埋まり）が残っている場合は強制リセット
-    if (userMessageCountBefore === 0 && state && (state.summaryShown || countFilledSlots(state.slotFilled, state) >= 6)) {
+    if (userMessageCountBefore === 0 && state && (state.summaryShown || countFilledSlots(state.slotFilled, state) >= getRequiredSlotCount(state))) {
       delete conversationHistory[conversationId];
       delete conversationState[conversationId];
       conversationHistory[conversationId] = [{ role: "system", content: SYSTEM_PROMPT }];
@@ -9797,10 +9797,14 @@ app.post("/api/chat", async (req, res) => {
     const isFirstUserMessage = userMessageCountBefore === 0;
     const triageCompleted = filledBeforeTurn >= getRequiredSlotCount(state) || !!state.decisionLevel;
     const summaryGenerated = !!conversationState[conversationId].summaryShown;
+    const history = conversationHistory[conversationId] || [];
+    const lastAssistantMsg = [...history].reverse().find((m) => m.role === "assistant")?.content || "";
+    const lastMsgLooksLikeConfirmation = /合っていますか|この整理で|よろしければ/.test(lastAssistantMsg);
     const isWaitingForConfirmationResponse =
       conversationState[conversationId].confirmationPending ||
       conversationState[conversationId].expectsCorrectionReason ||
-      (conversationState[conversationId].confirmationShown && !conversationState[conversationId].summaryShown);
+      (conversationState[conversationId].confirmationShown && !conversationState[conversationId].summaryShown) ||
+      (filledBeforeTurn >= getRequiredSlotCount(state) && !conversationState[conversationId].summaryShown && lastMsgLooksLikeConfirmation);
 
     console.log({
       step: userMessageCountBefore,
@@ -9911,9 +9915,11 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    // 確認文の後は必ずまとめ。仕様: 確認文は出すだけ。まとめは確認文表示と同時に生成開始。ユーザー応答時はまとめを出すだけ。
+    // 確認文の後: ユーザーが応答した場合のみまとめを画面表示。生成は確認文と同時に開始済み（早く終わっていればそのまま待機していた）。
     // 最重要: まとめ再生成の完全禁止。summaryShown が true の場合は絶対にここに入らない（上で return 済み）。
+    // 強制: 確認応答時は必ずまとめを返す。いかなるエラーでもまとめを出し切る。
     if (isWaitingForConfirmationResponse && !conversationState[conversationId].summaryShown) {
+      try {
       conversationState[conversationId].confirmationPending = false;
       conversationState[conversationId].expectsCorrectionReason = false;
       conversationHistory[conversationId].push({ role: "user", content: message });
@@ -10004,11 +10010,15 @@ app.post("/api/chat", async (req, res) => {
         ].join("\n");
       }
       summaryMsg = ensureGreenHeaderForYellow(summaryMsg, finalizeRiskLevel(state));
+      const finalRisk = conversationState[conversationId].decisionLevel || finalizeRiskLevel(conversationState[conversationId]);
+      if (!summaryMsg || summaryMsg.trim().length === 0) {
+        console.error("[ConfirmationSummary] まとめが空です。強制フォールバックを適用します。");
+        summaryMsg = `${finalRisk} ここまでの情報を整理します\n${buildSummaryIntroTemplate()}\n\n症状の変化には気をつけて、悪化したら再度ご相談ください。`;
+      }
       conversationState[conversationId].summaryText = summaryMsg;
       conversationState[conversationId].summaryShown = true;
       conversationState[conversationId].hasSummaryBlockGenerated = true;
       conversationHistory[conversationId].push({ role: "assistant", content: summaryMsg });
-      const finalRisk = conversationState[conversationId].decisionLevel || finalizeRiskLevel(conversationState[conversationId]);
       const sections = extractSectionsBySpecs(summaryMsg, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text);
       const slotsFilledCount = countFilledSlots(state.slotFilled, state);
       const decisionAllowed = slotsFilledCount >= getRequiredSlotCount(state);
@@ -10033,13 +10043,45 @@ app.post("/api/chat", async (req, res) => {
         sections,
         questionPayload: null,
         normalizedAnswer: state.lastNormalizedAnswer || null,
-        followUpQuestion: shouldSendFollowUpQuestion(sections) ? (followUpQ || null) : null,
+        followUpQuestion: shouldSendFollowUpQuestion(sections) ? (followUpQ || (finalRisk === "🔴" ? buildRedFollowUpQuestion() : WATCHFUL_FOLLOW_UP_QUESTION)) : null,
         followUpMessage: null,
         locationPromptMessage,
         locationRePromptMessage: null,
         locationSnapshot: state.locationSnapshot,
         conversationId,
       });
+      } catch (confirmErr) {
+        console.error("[ConfirmationSummary 強制フォールバック]", confirmErr?.message || confirmErr);
+        const level = finalizeRiskLevel(state);
+        const hist = conversationHistory[conversationId] || [];
+        let fallbackSummary = "";
+        try {
+          fallbackSummary = await buildLocalSummaryFallback(level, hist, state);
+        } catch (e) {
+          fallbackSummary = `${level} ここまでの情報を整理します\n${buildSummaryIntroTemplate()}\n\n症状の変化には気をつけて、悪化したら再度ご相談ください。`;
+        }
+        conversationState[conversationId].summaryText = fallbackSummary;
+        conversationState[conversationId].summaryShown = true;
+        conversationState[conversationId].hasSummaryBlockGenerated = true;
+        const finalRisk = conversationState[conversationId].decisionLevel || level;
+        const sections = extractSectionsBySpecs(fallbackSummary, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text);
+        return res.json({
+          message: fallbackSummary,
+          response: fallbackSummary,
+          judgeMeta: { judgement: finalRisk, confidence: state.confidence || 0, ratio: state.decisionRatio ?? 0, shouldJudge: true, slotsFilledCount: countFilledSlots(state.slotFilled, state), decisionAllowed: true, questionCount: state.questionCount || 0, summaryLine: extractSummaryLine(fallbackSummary), questionType: null, rawScore: state.lastPainScore, painScoreRatio: state.lastPainWeight },
+          triage: { judgement: finalRisk, confidence: state.confidence || 0, ratio: state.decisionRatio ?? 0, shouldJudge: true },
+          triage_state: buildTriageState(true, finalRisk, countFilledSlots(state.slotFilled, state)),
+          sections,
+          questionPayload: null,
+          normalizedAnswer: state.lastNormalizedAnswer || null,
+          followUpQuestion: shouldSendFollowUpQuestion(sections) ? (finalRisk === "🔴" ? buildRedFollowUpQuestion() : WATCHFUL_FOLLOW_UP_QUESTION) : null,
+          followUpMessage: null,
+          locationPromptMessage,
+          locationRePromptMessage: null,
+          locationSnapshot: state.locationSnapshot,
+          conversationId,
+        });
+      }
     }
 
     // confirmationShown && !summaryShown の場合は確認待ち。フォローアップで閉じメッセージを返さない。
@@ -10342,20 +10384,20 @@ app.post("/api/chat", async (req, res) => {
 
     // Call OpenAI API
     const minQuestions = 5;
-    const maxQuestions = 7;
     const currentQuestionCount = conversationState[conversationId].questionCount;
     const { ratio, level, confidence, shouldJudge, slotsFilledCount } = judgeDecision(
       conversationState[conversationId]
     );
-    // 強制仕様: 全スロット充填完了、または質問が全て完了した時のみ判定・まとめを許可（バックグラウンド先行生成なし）
+    // 強制仕様: 全スロット充填完了、またはカテゴリ別の全質問完了時のみ判定・まとめを許可
     const requiredCount = getRequiredSlotCount(conversationState[conversationId]);
     const decisionAllowed = slotsFilledCount >= requiredCount;
-    const questionsCompleted = currentQuestionCount >= maxQuestions;
+    // カテゴリ・場合によりスロット数が異なる（PAIN/GI/SKIN=5, INFECTION=6, worsening_trend ありで+1等）
+    const questionsCompleted = currentQuestionCount >= requiredCount;
     // 絶対ルール: 初回ユーザーターンでは絶対にまとめを出さない（2ターン未満も禁止）
     const minUserTurnsForSummary = 2;
     const canShowSummary = !isFirstUserTurn && userTurnCount >= minUserTurnsForSummary;
+    // 仕様: 「全スロット埋まり」OR「カテゴリ別の全質問完了」のどちらかで強制的に確認文＋まとめへ
     const shouldJudgeNow =
-      shouldJudge &&
       canShowSummary &&
       (decisionAllowed || questionsCompleted);
     const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled, conversationState[conversationId]);
@@ -10482,7 +10524,7 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    // 6スロット完了時: 確認文を出すだけ。まとめは確認文表示と同時に生成開始（仕様厳守）。
+    // 6スロット完了時: 確認文を出すだけ。まとめは確認文と同時に生成開始。表示はユーザー応答時のみ。
     if (shouldJudgeNow && !conversationState[conversationId].confirmationShown && !conversationState[conversationId].summaryShown) {
       const confirmMsg = buildPreSummaryConfirmationMessage(
         conversationState[conversationId]
@@ -10492,7 +10534,7 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].confirmationShown = true;
       conversationState[conversationId].lastOptions = [];
       conversationState[conversationId].lastQuestionType = null;
-      // 全スロット埋まり or 質問完了時のみここに到達。未開始なら強制的に開始。
+      // 確認文と同時にまとめ生成を開始。早く終わっても待機。ユーザーが応答した場合のみ画面に表示する。
       if (!conversationState[conversationId].summaryGenerationPromise) {
         conversationState[conversationId].summaryGenerationPromise = generateSummaryForConfirmation(conversationId);
       }
@@ -10553,7 +10595,7 @@ app.post("/api/chat", async (req, res) => {
       };
       res.locals.isFixedQuestion = true;
     }
-    const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n判断スロット埋まり数: ${slotsFilledCount}/6\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n緊急度判定は「危険フラグ優先モデル」を使用する（Phase1: 即時RED条件 / Phase2: 重症指数）。\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が7以上、または判断スロットが6つ埋まった時点で必ず判定・まとめへ移行する。\n※内部計算はユーザーに表示しないこと。最終判断はまとめ直前の1回のみ実行すること。`;
+    const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n判断スロット埋まり数: ${slotsFilledCount}/${requiredCount}\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n緊急度判定は「危険フラグ優先モデル」を使用する（Phase1: 即時RED条件 / Phase2: 重症指数）。\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が${requiredCount}以上、または判断スロットが${requiredCount}つ全て埋まった時点で必ず判定・まとめへ移行する。\n※内部計算はユーザーに表示しないこと。最終判断はまとめ直前の1回のみ実行すること。`;
     const structuredConversation = buildStructuredConversationForLlm(
       conversationHistory[conversationId],
       conversationState[conversationId]
@@ -10970,11 +11012,11 @@ app.post("/api/chat", async (req, res) => {
       }
     }
 
-    // 最後の質問は「最後に〜」で始める（AIが終盤と判断した場合）
+    // 最後の質問は「最後に〜」で始める（AIが終盤と判断した場合）。カテゴリ別の質問数に合わせる
     if (
       !shouldJudgeNow &&
       currentQuestionCount >= minQuestions &&
-      currentQuestionCount < 7 &&
+      currentQuestionCount < requiredCount &&
       missingSlots.length === 1 &&
       isQuestionResponse(aiResponse) &&
       !hasFinalQuestionPrefix(aiResponse)
@@ -11131,7 +11173,12 @@ app.post("/api/chat", async (req, res) => {
     const state = cid ? conversationState[cid] : null;
     const history = cid ? conversationHistory[cid] || [] : [];
     const filled = state ? countFilledSlots(state.slotFilled, state) : 0;
-    if (state && filled >= getRequiredSlotCount(state)) {
+    const wasWaitingForSummary = state && (state.confirmationShown && !state.summaryShown);
+    if (state && (filled >= getRequiredSlotCount(state) || wasWaitingForSummary)) {
+      const msg = (req.body && req.body.message) || "";
+      if (msg && history.length > 0 && history[history.length - 1]?.role !== "user") {
+        history.push({ role: "user", content: msg });
+      }
       const level = state.decisionLevel || finalizeRiskLevel(state);
       const localFallback = await buildLocalSummaryFallback(level, history, state);
       const fallbackSummary = await enforceSummaryStructureStrict(
@@ -11155,6 +11202,12 @@ app.post("/api/chat", async (req, res) => {
         level === "🔴"
           ? buildRedFollowUpQuestion()
           : WATCHFUL_FOLLOW_UP_QUESTION;
+      if (state) {
+        state.summaryShown = true;
+        state.hasSummaryBlockGenerated = true;
+        state.summaryText = fallbackSummary;
+        if (history.length > 0) history.push({ role: "assistant", content: fallbackSummary });
+      }
       return res.status(200).json({
         conversationId: cid,
         message: fallbackSummary,

@@ -1234,12 +1234,13 @@ function hideSummaryCard() {
   }
 }
 
-// Call OpenAI API
+// Call OpenAI API（失敗時は10回までリトライ）
+const API_RETRY_COUNT = 11;
 async function callOpenAI(message, resetSession = false) {
   const conversationId = getConversationId();
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   let lastError = null;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < API_RETRY_COUNT; attempt += 1) {
     try {
       const response = await fetch(API_URL, {
         method: "POST",
@@ -1261,6 +1262,12 @@ async function callOpenAI(message, resetSession = false) {
       });
 
       if (!response.ok) {
+        // 5xx はリトライ、4xx は即フォールバック
+        if (response.status >= 500 && attempt < API_RETRY_COUNT - 1) {
+          const delayMs = 1000 * (attempt + 1);
+          await sleep(delayMs);
+          continue;
+        }
         // UXは止めない。サーバー側が復旧するまでの間も、会話を継続するための固定フォールバックを返す。
         let debug = `HTTP error! status: ${response.status}`;
         try {
@@ -1287,8 +1294,9 @@ async function callOpenAI(message, resetSession = false) {
       return data;
     } catch (error) {
       lastError = error;
-      if (attempt === 0) {
-        await sleep(1000);
+      if (attempt < API_RETRY_COUNT - 1) {
+        const delayMs = 1000 * (attempt + 1);
+        await sleep(delayMs);
         continue;
       }
     }
@@ -1328,7 +1336,8 @@ async function handleUserInput() {
 
   if (!userText) return;
   appState.userHasSubmitted = true;
-  const resetSession = !appState.hasUserSentMessageThisSession;
+  // 既存の会話IDがある場合はリセットしない（リフレッシュ後も確認応答→まとめが途切れないように）
+  const resetSession = !appState.hasUserSentMessageThisSession && !getConversationId();
   appState.hasUserSentMessageThisSession = true;
 
   // Disable input
