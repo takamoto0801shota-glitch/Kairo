@@ -679,17 +679,7 @@ async function showConcreteActionDetails(blockContent) {
   } catch (error) {
     console.error("行動具体化モーダル生成エラー:", error);
     setConcreteModalBody(
-      [
-        "いまの経過であれば、少し力を抜いて体の負担を整える時間として受け止められます。",
-        "",
-        "■今すぐやること",
-        "・刺激を1つ減らし、水分を150〜200mlとって4〜6時間の変化を見てください",
-        "→ 体への負荷要因を減らすと、症状のぶれを把握しやすくなります。",
-        "",
-        "■やらないほうがいいこと",
-        "・強い刺激を続けたまま無理に作業を続ける",
-        "→ 負荷が重なると、回復の見通しを読みづらくすることがあります。",
-      ].join("\n")
+      "読み込みに失敗しました。しばらくしてからもう一度お試しください。"
     );
   } finally {
     appState.concreteModalBusy = false;
@@ -1388,6 +1378,7 @@ async function handleUserInput() {
       };
 
       const shouldShowSections = !isFirstResponse && triageState.is_final && sections.length > 0;
+      if (triageState.is_final && !isFirstResponse && !aiResponse.isPreSummaryConfirmation) appState.summaryGenerated = true;
 
       if (shouldShowSections) {
         const firstDelay = QUESTION_DELAY_MS + 600;

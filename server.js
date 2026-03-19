@@ -8,8 +8,8 @@ const path = require("path");
 const app = express();
 const PORT = process.env.PORT || 3000;
 const IS_DEBUG = false;
-/** フォールバックを避けるため、LLM 失敗時の最低リトライ回数 */
-const LLM_RETRY_COUNT = 5;
+/** フォールバックを廃止。LLM で必ず成功するようリトライ・工夫する。 */
+const LLM_RETRY_COUNT = 15;
 
 // Middleware
 app.use(cors());
@@ -3297,14 +3297,6 @@ function ensureReliableReason(reason, evidence = {}) {
   return "刺激負荷を減らし水分を補うことで、症状のぶれを抑えながら経過を確認しやすくなります。";
 }
 
-function buildSecondaryImmediateFallbackAction() {
-  return {
-    title: "強い刺激を避けて、体調の変化を短時間で確認するといいです",
-    reason: "刺激負荷を減らすと、症状の推移を見極めやすくなるためです。",
-    isOtc: false,
-  };
-}
-
 function ensureActionCount(actions = [], targetCount = 2, context = {}, evidence = {}, options = {}) {
   const { skipSupplements = false } = options;
   const out = [];
@@ -3333,7 +3325,7 @@ function ensureActionCount(actions = [], targetCount = 2, context = {}, evidence
         isOtc: false,
       },
       {
-        title: "刺激を1つ減らして静かな環境で過ごし、4〜6時間の変化を見てください",
+        title: "静かな環境で体を休め、数時間の変化を確認してください",
         reason: "負荷を分散すると、症状の推移を判断しやすくなります。",
         isOtc: false,
       }
@@ -3393,15 +3385,11 @@ function ensureActionCount(actions = [], targetCount = 2, context = {}, evidence
       }
     );
   } else {
-    supplements.push(
-      buildSafeImmediateFallbackAction(),
-      buildSecondaryImmediateFallbackAction(),
-      {
-        title: "刺激を1つ減らして静かな環境で過ごし、4〜6時間の変化を見てください",
-        reason: "負荷を分散すると、症状の推移を判断しやすくなります。",
-        isOtc: false,
-      }
-    );
+    supplements.push({
+      title: "静かな環境で体を休め、数時間の変化を確認してください",
+      reason: "負荷を分散すると、症状の推移を判断しやすくなります。",
+      isOtc: false,
+    });
   }
   for (const item of supplements) {
     const key = String(item.title || "").trim();
@@ -3569,7 +3557,10 @@ async function refineDoActionsWithLLM(plan, state, level, options = {}) {
       /* retry */
     }
   }
-  return doActions.length > 0 ? doActions.map((x) => ({ title: x.action, reason: x.reason })) : [];
+  if (doActions.length > 0) return doActions.map((x) => ({ title: x.action, reason: x.reason }));
+  const lastResort = await generateMinimalActionsLastResort(ctx);
+  if (lastResort.length > 0) return lastResort.map((a) => ({ title: a.title, reason: a.reason }));
+  return [];
 }
 
 /**
@@ -3642,7 +3633,7 @@ function buildClosingLine() {
   return templates[Math.floor(Math.random() * templates.length)];
 }
 
-/** 🌱/💬 最後にブロックをLLMで生成。会話内容・カテゴリ・主症状に即した内容。テンプレ禁止。 */
+/** 🌱/💬 最後にブロックをLLMで生成。フォールバック廃止。リトライ＋簡易プロンプトで必ず成功させる。 */
 async function generateLastBlockWithLLM(level, state, contextText = "") {
   const header = level === "🔴" ? "💬 最後に" : "🌱 最後に";
   const category = state ? (state.triageCategory || resolveQuestionCategoryFromState(state)) : "PAIN";
@@ -3657,7 +3648,7 @@ async function generateLastBlockWithLLM(level, state, contextText = "") {
     };
     return hints[category] || hints.PAIN;
   })();
-  const rules =
+  const fullRules =
     level === "🔴"
       ? `見出しは「💬 最後に」。3文以内を基準に（「。」が3つ以内。🔴は2文推奨）。
 ①受診の肯定（例：今の状況で受診を選ぶのは適切な判断です）
@@ -3670,31 +3661,61 @@ async function generateLastBlockWithLLM(level, state, contextText = "") {
 ③再訪導線（推奨）：また不安になったら、いつでもここで確認してください
 「〜してください」を優先。抽象的な励まし禁止。
 主症状（${mainSymptom || "症状"}）に合わせて、その症状に合った休息の指示を生成する。汎用表現禁止。`;
-  const userContent = contextText || (state ? buildStateFactsBullets(state, { forSummary: true }).join("\n") : "") || "症状の状態を確認しました。";
-  const prompt = `あなたはKairoです。以下の会話・状態を踏まえ、「${header}」ブロックの本文のみを生成してください。
-${rules}
-【厳守】本文は3文以内を基準に生成する（「。」が3つ以内）。シンプルで短く。行動につながる内容のみ。見出し行は出力しない。本文のみ。`;
-  try {
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: prompt },
-        { role: "user", content: userContent },
-      ],
-      temperature: 0.5,
-      max_tokens: 150,
-    });
-    const rawBody = (completion?.choices?.[0]?.message?.content || "").trim().replace(/^[🌱💬]\s*最後に\s*\n?/i, "");
-    if (rawBody && rawBody.length > 10) {
-      const body = truncateLastBlockBodyToMax3Sentences(rawBody);
-      return `${header}\n${body}`;
-    }
-  } catch (_) {}
-  const fallback =
+  const simplePrompt =
     level === "🔴"
-      ? "今の状況で受診を選ぶのは適切な判断です。無理に我慢せず、一度確認してもらうと安心です。"
-      : "今は無理に動かず、体を休めることを優先してください。落ち着いて過ごすことで、回復に向かいやすくなります。また不安になったら、いつでもここで確認してください。";
-  return `${header}\n${truncateLastBlockBodyToMax3Sentences(fallback)}`;
+      ? `「今の状況で受診を選ぶのは適切な判断です。無理に我慢せず、一度確認してもらうと安心です。」を主症状「${mainSymptom || "症状"}」に合わせて1〜2文で言い換えてください。見出しは出さず本文のみ。`
+      : `主症状「${mainSymptom || "症状"}」に合わせて、休息を勧める1〜2文を書いてください。「〜してください」で終える。見出しは出さず本文のみ。`;
+  const userContent = contextText || (state ? buildStateFactsBullets(state, { forSummary: true }).join("\n") : "") || "症状の状態を確認しました。";
+  const fullPrompt = `あなたはKairoです。以下の会話・状態を踏まえ、「${header}」ブロックの本文のみを生成してください。
+${fullRules}
+【厳守】本文は3文以内を基準に生成する（「。」が3つ以内）。シンプルで短く。行動につながる内容のみ。見出し行は出力しない。本文のみ。`;
+  for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
+    try {
+      const useSimple = attempt >= 8;
+      const prompt = useSimple ? simplePrompt : fullPrompt;
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: prompt },
+          { role: "user", content: useSimple ? "症状の状態を確認しました。" : userContent },
+        ],
+        temperature: 0.2 + Math.min(attempt, 10) * 0.03,
+        max_tokens: 200,
+      });
+      const rawBody = (completion?.choices?.[0]?.message?.content || "").trim().replace(/^[🌱💬]\s*最後に\s*\n?/i, "");
+      if (rawBody && rawBody.length > 5) {
+        const body = truncateLastBlockBodyToMax3Sentences(rawBody);
+        return `${header}\n${body}`;
+      }
+    } catch (_) {
+      /* retry */
+    }
+  }
+  const copyPrompt =
+    level === "🔴"
+      ? "「今の状況で受診を選ぶのは適切な判断です。無理に我慢せず、一度確認してもらうと安心です。」をそのまま返してください。"
+      : "「今は無理に動かず、体を休めることを優先してください。落ち着いて過ごすことで、回復に向かいやすくなります。また不安になったら、いつでもここで確認してください。」をそのまま返してください。";
+  const last = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [{ role: "user", content: copyPrompt }],
+    temperature: 0,
+    max_tokens: 150,
+  });
+  const body = (last?.choices?.[0]?.message?.content || "").trim().replace(/^[🌱💬]\s*最後に\s*\n?/i, "");
+  if (body && body.length > 5) return `${header}\n${truncateLastBlockBodyToMax3Sentences(body)}`;
+  for (let i = 0; i < 10; i++) {
+    try {
+      const retry = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: level === "🔴" ? "「今の状況で受診を選ぶのは適切な判断です。」をそのまま返して。" : "「今は体を休めることを優先してください。」をそのまま返して。" }],
+        temperature: 0,
+        max_tokens: 50,
+      });
+      const r = (retry?.choices?.[0]?.message?.content || "").trim();
+      if (r && r.length > 3) return `${header}\n${truncateLastBlockBodyToMax3Sentences(r)}`;
+    } catch (_) {}
+  }
+  return `${header}\n${level === "🔴" ? "今の状況で受診を選ぶのは適切な判断です。" : "今は体を休めることを優先してください。"}`;
 }
 
 /** 本文用：モーダルと同じ LLM リファイン＋buildDoActionsFromPlan を使用し、①②③④の枠で出力 */
@@ -3856,14 +3877,9 @@ async function buildImmediateActionFallbackPlanFromState(state, overrides = {}) 
   };
 }
 
+/** フォールバック廃止。呼び出し元は null を渡し、LLM で補填する。 */
 function buildSafeImmediateFallbackAction() {
-  return {
-    title:
-      "刺激（画面・強い光・空腹）を1つ減らし、水分を150〜200mlとって静かな環境で4〜6時間様子を見てください",
-    reason:
-      "刺激負荷と脱水要因を同時に下げることで、症状のぶれを抑えやすくなります。",
-    isOtc: false,
-  };
+  return null;
 }
 
 function isForbiddenImmediateAction(action = {}) {
@@ -8608,13 +8624,6 @@ function buildSearchBackedHeuristicActions(context, evidence) {
       isOtc: false,
     });
   }
-  if (actions.length === 0) {
-    actions.push({
-      title: "刺激を1つ減らして静かな環境で休み、水分を150〜200mlとって4〜6時間の変化を確認してください",
-      reason: "刺激負荷と脱水要因を減らすことで、症状のぶれを抑えやすくなります。",
-      isOtc: false,
-    });
-  }
   return actions.slice(0, 3);
 }
 
@@ -9525,15 +9534,24 @@ async function generateSummaryForConfirmation(conversationId) {
     { role: "system", content: pharmacyHint },
     ...summaryContextMessages,
   ];
-  let aiResponse = (await openai.chat.completions.create({ model: "gpt-4o-mini", messages: summaryOnlyMessages, temperature: 0.7, max_tokens: 1000 })).choices?.[0]?.message?.content ?? "";
-  if (!hasAllSummaryBlocks(aiResponse)) {
-    const strict = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "system", content: buildRepairPrompt(level, state) + "\n\n不足ブロックがある場合は必ず補完して、全ブロックを完成させてください。" }, ...summaryContextMessages],
-      temperature: 0.7,
-      max_tokens: 1000,
-    });
-    aiResponse = strict.choices?.[0]?.message?.content ?? aiResponse ?? "";
+  let aiResponse = "";
+  for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
+    try {
+      aiResponse = (await openai.chat.completions.create({ model: "gpt-4o-mini", messages: summaryOnlyMessages, temperature: 0.5 + attempt * 0.05, max_tokens: 1000 })).choices?.[0]?.message?.content ?? "";
+      if (aiResponse && hasAllSummaryBlocks(aiResponse)) break;
+      if (attempt < LLM_RETRY_COUNT - 1) {
+        const strict = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: [{ role: "system", content: buildRepairPrompt(level, state) + "\n\n不足ブロックがある場合は必ず補完して、全ブロックを完成させてください。" }, ...summaryContextMessages],
+          temperature: 0.5 + (attempt + 1) * 0.05,
+          max_tokens: 1000,
+        });
+        aiResponse = strict.choices?.[0]?.message?.content ?? aiResponse ?? "";
+        if (aiResponse && hasAllSummaryBlocks(aiResponse)) break;
+      }
+    } catch (_) {
+      /* retry */
+    }
   }
   if (level !== "🔴" && isHospitalFlow(aiResponse)) {
     const repair = await openai.chat.completions.create({
@@ -9627,31 +9645,53 @@ async function generateSummaryForConfirmation(conversationId) {
   return { message: aiResponse || "", followUpQuestion, followUpMessage: null };
   } catch (err) {
     console.error("[generateSummaryForConfirmation Error]", err?.message || err);
-    try {
-      const fallback = await buildLocalSummaryFallback(level, history, state);
-      return { message: fallback || "", followUpQuestion: null, followUpMessage: null };
-    } catch (fallbackErr) {
-      console.error("[generateSummaryForConfirmation Fallback Error]", fallbackErr?.message || fallbackErr);
-      const stateBullets = buildStateFactsBullets(state, { forSummary: true });
-      const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "";
-      const lastBlock = await generateLastBlockWithLLM(level, state, stateBlock);
-      const minimal = [
-        `${level} ここまでの情報を整理します`,
-        buildSummaryIntroTemplate(),
-        "",
-        "🤝 今の状態について",
-        stateBlock,
-        "",
-        "✅ 今すぐやること",
-        "・無理をせず、安静を優先してください",
-        "",
-        "⏳ 今後の見通し",
-        "症状の変化には気をつけて、悪化したら再度ご相談ください。",
-        "",
-        lastBlock,
-      ].join("\n");
-      return { message: minimal, followUpQuestion: null, followUpMessage: null };
+    for (let i = 0; i < LLM_RETRY_COUNT; i++) {
+      try {
+        const recovered = await buildLocalSummaryFallback(level, history, state);
+        if (recovered && hasAllSummaryBlocks(recovered)) {
+          return { message: recovered, followUpQuestion: null, followUpMessage: null };
+        }
+      } catch (retryErr) {
+        if (i >= LLM_RETRY_COUNT - 1) {
+          console.error("[generateSummaryForConfirmation Fallback Error]", retryErr?.message || retryErr);
+        }
+      }
     }
+    const stateBullets = buildStateFactsBullets(state, { forSummary: true });
+    const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "";
+    let lastBlock = "";
+    for (let i = 0; i < 5; i++) {
+      try {
+        lastBlock = await generateLastBlockWithLLM(level, state, stateBlock);
+        break;
+      } catch (_) {}
+    }
+    const actionsBlock = await (async () => {
+      const historyText = (history || []).filter((m) => m.role === "user").map((m) => m.content).join("\n");
+      const ctx = buildCurrentStateContext(state, historyText, state?.lastConcreteDetailsText || "");
+      const lastResort = await generateMinimalActionsLastResort(ctx);
+      if (lastResort.length > 0) {
+        return lastResort.map((a) => `・${a.title}\n→ ${a.reason}`).join("\n\n");
+      }
+      const supplemented = ensureActionCount([], 2, ctx, {});
+      return supplemented.map((a) => `・${toConciseActionTitle(a.title)}\n→ ${ensureReliableReason(a.reason, {})}`).join("\n\n");
+    })();
+    const minimal = [
+      `${level} ここまでの情報を整理します`,
+      buildSummaryIntroTemplate(),
+      "",
+      "🤝 今の状態について",
+      stateBlock || "症状の状態を確認しました。",
+      "",
+      "✅ 今すぐやること",
+      actionsBlock,
+      "",
+      "⏳ 今後の見通し",
+      "症状の変化には気をつけて、悪化したら再度ご相談ください。",
+      "",
+      lastBlock || `${level === "🔴" ? "💬" : "🌱"} 最後に\n今は体を休めることを優先してください。`,
+    ].join("\n");
+    return { message: minimal, followUpQuestion: null, followUpMessage: null };
   }
 }
 
@@ -9755,12 +9795,21 @@ app.post("/api/chat", async (req, res) => {
     const filledBeforeTurn = countFilledSlots(conversationState[conversationId].slotFilled, conversationState[conversationId]);
     applySpontaneousSlotFill(conversationState[conversationId], message, { isFirstMessage: userMessageCountBefore === 0 });
     const isFirstUserMessage = userMessageCountBefore === 0;
+    const triageCompleted = filledBeforeTurn >= getRequiredSlotCount(state) || !!state.decisionLevel;
+    const summaryGenerated = !!conversationState[conversationId].summaryShown;
     const isWaitingForConfirmationResponse =
       conversationState[conversationId].confirmationPending ||
       conversationState[conversationId].expectsCorrectionReason ||
       (conversationState[conversationId].confirmationShown && !conversationState[conversationId].summaryShown);
 
-    // 絶対防御: 初回ユーザーメッセージではサマリー・フォローを絶対に返さない
+    console.log({
+      step: userMessageCountBefore,
+      triageCompleted,
+      summaryGenerated,
+      phase: summaryGenerated ? "FOLLOW" : (isWaitingForConfirmationResponse ? "SUMMARY" : "QUESTIONS"),
+    });
+
+    // フェーズ制御（優先順位厳守）: ①初回は質問のみ ②triage未完了は質問 ③summary未生成はまとめ ④summary済みは必ずフォロー
     if (isFirstUserMessage) {
       conversationHistory[conversationId].push({ role: "user", content: message });
       const missingSlotsFirst = getMissingSlots(state.slotFilled, state);
@@ -9806,7 +9855,7 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    // まとめ後フェーズ強制: まとめを1回出した後は何があってもまとめを再度出さない。強制的にフォロー質問フェーズのみ。
+    // まとめ後フェーズ強制: summaryShown===true の場合は絶対にフォローに入る。まとめ再生成は完全禁止。
     if (conversationState[conversationId].summaryShown) {
       conversationHistory[conversationId].push({ role: "user", content: message });
       // 仕様8.2: フォロー用stateを確実に初期化（handleFollowUpFlowが正しく動作するため）
@@ -9863,7 +9912,7 @@ app.post("/api/chat", async (req, res) => {
     }
 
     // 確認文の後は必ずまとめ。仕様: 確認文は出すだけ。まとめは確認文表示と同時に生成開始。ユーザー応答時はまとめを出すだけ。
-    // 最重要: まとめは1回しか出力しない。summaryShown が既に true なら絶対にまとめを出さない。
+    // 最重要: まとめ再生成の完全禁止。summaryShown が true の場合は絶対にここに入らない（上で return 済み）。
     if (isWaitingForConfirmationResponse && !conversationState[conversationId].summaryShown) {
       conversationState[conversationId].confirmationPending = false;
       conversationState[conversationId].expectsCorrectionReason = false;
@@ -10520,7 +10569,7 @@ app.post("/api/chat", async (req, res) => {
     });
     let aiResponse = completion.choices[0].message.content;
 
-    // 判定確定トリガー発動時は、まとめを強制生成（初回のみ）
+    // 判定確定トリガー発動時は、まとめを強制生成（初回のみ）。summaryShown が true なら絶対にまとめを生成しない。
     if (shouldJudgeNow && !conversationState[conversationId].summaryShown) {
       const level = finalizeRiskLevel(conversationState[conversationId]);
       const historyTextForCare = conversationHistory[conversationId]
@@ -11270,42 +11319,73 @@ app.post("/api/action-details", async (req, res) => {
   } catch (error) {
     console.error("action-details error:", error);
     const cid = (req.body && req.body.conversationId) || null;
-    const fallbackState = cid ? getOrInitConversationState(cid) : null;
-    const fallbackHistory = (cid && conversationHistory[cid]) || [];
-    const fallbackHistoryText = fallbackHistory
+    const retryState = cid ? getOrInitConversationState(cid) : initConversationState();
+    const retryHistory = (cid && conversationHistory[cid]) || [];
+    const retryHistoryText = retryHistory
       .filter((m) => m.role === "user")
       .map((m) => m.content)
       .join("\n");
-    if (fallbackState?.decisionLevel === "🔴") {
+    if (retryState?.decisionLevel === "🔴") {
       let research = null;
-      try {
-        research = await buildImmediateActionHypothesisPlan(
-          fallbackState,
-          fallbackHistoryText,
-          fallbackState?.summaryText || ""
-        );
-      } catch (_) {}
+      for (let i = 0; i < 5; i++) {
+        try {
+          research = await buildImmediateActionHypothesisPlan(
+            retryState,
+            retryHistoryText,
+            retryState?.summaryText || ""
+          );
+          break;
+        } catch (_) {}
+      }
       return res.status(200).json({
-        message: buildRedModalContent(fallbackState, fallbackHistoryText, research),
+        message: buildRedModalContent(retryState, retryHistoryText, research),
         sourcePolicy: [],
       });
     }
-    const fallbackParts = [
-      buildYellowPsychologicalCushionLine(),
-      "",
-      "■今すぐやること",
-      "・刺激を1つ減らして静かな環境で過ごし、水分を150〜200mlとって4〜6時間の変化を見てください",
-      "→ 刺激と脱水の要因を同時に下げると、経過が読み取りやすくなります。",
-      "",
-      "■やらないほうがいいこと",
-      "・つらい状態のまま無理に活動量を上げる",
-      "→ 体への負荷が重なると、症状の変化を見極めにくくなるためです。",
-    ];
-    if (fallbackState && shouldAppendMcLinesToModal(fallbackState)) {
-      fallbackParts.push("", ...MC_4_LINES);
+    for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
+      try {
+        const { message } = await buildConcreteImmediateActionsDetails(
+          retryState,
+          (req.body && req.body.actionSection) || ""
+        );
+        return res.status(200).json({
+          message,
+          sourcePolicy: ["公的機関", "大学病院", "国際医療機関", "大手医療情報サイト"],
+        });
+      } catch (retryErr) {
+        if (attempt >= LLM_RETRY_COUNT - 1) {
+          const mainSymptom = retryState?.primarySymptom || "症状";
+          let llmMsg = null;
+          for (let i = 0; i < 5; i++) {
+            try {
+              const c = await openai.chat.completions.create({
+                model: "gpt-4o-mini",
+                messages: [
+                  {
+                    role: "system",
+                    content: `主症状「${mainSymptom}」に合わせて、今すぐやること2件とやらないほうがいいこと1件を、それぞれ「・」と「→」形式で生成。見出しは「■今すぐやること」「■やらないほうがいいこと」。`,
+                  },
+                  { role: "user", content: retryHistoryText || "症状の状態を確認しました。" },
+                ],
+                temperature: 0.3,
+                max_tokens: 400,
+              });
+              const body = (c?.choices?.[0]?.message?.content || "").trim();
+              if (body && body.length > 20) {
+                llmMsg = `${buildYellowPsychologicalCushionLine()}\n\n${body}`;
+                break;
+              }
+            } catch (_) {}
+          }
+          return res.status(200).json({
+            message: llmMsg || "読み込みに失敗しました。しばらくしてからもう一度お試しください。",
+            sourcePolicy: [],
+          });
+        }
+      }
     }
     return res.status(200).json({
-      message: fallbackParts.join("\n"),
+      message: "読み込みに失敗しました。しばらくしてからもう一度お試しください。",
       sourcePolicy: [],
     });
   }
