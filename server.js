@@ -6602,33 +6602,34 @@ function pickSymptomInfoForJudgment(state, level) {
   return null;
 }
 
-/** 🟢①②: ランダムで使用 */
+/** 🟢①②: ランダムで使用（決断型：休む1つに絞る。「様子を見て」禁止） */
 const STATE_JUDGMENT_GREEN_1 = () =>
-  "今の情報では、危険なサインは見当たりません。\n急な症状だと不安になりますよね。\nこのまま無理をせず、様子を見て大丈夫そうです。";
+  "今の情報では、危険なサインは見当たりません。\n急な症状だと不安になりますよね。\n\n今は一度休むだけで大丈夫そうです。\nこのまま落ち着いていれば、自然に楽になっていくことが多いです。";
 const STATE_JUDGMENT_GREEN_2 = () =>
-  "今の状態は、大きく心配しすぎなくても大丈夫そうです。\nこのような症状は多くの人にも見られます。\nまずは体を休めながら、様子を見ていきましょう。";
+  "今の状態は、大きく心配しすぎなくても大丈夫そうです。\nこのような症状は多くの人にも見られます。\n\n今は無理に何かせず、少し休むだけで十分です。\n体が落ち着いてくると、自然と楽になっていくことが多いです。";
 
-/** 🟢③: 経過時間で「さっき」を選んだ場合のみ */
+/** 🟢③: 経過が「さっき」のときのみ使用 */
 const STATE_JUDGMENT_GREEN_3 = () =>
-  "今の情報からは、深刻な状態は考えにくいです。\n急に症状が出ると不安になりますよね。\n無理をせず、落ち着いて様子を見ていきましょう。";
+  "今の情報からは、深刻な状態は考えにくいです。\n急に症状が出ると不安になりますよね。\n\n今は体を休めることを優先すれば大丈夫そうです。\nこのまま無理をしなければ、ゆっくり回復に向かうことが多いです。";
 
-/** 🟡①: 痛み7以上のみ */
-const STATE_JUDGMENT_YELLOW_PAIN_HIGH = () =>
-  "今のところ大きな危険サインは見えていませんが、少し注意して様子を見ていきたい状態です。\n症状があると不安になりますよね。\n無理をせず、体調の変化に気をつけながら過ごしましょう。";
+/** 🟡①: ランダムで使用（決断型：不安を残さない） */
+const STATE_JUDGMENT_YELLOW_1 = () =>
+  "今の情報では、危険なサインは見当たりません。\nつらい症状だと不安になりますよね。\n\n今は無理をせず、しっかり体を休めてください。\n体が落ち着いてくると、症状がやわらいでいくことが多いです。";
 
-/** 🟡②: フォールバック（優先度最低） */
-const STATE_JUDGMENT_YELLOW_FALLBACK = () =>
-  "現時点では緊急性は高くなさそうですが、今後の変化には注意が必要です。\n急な症状だと不安になりますよね。\n無理をせず、少し気をつけながら様子を見ていきましょう。";
+/** 🟡②: ランダムで使用（フォールバック） */
+const STATE_JUDGMENT_YELLOW_2 = () =>
+  "今の状態は、落ち着いて対処できる範囲にあります。\n急な体調の変化は不安になりますよね。\n\n今は一度休んで体を整えることが大切です。\nそのまま過ごしていれば、自然に楽になっていくことが多いです。";
 
-/** 🟡③: 経過が「数時間前・一日前」を選択した時のみ */
+/** 🟡③: 経過が「数時間前・一日以上前」のときのみ使用 */
 const STATE_JUDGMENT_YELLOW_DURATION_SPECIFIC = () =>
-  "今の情報では緊急性の高い状態ではなさそうですが、経過の確認が大切な段階です。\n不安になる状況だと思います。\n体調の変化に注意しながら、無理せず過ごしてください。";
+  "今の情報からは、深刻な状態は考えにくいです。\n不安になる状況だと思います。\n\n今は体を休めることに集中してください。\n落ち着いて過ごすことで、回復の流れに入りやすくなります。";
 
+/** 経過が「数時間前・一日以上前」のとき true（🟡③テンプレ用） */
 function isDurationHoursOrDay(state) {
   const durationRaw = String(
     getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "")
   ).trim();
-  return /(数時間|一日|昨日)/.test(durationRaw);
+  return /(数時間|一日|昨日|数日|ずっと|一日以上)/.test(durationRaw);
 }
 
 function buildStateAboutLine(state, level) {
@@ -6639,15 +6640,8 @@ function buildStateAboutLine(state, level) {
     return template();
   }
   if (level === "🟡") {
-    const painScore = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
-    const canUsePainHigh = painScore !== null && painScore >= 7;
-    const canUseDurationSpecific = isDurationHoursOrDay(state);
-
-    const candidates = [];
-    if (canUsePainHigh) candidates.push(STATE_JUDGMENT_YELLOW_PAIN_HIGH);
-    if (canUseDurationSpecific) candidates.push(STATE_JUDGMENT_YELLOW_DURATION_SPECIFIC);
-    if (candidates.length === 0) candidates.push(STATE_JUDGMENT_YELLOW_FALLBACK);
-
+    const candidates = [STATE_JUDGMENT_YELLOW_1, STATE_JUDGMENT_YELLOW_2];
+    if (isDurationHoursOrDay(state)) candidates.push(STATE_JUDGMENT_YELLOW_DURATION_SPECIFIC);
     const template = candidates[Math.floor(Math.random() * candidates.length)];
     return template();
   }
@@ -9748,8 +9742,13 @@ app.post("/api/chat", async (req, res) => {
     }
     let state = getOrInitConversationState(conversationId);
     const userMessageCountBefore = (conversationHistory[conversationId] || []).filter((m) => m.role === "user").length;
-    // フォールバック: 初回メッセージなのに古い状態（まとめ済み・スロット埋まり）が残っている場合は強制リセット
-    if (userMessageCountBefore === 0 && state && (state.summaryShown || countFilledSlots(state.slotFilled, state) >= getRequiredSlotCount(state))) {
+    // フォールバック: 初回メッセージなのに古い状態が残っている場合は強制リセット（まとめ誤表示バグ防止）
+    const hasStaleState =
+      state &&
+      (state.summaryShown ||
+        state.confirmationShown ||
+        countFilledSlots(state.slotFilled, state) >= getRequiredSlotCount(state));
+    if (userMessageCountBefore === 0 && hasStaleState) {
       delete conversationHistory[conversationId];
       delete conversationState[conversationId];
       conversationHistory[conversationId] = [{ role: "system", content: SYSTEM_PROMPT }];
@@ -11527,13 +11526,11 @@ function extractSectionsBySpecs(text, specs) {
     .filter((section) => section.text.length > 0);
 }
 
-// Clear conversation history
+// Clear conversation history（はじめから・再検索時に完全リセット）
 app.post("/api/clear", (req, res) => {
-  const { conversationId } = req.body;
-  if (conversationId && conversationHistory[conversationId]) {
+  const { conversationId } = req.body || {};
+  if (conversationId && typeof conversationId === "string") {
     delete conversationHistory[conversationId];
-  }
-  if (conversationId && conversationState[conversationId]) {
     delete conversationState[conversationId];
   }
   res.json({ success: true });

@@ -322,31 +322,50 @@ function loadHistory() {
   return;
 }
 
+// kairo 関連の全ストレージキー（リセット時に完全削除するため）
+const KAIRO_STORAGE_KEYS = {
+  localStorage: [HISTORY_KEY, CONVERSATION_ID_KEY, FIRST_QUESTION_KEY],
+  sessionStorage: [
+    "kairo_location",
+    LOCATION_PROMPT_KEY,
+    LOCATION_SNAPSHOT_KEY,
+    LOCATION_RETRY_KEY,
+    "kairo_force_location_prompt",
+    "kairo_just_cleared",
+  ],
+};
+
 // Clear conversation history（完全初期化。部分リセット禁止）
-function clearHistory() {
+async function clearHistory() {
   resetConversation();
-  const conversationIdToClear = localStorage.getItem(CONVERSATION_ID_KEY) || getConversationId();
-  localStorage.removeItem(HISTORY_KEY);
-  localStorage.removeItem(CONVERSATION_ID_KEY);
-  localStorage.removeItem(FIRST_QUESTION_KEY);
-  sessionStorage.removeItem("kairo_location");
-  sessionStorage.removeItem(LOCATION_PROMPT_KEY);
-  sessionStorage.removeItem(LOCATION_SNAPSHOT_KEY);
-  sessionStorage.removeItem(LOCATION_RETRY_KEY);
+  // getConversationId() は使わない（新規IDを生成してしまうため）
+  const conversationIdToClear = localStorage.getItem(CONVERSATION_ID_KEY);
+
+  // 1. クライアント側の全ストレージをクリア
+  KAIRO_STORAGE_KEYS.localStorage.forEach((k) => localStorage.removeItem(k));
+  KAIRO_STORAGE_KEYS.sessionStorage.forEach((k) => sessionStorage.removeItem(k));
+
+  // 2. サーバー側の状態を削除（完了を待つ）
+  if (conversationIdToClear) {
+    try {
+      const res = await fetch(CLEAR_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversationId: conversationIdToClear }),
+      });
+      if (!res.ok) console.error("履歴クリアAPI エラー:", res.status);
+    } catch (err) {
+      console.error("履歴クリアエラー:", err);
+    }
+  }
+
+  // 3. リロード後の init で整合性チェックするためのフラグ
+  sessionStorage.setItem("kairo_just_cleared", "1");
   sessionStorage.setItem("kairo_force_location_prompt", "true");
-  fetch(CLEAR_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ conversationId: conversationIdToClear }),
-  })
-    .catch((err) => console.error("履歴クリアエラー:", err))
-    .finally(() => {
-      hideSummaryCard();
-      clearSectionTimers();
-      window.location.reload();
-    });
+
+  hideSummaryCard();
+  clearSectionTimers();
+  window.location.reload();
 }
 
 // Parse AI message into blocks (cards)
@@ -825,13 +844,13 @@ function createSummaryBlock(text) {
     // 🟡は🟢と同じ構成
     const stateMatch = text.match(/🤝[^⸻]*?今の状態について[^⸻]*?\*\*([^*]+)\*\*/s);
     if (stateMatch) {
-      summaryContent = stateMatch[1].trim() + '\n\n✅ 今やること\n\n今の状態を確認しながら、様子を見ていきましょう。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
+      summaryContent = stateMatch[1].trim() + '\n\n✅ 今やること\n\n今は一度休むだけで大丈夫そうです。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
     } else {
       const judgmentMatch = text.match(/\*\*([^*]+)\*\*/);
       if (judgmentMatch) {
-        summaryContent = judgmentMatch[1].trim() + '\n\n✅ 今やること\n\n今の状態を確認しながら、様子を見ていきましょう。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
+        summaryContent = judgmentMatch[1].trim() + '\n\n✅ 今やること\n\n今は一度休むだけで大丈夫そうです。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
       } else {
-        summaryContent = '✅ 今やること\n\n今の状態を確認しながら、様子を見ていきましょう。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
+        summaryContent = '✅ 今やること\n\n今は一度休むだけで大丈夫そうです。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
       }
     }
   } else {
@@ -841,14 +860,14 @@ function createSummaryBlock(text) {
     // 判断を抽出（🤝 セクションから）
     const stateMatch = text.match(/🤝[^⸻]*?今の状態について[^⸻]*?\*\*([^*]+)\*\*/s);
     if (stateMatch) {
-      summaryContent = stateMatch[1].trim() + '\n\n✅ 今やること\n\n今の状態を確認しながら、様子を見ていきましょう。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
+      summaryContent = stateMatch[1].trim() + '\n\n✅ 今やること\n\n今は一度休むだけで大丈夫そうです。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
     } else {
       // 別のパターンで判断を抽出
       const judgmentMatch = text.match(/\*\*([^*]+)\*\*/);
       if (judgmentMatch) {
-        summaryContent = judgmentMatch[1].trim() + '\n\n✅ 今やること\n\n今の状態を確認しながら、様子を見ていきましょう。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
+        summaryContent = judgmentMatch[1].trim() + '\n\n✅ 今やること\n\n今は一度休むだけで大丈夫そうです。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
       } else {
-        summaryContent = '✅ 今やること\n\n今の状態を確認しながら、様子を見ていきましょう。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
+        summaryContent = '✅ 今やること\n\n今は一度休むだけで大丈夫そうです。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
       }
     }
   }
@@ -1139,12 +1158,12 @@ function clearSummaryContainer() {
 const SUMMARY_CARD_TEMPLATES = {
   green: [
     "今は大きな心配なさそうです",
-    "落ち着いて様子を見られそうです",
+    "今は一度休むだけで大丈夫そうです",
     "今のところ安心して過ごせそうです",
   ],
   yellow: [
-    "今は注意して様子を見てください",
-    "少し注意しながら様子を見ましょう",
+    "今は体を休めることを優先して",
+    "今は一度休んで体を整えて",
   ],
   red: [
     "早めの受診をおすすめします",
@@ -1463,6 +1482,18 @@ function init() {
   appState.userHasSubmitted = false;
   hideSummaryCard();
   clearSummaryContainer();
+
+  // はじめから／再検索後の整合性チェック：リセット直後は conversationId を確実にクリア
+  if (sessionStorage.getItem("kairo_just_cleared") === "1") {
+    sessionStorage.removeItem("kairo_just_cleared");
+    KAIRO_STORAGE_KEYS.localStorage.forEach((k) => localStorage.removeItem(k));
+  }
+  // 会話IDはあるが履歴がない＝古いセッションの残骸。まとめ誤表示を防ぐためクリア
+  const hasHistory = localStorage.getItem(HISTORY_KEY);
+  if (!hasHistory && localStorage.getItem(CONVERSATION_ID_KEY)) {
+    localStorage.removeItem(CONVERSATION_ID_KEY);
+  }
+
   showInitialMessage();
   const snapshot = getLocationSnapshot();
   updateLocationStatusIndicator(snapshot ? "usable" : "failed");
