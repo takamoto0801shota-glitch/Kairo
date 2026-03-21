@@ -841,6 +841,7 @@ function initConversationState(input = {}) {
     followUpState: "NONE",
     followUpPending: false,
     summaryShown: false,
+    summaryGenerated: false,
     hasSummaryBlockGenerated: false,
     decisionType: null,
     decisionLevel: null,
@@ -3984,15 +3985,11 @@ function buildDontActionsFromContext(context = {}, evidence = {}) {
 
 /** PAIN/INFECTION+🟡のとき、モーダル末尾に追加。MC問題を解決する「現実の行動（会社対応）」サポート。フォールバック用。 */
 const SINGAPORE_REST_SECTION_FALLBACK = [
-  "",
   "■シンガポールでの休み方",
-  "",
   "シンガポールでは、軽い体調不良で1日休む場合でも、",
   "会社に提出するMC（診断書）が必要になることがよくあります。",
-  "",
   "MCがない場合、有給休暇として扱われなかったり、",
   "別の休暇が使われることもあります。",
-  "",
   "この状態であれば、",
   "オンライン診療で数分でMCを取得できることが多く、",
   "外出せずに対応することも可能です。",
@@ -4041,7 +4038,7 @@ async function generateSingaporeRestSection() {
       if (!raw) continue;
       const lines = raw.split("\n").map((l) => l.trim()).filter(Boolean);
       if (lines.length < 3) continue;
-      return ["", "■シンガポールでの休み方", "", ...lines];
+      return ["■シンガポールでの休み方", ...lines];
     } catch (e) {
       if (attempt >= LLM_RETRY_COUNT - 1) break;
     }
@@ -4683,11 +4680,69 @@ function buildFollowUpJudgeMeta(state) {
 }
 
 /**
+ * フォロー質問フェーズ専用ハンドラ。まとめ生成・triage・resetSummary は絶対に呼ばない。
+ * summaryGenerated/summaryShown のときのみここに入る。
+ */
+function handleFollowUpPhase(res, conversationId, message, state, locationPromptMessage, locationRePromptMessage) {
+  conversationHistory[conversationId].push({ role: "user", content: message });
+  if (!state.hasSummaryBlockGenerated) state.hasSummaryBlockGenerated = true;
+  if (!state.decisionType && state.decisionLevel) {
+    state.decisionType = state.decisionLevel === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING";
+  }
+  if (!state.judgmentSnapshot) {
+    state.judgmentSnapshot = buildJudgmentSnapshot(state, [], state.decisionType || "C_WATCHFUL_WAITING");
+  }
+  if (state.followUpStep <= 0) {
+    state.followUpPhase = "questioning";
+    state.followUpStep = 1;
+  }
+  const followUpResult = generateFollowResponse(state, message, {
+    history: conversationHistory[conversationId] || [],
+  });
+  const outMessage = followUpResult?.message ?? (userAskedSummary(message)
+    ? "既にまとめをお伝えしています。ほかに気になることはありますか？"
+    : (getInitialFollowUpQuestionBySpec(state) || buildFollowClosingMessage()));
+  if (followUpResult && FORBIDDEN_FOLLOW_UP.test(String(followUpResult.message || ""))) {
+    const judgeMeta = buildFollowUpJudgeMeta(state);
+    return res.json({
+      message: "",
+      response: "",
+      judgeMeta,
+      triage_state: buildTriageState(true, judgeMeta.judgement, judgeMeta.slotsFilledCount),
+      questionPayload: null,
+      normalizedAnswer: state.lastNormalizedAnswer || null,
+      locationPromptMessage,
+      locationRePromptMessage,
+      locationSnapshot: state.locationSnapshot,
+      conversationId,
+    });
+  }
+  conversationHistory[conversationId].push({ role: "assistant", content: outMessage });
+  const judgeMeta = buildFollowUpJudgeMeta(state);
+  return res.json({
+    message: outMessage,
+    response: outMessage,
+    judgeMeta,
+    triage: { judgement: judgeMeta.judgement, confidence: judgeMeta.confidence, ratio: judgeMeta.ratio },
+    triage_state: buildTriageState(true, judgeMeta.judgement, judgeMeta.slotsFilledCount),
+    sections: [],
+    questionPayload: null,
+    normalizedAnswer: state.lastNormalizedAnswer || null,
+    followUpQuestion: null,
+    followUpMessage: null,
+    locationPromptMessage,
+    locationRePromptMessage,
+    locationSnapshot: state.locationSnapshot,
+    conversationId,
+  });
+}
+
+/**
  * フォロー質問フェーズ専用。まとめ生成ロジックと完全分離。
  * summaryGenerated/summaryShown のときのみ呼ぶ。まとめを再生成しない。
  */
 function generateFollowResponse(state, userInput, options = {}) {
-  if (!state?.hasSummaryBlockGenerated && !state?.summaryShown) return null;
+  if (!state?.hasSummaryBlockGenerated && !state?.summaryShown && !state?.summaryGenerated) return null;
   if (state.confirmationShown && !state.summaryShown) return null;
 
   const trimmed = (userInput || "").trim();
@@ -9429,6 +9484,7 @@ async function generateSummaryForConfirmation(conversationId) {
   aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
   const decisionType = level === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING";
   state.summaryShown = true;
+  state.summaryGenerated = true;
   state.hasSummaryBlockGenerated = true;
   state.decisionType = decisionType;
   state.decisionLevel = level === "🔴" ? "🔴" : level === "🟡" ? "🟡" : "🟢";
@@ -9613,7 +9669,11 @@ app.post("/api/chat", async (req, res) => {
     applySpontaneousSlotFill(conversationState[conversationId], message, { isFirstMessage: userMessageCountBefore === 0 });
     const isFirstUserMessage = userMessageCountBefore === 0;
     const triageCompleted = filledBeforeTurn >= getRequiredSlotCount(state) || !!state.decisionLevel;
-    const summaryGenerated = !!conversationState[conversationId].summaryShown;
+    const summaryGenerated = !!(
+      conversationState[conversationId].summaryShown ||
+      conversationState[conversationId].summaryGenerated ||
+      conversationState[conversationId].hasSummaryBlockGenerated
+    );
     const history = conversationHistory[conversationId] || [];
     const lastAssistantMsg = [...history].reverse().find((m) => m.role === "assistant")?.content || "";
     const lastMsgLooksLikeConfirmation = /合っていますか|この整理で|よろしければ/.test(lastAssistantMsg);
@@ -9623,14 +9683,21 @@ app.post("/api/chat", async (req, res) => {
       (conversationState[conversationId].confirmationShown && !conversationState[conversationId].summaryShown) ||
       (filledBeforeTurn >= getRequiredSlotCount(state) && !conversationState[conversationId].summaryShown && lastMsgLooksLikeConfirmation);
 
-    console.log({
-      step: userMessageCountBefore,
-      triageCompleted,
-      summaryGenerated,
-      phase: summaryGenerated ? "FOLLOW" : (isWaitingForConfirmationResponse ? "SUMMARY" : "QUESTIONS"),
+    console.log("[FOLLOW_GUARD]", {
+      summaryGenerated: state.summaryGenerated,
+      summaryShown: state.summaryShown,
+      hasSummaryBlockGenerated: state.hasSummaryBlockGenerated,
+      conversationStep: userMessageCountBefore,
+      phase: summaryGenerated && !isFirstUserMessage ? "FOLLOW" : (isWaitingForConfirmationResponse ? "SUMMARY" : "QUESTIONS"),
     });
 
-    // フェーズ制御（優先順位厳守）: ①初回は質問のみ ②triage未完了は質問 ③summary未生成はまとめ ④summary済みは必ずフォロー
+    // 🔥 最終ガード（最優先）: まとめ済みなら絶対にフォローのみ。まとめ再生成は完全禁止。
+    if (summaryGenerated && !isFirstUserMessage) {
+      console.log("⚠️ FOLLOW PHASE - summary blocked");
+      return handleFollowUpPhase(res, conversationId, message, state, locationPromptMessage, locationRePromptMessage);
+    }
+
+    // フェーズ制御（優先順位厳守）: ①初回は質問のみ ②triage未完了は質問 ③summary未生成はまとめ
     if (isFirstUserMessage) {
       conversationHistory[conversationId].push({ role: "user", content: message });
       const missingSlotsFirst = getMissingSlots(state.slotFilled, state);
@@ -9671,62 +9738,6 @@ app.post("/api/chat", async (req, res) => {
         normalizedAnswer: null,
         locationPromptMessage: null,
         locationRePromptMessage: null,
-        locationSnapshot: state.locationSnapshot,
-        conversationId,
-      });
-    }
-
-    // まとめ後フェーズ強制: summaryShown===true の場合は絶対にフォローに入る。まとめ再生成は完全禁止。
-    if (conversationState[conversationId].summaryShown) {
-      conversationHistory[conversationId].push({ role: "user", content: message });
-      // 仕様8.2: フォロー用stateを確実に初期化（handleFollowUpFlowが正しく動作するため）
-      if (!state.hasSummaryBlockGenerated) state.hasSummaryBlockGenerated = true;
-      if (!state.decisionType && state.decisionLevel) {
-        state.decisionType = state.decisionLevel === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING";
-      }
-      if (!state.judgmentSnapshot) {
-        state.judgmentSnapshot = buildJudgmentSnapshot(state, [], state.decisionType || "C_WATCHFUL_WAITING");
-      }
-      if (state.followUpStep <= 0) {
-        state.followUpPhase = "questioning";
-        state.followUpStep = 1;
-      }
-      const followUpResult = generateFollowResponse(state, message, {
-        history: conversationHistory[conversationId] || [],
-      });
-      const outMessage = followUpResult?.message ?? (userAskedSummary(message)
-        ? "既にまとめをお伝えしています。ほかに気になることはありますか？"
-        : (getInitialFollowUpQuestionBySpec(state) || buildFollowClosingMessage()));
-      if (followUpResult && FORBIDDEN_FOLLOW_UP.test(String(followUpResult.message || ""))) {
-        const judgeMeta = buildFollowUpJudgeMeta(state);
-        return res.json({
-          message: "",
-          response: "",
-          judgeMeta,
-          triage_state: buildTriageState(true, judgeMeta.judgement, judgeMeta.slotsFilledCount),
-          questionPayload: null,
-          normalizedAnswer: state.lastNormalizedAnswer || null,
-          locationPromptMessage,
-          locationRePromptMessage,
-          locationSnapshot: state.locationSnapshot,
-          conversationId,
-        });
-      }
-      conversationHistory[conversationId].push({ role: "assistant", content: outMessage });
-      const judgeMeta = buildFollowUpJudgeMeta(state);
-      return res.json({
-        message: outMessage,
-        response: outMessage,
-        judgeMeta,
-        triage: { judgement: judgeMeta.judgement, confidence: judgeMeta.confidence, ratio: judgeMeta.ratio },
-        triage_state: buildTriageState(true, judgeMeta.judgement, judgeMeta.slotsFilledCount),
-        sections: [],
-        questionPayload: null,
-        normalizedAnswer: state.lastNormalizedAnswer || null,
-        followUpQuestion: null,
-        followUpMessage: null,
-        locationPromptMessage,
-        locationRePromptMessage,
         locationSnapshot: state.locationSnapshot,
         conversationId,
       });
@@ -9834,6 +9845,7 @@ app.post("/api/chat", async (req, res) => {
       }
       conversationState[conversationId].summaryText = summaryMsg;
       conversationState[conversationId].summaryShown = true;
+      conversationState[conversationId].summaryGenerated = true;
       conversationState[conversationId].hasSummaryBlockGenerated = true;
       conversationHistory[conversationId].push({ role: "assistant", content: summaryMsg });
       const sections = extractSectionsBySpecs(summaryMsg, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text);
@@ -9879,6 +9891,7 @@ app.post("/api/chat", async (req, res) => {
         }
         conversationState[conversationId].summaryText = fallbackSummary;
         conversationState[conversationId].summaryShown = true;
+        conversationState[conversationId].summaryGenerated = true;
         conversationState[conversationId].hasSummaryBlockGenerated = true;
         const finalRisk = conversationState[conversationId].decisionLevel || level;
         const sections = extractSectionsBySpecs(fallbackSummary, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text);
@@ -10691,6 +10704,7 @@ app.post("/api/chat", async (req, res) => {
       const decisionType =
         level === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING";
       conversationState[conversationId].summaryShown = true;
+      conversationState[conversationId].summaryGenerated = true;
       conversationState[conversationId].hasSummaryBlockGenerated = true;
       conversationState[conversationId].decisionType = decisionType;
       conversationState[conversationId].decisionLevel =
@@ -11021,6 +11035,7 @@ app.post("/api/chat", async (req, res) => {
           : WATCHFUL_FOLLOW_UP_QUESTION;
       if (state) {
         state.summaryShown = true;
+        state.summaryGenerated = true;
         state.hasSummaryBlockGenerated = true;
         state.summaryText = fallbackSummary;
         if (history.length > 0) history.push({ role: "assistant", content: fallbackSummary });
