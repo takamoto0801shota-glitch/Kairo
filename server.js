@@ -1137,8 +1137,22 @@ async function enforceSummaryStructureStrict(text, level, history, state) {
   if (!hasAll) {
     return await buildLocalSummaryFallback(level, history, state);
   }
+  // PAIN/INFECTION+🟡: ブロック単位で1件目固定を強制適用（所定位置を確実に確保）
+  if (level === "🟡" && state) {
+    const category = state.triageCategory || resolveQuestionCategoryFromState(state);
+    if ((category === "PAIN" || category === "INFECTION") && blocks.has("✅ 今すぐやること")) {
+      const actionBlock = blocks.get("✅ 今すぐやること");
+      const fixedBlock = ensurePainInfectionYellowFirstAction(actionBlock, level, state);
+      blocks.set("✅ 今すぐやること", fixedBlock);
+    }
+  }
   // 強制的に仕様順へ再構成（順序ゆらぎを排除）
-  return headers.map((h) => blocks.get(h)).join("\n\n").trim();
+  let result = headers.map((h) => blocks.get(h)).join("\n\n").trim();
+  // PAIN/INFECTION+🟡: 最終ガードとして1件目固定を適用
+  if (level === "🟡" && state) {
+    result = ensurePainInfectionYellowFirstAction(result, level, state);
+  }
+  return result;
 }
 
 function extractSummaryLine(text) {
@@ -2774,14 +2788,6 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
   } else {
     lines.push("位置情報から近くの医療機関を検索しましたが、見つかりませんでした。");
   }
-  // 仕様: INFECTION ではオンライン診療案内を表示しない（強制）。🔴ではMC関連を一切入れない（強制）
-  if (category !== "INFECTION" && state?.decisionLevel !== "🔴") {
-    lines.push("");
-    lines.push("もし、外出がつらい場合は、オンライン診療という方法もあります。");
-    lines.push("今の症状であればオンラインでの初期相談は可能です。");
-    lines.push("Doctor Anywhere / WhiteCoat");
-    lines.push("オンラインでもMCは発行されます。");
-  }
   return lines.join("\n");
 }
 
@@ -2929,9 +2935,6 @@ function buildRedModalContent(state, historyText = "", research = null) {
     "",
     RED_MODAL_CLOSING_LINE,
   ];
-  if (shouldAppendMcLinesToModal(state)) {
-    parts.push("", ...MC_4_LINES);
-  }
   return parts.join("\n");
 }
 
@@ -3727,10 +3730,17 @@ async function buildImmediateActionsBlock(level, state, historyText = "", resear
   lines.push("");
 
   const refinedActions = await refineDoActionsWithLLM(plan, state, level, { forSummary: true });
-  const doActions = buildDoActionsFromPlan(plan, state, level, {
+  let doActions = buildDoActionsFromPlan(plan, state, level, {
     forSummary: true,
     actionsOverride: refinedActions.length > 0 ? refinedActions : undefined,
   });
+  // PAIN/INFECTION+🟡: 1件目を強制固定（仕様厳守。不具合防止のため二重チェック）
+  const category = state ? (state.triageCategory || resolveQuestionCategoryFromState(state)) : null;
+  if (level === "🟡" && (category === "PAIN" || category === "INFECTION")) {
+    const fixed = { action: PAIN_INFECTION_YELLOW_FIRST_ACTION.title, reason: PAIN_INFECTION_YELLOW_FIRST_ACTION.reason };
+    const rest = doActions.filter((x) => String(x?.action || "").trim() !== String(fixed.action || "").trim());
+    doActions = [fixed, ...rest].slice(0, 3);
+  }
   doActions.forEach((item, idx) => {
     lines.push(`・${String(item.action || "").trim()}`);
     lines.push(`→ ${String(item.reason || "").trim()}`);
@@ -3761,36 +3771,54 @@ function buildYellowPsychologicalCushionLine() {
   return "いまの経過なら、判断を急がず体の負担を整えながら落ち着いて様子を見られる段階と捉えられます。";
 }
 
-/** PAIN系・INFECTION系で🟡のとき、今すぐやること1件目を固定（仕様厳守）。①なぜそれでいいのかは維持し、②の1件目のみ差し替え。 */
+/** PAIN系・INFECTION系で🟡のとき、今すぐやること1件目を強制固定（仕様厳守）。不具合防止のため全経路で確実に適用。 */
 function ensurePainInfectionYellowFirstAction(text, level, state) {
-  if (!text || level !== "🟡" || !state) return text;
-  const category = resolveQuestionCategoryFromState(state);
+  if (!text || level !== "🟡") return text;
+  // state.triageCategory を優先（buildImmediateActionsBlock と一致）
+  const category = state ? (state.triageCategory || resolveQuestionCategoryFromState(state)) : null;
   if (category !== "PAIN" && category !== "INFECTION") return text;
   const fixedAction = "・今はベッドに入り、横になって数時間ゆっくり過ごしてください";
   const fixedReason = "→ 体を休息モードに切り替えることで、自然な回復の流れが働きやすくなります。";
   const lines = text.split("\n");
-  const headerIdx = lines.findIndex((l) => l.startsWith("✅ 今すぐやること"));
-  if (headerIdx === -1) return text;
-  // ①なぜそれでいいのか（・で始まらない行）をスキップし、②の最初の「・」行を探す
-  let i = headerIdx + 1;
-  while (i < lines.length) {
-    const t = lines[i].trim();
-    if (!t) {
-      i++;
-      continue;
-    }
-    if (t.startsWith("・")) break;
-    i++;
+  const headerPatterns = ["✅ 今すぐやること", "✅ 今すぐやること（これだけでOK）", "🟡 今すぐやること"];
+  const headerIdx = lines.findIndex((l) => headerPatterns.some((p) => l.trim().startsWith(p)));
+  if (headerIdx === -1) {
+    // ブロックが存在しない場合は、⏳の直前に挿入
+    const outlookIdx = lines.findIndex((l) => l.trim().startsWith("⏳ 今後の見通し"));
+    const insertIdx = outlookIdx >= 0 ? outlookIdx : lines.length;
+    const newBlock = ["✅ 今すぐやること", "", fixedAction, fixedReason, ""];
+    const updated = [...lines.slice(0, insertIdx), ...newBlock, ...lines.slice(insertIdx)];
+    return updated.join("\n");
   }
-  if (i >= lines.length) return text;
-  const firstActionIdx = i;
-  if (lines[firstActionIdx].trim() === fixedAction) return text;
-  let restStart = firstActionIdx + 1;
-  if (restStart < lines.length && lines[restStart].trim().startsWith("→")) restStart++;
+  // 最初の箇条書き行を探す（・ / • / - に対応）
+  let firstBulletIdx = -1;
+  for (let i = headerIdx + 1; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (!t) continue;
+    if (/^(🟢|🟡|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(t)) break;
+    if (/^[・•\-]\s/.test(t) || (t.startsWith("・") || t.startsWith("•") || t.startsWith("-"))) {
+      firstBulletIdx = i;
+      break;
+    }
+  }
+  if (firstBulletIdx < 0) {
+    // 箇条書き行がない場合はヘッダ直後に挿入
+    const nextHeaderIdx = lines.findIndex((l, idx) => idx > headerIdx && /^(🟢|🟡|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(l.trim()));
+    const blockEnd = nextHeaderIdx >= 0 ? nextHeaderIdx : lines.length;
+    const before = lines.slice(0, headerIdx + 1);
+    const after = lines.slice(headerIdx + 1, blockEnd);
+    const inserted = [...before, fixedAction, fixedReason, "", ...after];
+    return [...lines.slice(0, headerIdx), ...inserted, ...lines.slice(blockEnd)].join("\n");
+  }
+  const currentContent = lines[firstBulletIdx].trim().replace(/^[・•\-]\s?/, "").trim();
+  if (currentContent === fixedAction.replace(/^・/, "").trim()) return text;
+  // 既存の1件目と→行を差し替え（beforeBlock は header から firstBullet 直前まで）
+  let restStart = firstBulletIdx + 1;
+  if (restStart < lines.length && /^→\s/.test(lines[restStart].trim())) restStart++;
   while (restStart < lines.length && !lines[restStart].trim()) restStart++;
-  const nextHeaderIdx = lines.findIndex((l, idx) => idx > headerIdx && /^(🟢|🟡|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(l));
+  const nextHeaderIdx = lines.findIndex((l, idx) => idx > headerIdx && /^(🟢|🟡|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(l.trim()));
   const blockEnd = nextHeaderIdx >= 0 ? nextHeaderIdx : lines.length;
-  const beforeBlock = lines.slice(0, firstActionIdx);
+  const beforeBlock = lines.slice(headerIdx, firstBulletIdx);
   const restOfBlock = lines.slice(restStart, blockEnd);
   const newBlock = [...beforeBlock, fixedAction, fixedReason, "", ...restOfBlock];
   return [...lines.slice(0, headerIdx), ...newBlock, ...lines.slice(blockEnd)].join("\n");
@@ -3954,19 +3982,74 @@ function buildDontActionsFromContext(context = {}, evidence = {}) {
   return base.slice(0, 2);
 }
 
-const MC_4_LINES = [
-  "休むためにMCが必要な場合は、今の症状であればオンライン診療で容易に取得できます。",
-  "doctor anywhere / white coat",
+/** PAIN/INFECTION+🟡のとき、モーダル末尾に追加。MC問題を解決する「現実の行動（会社対応）」サポート。フォールバック用。 */
+const SINGAPORE_REST_SECTION_FALLBACK = [
+  "",
+  "■シンガポールでの休み方",
+  "",
+  "シンガポールでは、軽い体調不良で1日休む場合でも、",
+  "会社に提出するMC（診断書）が必要になることがよくあります。",
+  "",
+  "MCがない場合、有給休暇として扱われなかったり、",
+  "別の休暇が使われることもあります。",
+  "",
+  "この状態であれば、",
+  "オンライン診療で数分でMCを取得できることが多く、",
+  "外出せずに対応することも可能です。",
 ];
 
-function shouldAppendMcLinesToModal(state) {
-  if (state?.decisionLevel === "🔴") return false;
-  const restLevel = resolveRestLevelFromState(state);
-  const category = resolveQuestionCategoryFromState(state);
-  return (restLevel === "LIGHT" || restLevel === "STRONG") && category !== "INFECTION";
+function shouldAppendSingaporeRestSection(state) {
+  if (state?.decisionLevel !== "🟡") return false;
+  const category = state?.triageCategory || resolveQuestionCategoryFromState(state);
+  return category === "PAIN" || category === "INFECTION";
 }
 
-function renderActionDetailMessage(cushion, doActions = [], dontActions = [], appendMcLines = false) {
+/** ■シンガポールでの休み方セクションを型に沿って生成。必ず①〜④の順で含める。 */
+async function generateSingaporeRestSection() {
+  const systemPrompt = `あなたはシンガポール在住者向けの体調サポート文を生成するアシスタントです。
+以下の型に厳密に沿って、■シンガポールでの休み方セクションの本文を生成してください。
+
+【必須構成（順番固定）】
+① 軽い症状でもMCが必要な文化（1〜2文）
+② MCがない場合のリスク（有給消費など）（1〜2文）
+③ 簡単な解決手段（オンライン診療）（1文）
+④ 手軽さ（数分・外出不要）（1文）
+
+【ルール】
+- 医療説明は禁止。不安を煽らない。
+- 事実ベース。断定しすぎない（「〜することがよくあります」等）。
+- 4〜6行以内。長すぎる説明禁止。
+- 見出し「■シンガポールでの休み方」は含めない（呼び出し側で付与）。
+- 出力は本文のみ。改行は\\nで。`;
+
+  for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
+    try {
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: systemPrompt },
+          {
+            role: "user",
+            content:
+              "上記の型に沿って、■シンガポールでの休み方の本文を生成してください。見出しは含めず、本文のみ出力。",
+          },
+        ],
+        temperature: 0.3,
+        max_tokens: 400,
+      });
+      const raw = (completion?.choices?.[0]?.message?.content || "").trim();
+      if (!raw) continue;
+      const lines = raw.split("\n").map((l) => l.trim()).filter(Boolean);
+      if (lines.length < 3) continue;
+      return ["", "■シンガポールでの休み方", "", ...lines];
+    } catch (e) {
+      if (attempt >= LLM_RETRY_COUNT - 1) break;
+    }
+  }
+  return SINGAPORE_REST_SECTION_FALLBACK;
+}
+
+function renderActionDetailMessage(cushion, doActions = [], dontActions = [], singaporeRestLines = null) {
   const lines = [String(cushion || "").trim(), "", "■今すぐやること"];
   doActions.slice(0, 4).forEach((item, idx) => {
     lines.push(`・${String(item.action || "").trim()}`);
@@ -3979,8 +4062,8 @@ function renderActionDetailMessage(cushion, doActions = [], dontActions = [], ap
     lines.push(`→ ${String(item.reason || "").trim()}`);
     if (idx < Math.min(dontActions.length, 2) - 1) lines.push("");
   });
-  if (appendMcLines) {
-    lines.push("", ...MC_4_LINES);
+  if (Array.isArray(singaporeRestLines) && singaporeRestLines.length > 0) {
+    lines.push(...singaporeRestLines);
   }
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
@@ -3995,9 +4078,10 @@ async function buildConcreteImmediateActionsDetails(state, actionSection = "") {
   const ensuredDo = buildDoActionsFromPlan(plan, state, state?.decisionLevel || "🟢", {
     actionsOverride: refinedActions.length > 0 ? refinedActions : undefined,
   });
-  const appendMc = shouldAppendMcLinesToModal(state);
+  const appendSingaporeRest = shouldAppendSingaporeRestSection(state);
+  const singaporeRestLines = appendSingaporeRest ? await generateSingaporeRestSection() : null;
   return {
-    message: renderActionDetailMessage(cushion, ensuredDo, dontActions, appendMc),
+    message: renderActionDetailMessage(cushion, ensuredDo, dontActions, singaporeRestLines),
     query: plan?.searchQuery || "",
     sourceNames: plan?.sourceNames || [],
   };
@@ -4371,8 +4455,10 @@ function buildJudgmentSnapshot(state, history = [], decisionType) {
     riskFactors.push(`付随症状: ${answers.associated_symptoms}`);
   }
 
+  const category = state?.triageCategory || resolveQuestionCategoryFromState(state) || "PAIN";
   return freezeJudgmentSnapshot({
     main_symptom: mainSymptom || "症状",
+    category: category,
     duration: duration || "数日",
     severity: severity || "中くらい",
     red_flags: redFlags.slice(0, 3),
@@ -4380,50 +4466,6 @@ function buildJudgmentSnapshot(state, history = [], decisionType) {
     user_original_phrases: mergedPhrases.slice(0, 10),
     judgment_type: decisionType || state?.decisionType || "C_WATCHFUL_WAITING",
   });
-}
-
-/** 仕様8.2: JUDGMENT_SNAPSHOTのmain_symptom/severity/durationが不足時のみ最小1問で補完。ヒアリングを広げる質問は禁止。 */
-function getMissingFieldForFollowUp(snapshot) {
-  if (!snapshot) return null;
-  const main = String(snapshot.main_symptom || "").trim();
-  const sev = String(snapshot.severity || "").trim();
-  const dur = String(snapshot.duration || "").trim();
-  if (!main || main === "症状") {
-    return {
-      field: "main_symptom",
-      question: "行動を正確に整理するため、主な症状をひとことで教えてください。",
-    };
-  }
-  if (!sev) {
-    return {
-      field: "severity",
-      question: "行動の優先度をそろえるため、つらさは10段階でどのくらいか教えてください。",
-    };
-  }
-  if (!dur) {
-    return {
-      field: "duration",
-      question: "判断根拠をそろえるため、症状がいつ頃から続いているかだけ教えてください。",
-    };
-  }
-  return null;
-}
-
-function patchSnapshotField(snapshot, field, value) {
-  if (!snapshot || !field) return snapshot;
-  const nextValue = String(value || "").trim();
-  if (!nextValue) return snapshot;
-  const next = {
-    ...snapshot,
-    user_original_phrases: [...(snapshot.user_original_phrases || [])],
-  };
-  if (!next[field]) {
-    next[field] = nextValue;
-  }
-  if (!next.user_original_phrases.includes(nextValue)) {
-    next.user_original_phrases.push(nextValue);
-  }
-  return freezeJudgmentSnapshot(next);
 }
 
 function formatDurationForScript(duration) {
@@ -4446,302 +4488,181 @@ function formatSeverityForScript(severity) {
   return s;
 }
 
-function buildCommunicationScript(state, destinationName, decisionType) {
+/** 🔴英語伝え方（①安心 ②ハードル下げ ③日本語 ④English ⑤スマホ ⑥誘導） */
+function buildCommunicationScript(state) {
   const snapshot = state?.judgmentSnapshot || {};
   const symptom = snapshot.main_symptom || "症状";
   const durationRaw = snapshot.duration || "";
   const severityRaw = snapshot.severity || "";
-  const durationJp = formatDurationForScript(durationRaw);
-  const severityJp = formatSeverityForScript(severityRaw);
 
-  const reassurance = "今の症状なら、病院で直接確認してもらうのが安心につながります。";
-  const intro = "受付でそのまま使える言い方を用意しました。";
+  const symptomEn =
+    /頭痛/.test(symptom) ? "a headache" :
+    /喉|のど/.test(symptom) ? "a sore throat" :
+    /吐き気|嘔吐/.test(symptom) ? "nausea" :
+    /腹痛|お腹|胃/.test(symptom) ? "stomach pain" :
+    symptom;
+  const durationEn =
+    /さっき|今|just/.test(durationRaw) ? "since just now" :
+    /数時間/.test(durationRaw) ? "for a few hours" :
+    /1日|一日/.test(durationRaw) ? "for about a day" :
+    /数日/.test(durationRaw) ? "for a few days" :
+    durationRaw ? `for ${durationRaw}` : "for a while";
+  const severityEn =
+    /軽い|軽め/.test(severityRaw) ? "mild" :
+    /強い|かなり|高め/.test(severityRaw) ? "quite strong" :
+    "moderate";
 
-  let jpLine1 = "";
-  if (durationRaw && severityRaw && durationJp) {
-    jpLine1 = `${durationJp}${symptom}が続いていて、つらさは${severityJp}です。`;
-  } else if (severityRaw && symptom) {
-    jpLine1 = `${symptom}が続いていて、つらさは${severityJp}です。`;
-  } else if (symptom) {
-    jpLine1 = `${symptom}について相談したいです。`;
-  } else {
-    jpLine1 = "症状について相談したいです。";
-  }
+  const jpLine = durationRaw && severityRaw
+    ? `${durationRaw}から${symptom}が続いていて、${severityRaw}程度です。念のため診ていただきたいです。`
+    : `${symptom}が続いていて、念のため診ていただきたいです。`;
 
-  const jp = [
-    "こんにちは。",
-    jpLine1,
-    "念のため、今の状態を診ていただきたいです。",
-  ].join("\n");
-
-  let durationEn = "";
-  if (durationRaw) {
-    const m = durationRaw.match(/(\d+)\s*日/);
-    durationEn = m ? `about ${m[1]} days` : /数日/.test(durationRaw) ? "a few days" : durationRaw;
-  }
-  const severityEn = /中程度|中くらい|中等度|\d+\/10/.test(severityRaw)
-    ? "moderate"
-    : /強い|かなり|高め/.test(severityRaw)
-      ? "quite severe"
-      : /軽い|軽め/.test(severityRaw)
-        ? "mild"
-        : severityRaw || "moderate";
-  let enLine1 = "";
-  if (durationRaw && severityRaw && durationEn) {
-    enLine1 = `I've had ${symptom} for ${durationEn}. The pain is ${severityEn}.`;
-  } else if (durationRaw && severityRaw) {
-    enLine1 = `I have ${symptom}. The pain is ${severityEn}.`;
-  } else if (symptom) {
-    enLine1 = `I'd like to consult about ${symptom}.`;
-  } else {
-    enLine1 = "I want to consult about my symptoms.";
-  }
-
-  const en = [
-    "Hello.",
-    enLine1,
-    "I'd like to have my condition checked, just to be safe.",
-  ].join("\n");
-
-  const smartphoneLine = "そのままスマホを見せても大丈夫です。";
-  const nextInvite = "他にも気になることがあればなんでも言ってください";
+  const enLine = `I have been having ${symptomEn} ${durationEn}, and it feels ${severityEn}.\nI'd like to have this checked just to be safe.`;
 
   return [
-    reassurance,
-    intro,
+    "英語で伝えるのが不安ですよね。海外での受診はハードルが高く感じると思います。",
+    "",
+    "完璧に話す必要はありません。短く伝えるだけでも大丈夫ですし、このまま見せても問題ありません。",
     "",
     "【日本語】",
-    jp,
+    jpLine,
     "",
     "【English】",
-    en,
+    enLine,
     "",
-    smartphoneLine,
-    "",
-    nextInvite,
+    "このまま受付で見せても大丈夫です。必要なら、もう少し詳しい言い方も一緒に考えます。",
   ].join("\n");
 }
 
-/** buildCommunicationScript の ④【English】＋⑤＋⑥ 部分（🔴「どっちも」用） */
-function buildCommunicationScriptEnglishPart(state, destinationName, decisionType) {
-  const full = buildCommunicationScript(state, destinationName, decisionType);
+/** buildCommunicationScript の ④【English】以降（🔴「どっちも」用） */
+function buildCommunicationScriptEnglishPart(state) {
+  const full = buildCommunicationScript(state);
   const idx = full.indexOf("【English】");
   if (idx === -1) return full;
   return full.slice(idx);
 }
 
-/** 仕様8.2: 診察前準備（・項目＋→理由）をJUDGMENT_SNAPSHOTと症状から生成。固定例のコピー禁止。最低2件・最大3件。 */
-function buildImmediateActionsWithReasons(state, decisionType) {
+/** 🔴診察前準備ブロック（カテゴリ別） */
+function buildRedPrepareBlock(state) {
   const snapshot = state?.judgmentSnapshot || {};
-  if (decisionType === "A_HOSPITAL") {
-    const category = resolveQuestionCategoryFromState(state);
-    const symptom = snapshot.main_symptom || "症状";
-    const duration = snapshot.duration || "";
-    const items = [];
-    if (category === "INFECTION") {
-      items.push(
-        ["熱を測ってメモしておく", "　→ 受付で伝えるとスムーズです"],
-        ["マスクを用意しておく", "　→ 感染対策として役立ちます"],
-        ["症状の経過を一言で言えるようにしておく", "　→ 診察室で落ち着いて話せます"]
-      );
-    } else {
-      items.push(
-        [`${symptom}の経過をメモしておく`, "　→ 医師に伝えやすくなります"],
-        ["今の症状を一言で言えるようにしておく", "　→ 診察がスムーズになります"],
-        [duration ? "服薬状況があればメモしておく" : "症状の変化をメモしておく", "　→ 判断の参考になります"]
-      );
-    }
-    const picked = items.slice(0, 3);
-    const lines = [
-      "診察までの間に、できることを簡単にまとめます。",
-      "",
-      ...picked.flatMap(([title, reason]) => [title, reason]),
-      "",
-      "今は、病院に向かう準備を優先してください。迷ったら、この画面をそのまま見せて大丈夫です。",
-    ];
-    return lines.join("\n");
-  }
-  return buildWatchfulActions(state);
+  const category = snapshot.category || resolveQuestionCategoryFromState(state) || "PAIN";
+  const seeds = getPrepareSeedsByCategory(category);
+  const lines = [
+    "診察までの間に、できることを簡単にまとめます。",
+    "",
+    ...seeds.flatMap(([title, reason]) => [`・${title}`, `→ ${reason}`]),
+    "",
+    "今は、病院に向かう準備を優先してください。",
+    "迷ったら、この画面をそのまま見せて大丈夫です。",
+  ];
+  return lines.join("\n");
 }
 
-function buildNextFlow(decisionType) {
-  if (decisionType === "A_HOSPITAL") {
-    return ""; // A_HOSPITALはbuildImmediateActionsWithReasonsに含む
-  }
-  return "";
-}
+/** 🟢 C_WATCHFUL_WAITING フォロー質問（固定） */
+const WATCHFUL_FOLLOW_UP_QUESTION =
+  "今は少し休むだけでも良さそうです。\nこのまま休みますか？\nそれとも、もう少し詳しく確認しますか？";
 
-/** 仕様8.2: まとめから「今すぐやること」ブロックの・項目を抽出（☐生成用） */
-function extractImmediateActionItemsFromSummary(state) {
-  const summaryText = state?.summaryText || "";
-  if (!summaryText) return [];
-  const level = state?.decisionLevel || "🟢";
-  const specs = getSummarySectionSpecsByJudgement(level);
-  const sections = extractSectionsBySpecs(summaryText, specs);
-  const actionSection = sections.find((s) => /今すぐやること/.test(s.text || ""));
-  const blockText = actionSection?.text || "";
-  const items = [];
-  for (const line of blockText.split("\n")) {
-    const m = line.match(/^[・●]\s*(.+?)(?:\s*[　→]\s|$)/);
-    if (m && m[1]) {
-      items.push(m[1].trim());
-    }
-  }
-  return items.slice(0, 3);
-}
+/** 🔴 A_HOSPITAL フォロー質問（固定） */
+const RED_FOLLOW_UP_QUESTION =
+  "今の症状から見ると、念のため病院で確認してもらうと安心そうです。\n診察までの間にできることを整理しますか？\nそれとも英語でどう伝えるか一緒に考えますか？";
 
-const FOLLOW_UP_SUFFIX = "\n\n他にも気になることがあればなんでも言ってください";
-
-/** 🟢/🟡まとめ直後のフォロー質問（固定） */
-const WATCHFUL_FOLLOW_UP_QUESTION = "今は少し休むだけでも良さそうです。\nこのまま休みますか？\nそれとも、もう少し詳しく確認しますか？";
-
-/** 🔴質問①（A_HOSPITAL用）：診察前準備 or 英語伝え方の選択 */
-function buildRedFollowUpQuestion() {
-  return `今の症状から見ると、念のため病院で確認してもらうと安心そうです。
-診察までの間にできることを、
-ここで整理しますか？
-それとも受診先で英語でどう伝えるか、
-一緒に考えますか？`;
-}
-
-/** まとめ後の初期フォロー質問を仕様通りに返す（handleFollowUpFlowがnullの時のフォールバック） */
+/** まとめ後の初期フォロー質問（generateFollowResponseがnullの時のフォールバック） */
 function getInitialFollowUpQuestionBySpec(state) {
   if (!state) return null;
-  const decisionType =
-    state.decisionType ||
-    (state.decisionLevel === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING");
-  if (decisionType === "A_HOSPITAL") {
-    return buildRedFollowUpQuestion();
-  }
-  return WATCHFUL_FOLLOW_UP_QUESTION;
+  const jt = state.decisionType || (state.decisionLevel === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING");
+  return jt === "A_HOSPITAL" ? RED_FOLLOW_UP_QUESTION : WATCHFUL_FOLLOW_UP_QUESTION;
 }
 
-function buildFollowUpQuestion1(destinationName) {
-  return `もしよろしければ、${destinationName}でどう伝えればいいか、一緒に考えましょうか？${FOLLOW_UP_SUFFIX}`;
+/** カテゴリ別☐項目のシード（固定文禁止・自然文生成のヒント）。PAIN/INFECTION/GI/SKIN */
+function getCheckboxSeedsByCategory(category) {
+  const seeds = {
+    PAIN: ["刺激を減らす", "水分"],
+    INFECTION: ["水分", "安静"],
+    GI: ["食事控えめ", "水分少量ずつ"],
+    SKIN: ["刺激回避", "冷やす"],
+  };
+  return seeds[category] || seeds.PAIN;
 }
 
-function buildWatchfulActions(state) {
-  const snapshot = state?.judgmentSnapshot || {};
-  const mobility = state?.slotAnswers?.daily_impact || "普通に動ける";
-  const symptom = snapshot.main_symptom || "症状";
-  const reason1 = `「${mobility}」な状態なので、悪化させないことが最優先です`;
-  const reason3 = `「${symptom}が急に強くなる」などがあれば、その時に判断できます`;
-  return [
-    "今の状態なら、やることは多くありません。",
-    "",
-    "・今日は無理をしない",
-    `　→ ${reason1}`,
-    "",
-    "・水分を少しずつとる",
-    "　→ 体を回復モードに保ちやすくなります",
-    "",
-    "・変化があれば気づけるようにしておく",
-    `　→ ${reason3}`,
-  ].join("\n");
+/** カテゴリ別診察前準備。INFECTION/PAIN/GI/SKIN */
+function getPrepareSeedsByCategory(category) {
+  const seeds = {
+    INFECTION: [
+      ["体温を測ってメモしておく", "受付で伝えるとスムーズです"],
+      ["マスクを用意しておく", "感染対策として役立ちます"],
+    ],
+    PAIN: [
+      ["痛みの経過をメモしておく", "医師に伝えやすくなります"],
+      ["今の症状を一言で言えるようにしておく", "診察がスムーズになります"],
+    ],
+    GI: [
+      ["食事を控えめにする", "胃腸の負担を減らせます"],
+      ["水分を少量ずつとる", "脱水予防になります"],
+    ],
+    SKIN: [
+      ["原因になりそうなものを避ける", "悪化を防ぎやすくなります"],
+      ["状態の変化をメモしておく", "診察時に伝えやすくなります"],
+    ],
+  };
+  return seeds[category] || seeds.PAIN;
 }
 
+/** クロージング（拒否時） */
+function buildFollowClosingMessage() {
+  return "大丈夫です、その判断でも問題ありません。\nまた不安になったら、いつでもここで確認してください。";
+}
+
+/** 🟢分岐①「休む」の応答 */
 function buildWatchfulRestResponse() {
-  return [
-    "わかりました。",
-    "今は体を回復モードに入れる時間です。",
-    "数時間ゆっくりしてみてください。",
-    "",
-    "変化があれば、いつでもここに戻れます。",
-  ].join("\n");
+  return "今はそのまま休むのが一番良さそうです。\nまた不安になったら、いつでもここで確認してください。";
 }
 
-/** 仕様8.2: ☐形式で最大3つ。JUDGMENT_SNAPSHOTと「今すぐやること」ブロックから生成。固定例禁止。3つ目は「〇〇が強くなったら気づけるようにする」。 */
+/** 🟢分岐②「詳しく確認」→ ☐3つ（カテゴリ別） */
 function buildWatchfulCheckboxQuestion(state) {
   const snapshot = state?.judgmentSnapshot || {};
-  const symptom = snapshot.main_symptom || "症状";
-  const item3 = `${symptom}が強くなったら気づけるようにする`;
-  const fromSummary = extractImmediateActionItemsFromSummary(state);
-  let item1 = "";
-  let item2 = "";
-  if (fromSummary.length >= 2) {
-    item1 = fromSummary[0];
-    item2 = fromSummary[1];
-  } else if (fromSummary.length === 1) {
-    item1 = fromSummary[0];
-    const mobility = state?.slotAnswers?.daily_impact || "";
-    item2 = mobility ? "体を楽にする姿勢をとる" : "回復を優先する時間をとる";
-  } else {
-    const mobility = state?.slotAnswers?.daily_impact || "";
-    item1 = mobility ? "体を休める時間を確保する" : "回復を優先する時間をとる";
-    item2 = "こまめに水分補給を心がける";
-  }
+  const category = snapshot.category || "PAIN";
+  const mainSymptom = snapshot.main_symptom || "症状";
+  const seeds = getCheckboxSeedsByCategory(category);
+  const item1 = seeds[0] ? `${seeds[0]}を心がける` : "刺激を減らす";
+  const item2 = seeds[1] ? `${seeds[1]}をとる` : "水分を補給する";
+  const item3 = `${mainSymptom}が強くなったら気づけるようにする`;
   const items = [item1, item2, item3].filter(Boolean).slice(0, 3);
   state.followUpCheckboxItems = items;
-  return [
-    "念のため確認しますね。",
-    "",
-    ...items.map((t) => `☐ ${t}`),
-    "",
-    `この${items.length}つ、できそうですか？${FOLLOW_UP_SUFFIX}`,
-  ].join("\n");
+  return ["念のため確認しますね。", "", ...items.map((t) => `☐ ${t}`), "", "この3つ、できそうですか？"].join("\n");
 }
 
+/** 🟢分岐③「はい」の応答 */
 function buildWatchfulAffirmation() {
-  return [
-    "わかりました。",
-    "今はそれで十分です。",
-    "体を回復モードに入れることを優先してください。",
-    "",
-    "変化があれば、いつでもここで確認できます。",
-  ].join("\n");
+  return "いいですね、そのまま無理せず過ごしてください。";
 }
 
-/** 仕様8.2: 3つの☐に対応する難しさの選択肢を生成。state.followUpCheckboxItemsを参照。 */
+/** 🟢分岐④「いいえ」→ 難しさ選択 */
 function buildWatchfulDifficultyOptions(state) {
   const items = state?.followUpCheckboxItems || [];
   const options = items.slice(0, 3).map((item) => {
     if (/強くなったら気づける/.test(item)) {
       const m = item.match(/(.+?)が強くなったら/);
-      const symptom = m ? m[1] : "症状";
-      return `・${symptom}の変化に気づくのが不安`;
+      return `・${m ? m[1] : "症状"}の変化に気づくのが不安`;
     }
-    if (/水分|補給/.test(item)) return `・${item.replace(/を心がける|する$/, "")}がつらい`;
-    return `・${item.replace(/する$/, "")}のが難しい`;
+    if (/水分|補給/.test(item)) return `・${item.replace(/を心がける|をとる|する$/, "")}がつらい`;
+    return `・${item.replace(/を心がける|をとる|する$/, "")}のが難しい`;
   });
-  if (options.length === 0) {
-    return "どれが難しそうですか？" + FOLLOW_UP_SUFFIX;
-  }
-  return ["どれが難しそうですか？", "", ...options].join("\n") + FOLLOW_UP_SUFFIX;
+  return ["どれが難しそうですか？", "", ...options].join("\n");
 }
 
-/** 仕様8.2: 生成した☐に応じた個別対応を生成。選択された難しさに合わせた内容。 */
+/** 🟢分岐④→個別対応 */
 function buildWatchfulIndividualResponse(choice, state) {
   const t = (choice || "").trim();
   const items = state?.followUpCheckboxItems || [];
   if (/水分|補給|とる|つらい/.test(t) || items.some((i) => /水分|補給/.test(i))) {
-    return [
-      "一気に飲まなくて大丈夫です。",
-      "ひと口ずつでも十分です。",
-    ].join("\n");
+    return "一気に飲まなくて大丈夫です。ひと口ずつでも十分です。";
   }
-  if (/休む|休める|回復|難しい/.test(t) || items.some((i) => /休む|回復|確保/.test(i))) {
-    return [
-      "無理に休もうとしなくて大丈夫です。",
-      "できる範囲で、体を楽にする姿勢をとるだけでも十分です。",
-    ].join("\n");
+  if (/休む|休める|回復|難しい|刺激/.test(t) || items.some((i) => /刺激|安静/.test(i))) {
+    return "無理に休もうとしなくて大丈夫です。できる範囲で、体を楽にする姿勢をとるだけでも十分です。";
   }
   if (/変化|気づく|不安/.test(t) || items.some((i) => /強くなったら気づける/.test(i))) {
-    return [
-      "いまは気にしなくて大丈夫です。",
-      "「何かおかしい」と感じたときだけ、ここに戻ってきてください。",
-    ].join("\n");
+    return "いまは気にしなくて大丈夫です。「何かおかしい」と感じたときだけ、ここに戻ってきてください。";
   }
   return buildWatchfulAffirmation();
-}
-
-function formatDestinationName(name, decisionType) {
-  if (!name) return decisionType === "A_HOSPITAL" ? "病院" : "薬局";
-  if (decisionType === "A_HOSPITAL") {
-    if (name.match(/病院|Hospital|Clinic/)) return name;
-    return `${name}病院`;
-  }
-  if (name.match(/薬局|Pharmacy/)) return name;
-  return `${name}薬局`;
 }
 
 function buildFollowUpJudgeMeta(state) {
@@ -4761,97 +4682,40 @@ function buildFollowUpJudgeMeta(state) {
   };
 }
 
-/** 仕様8.2: まとめ後のフォロー質問フェーズ。JUDGMENT_SNAPSHOTを唯一の参照元とする。 */
-function handleFollowUpFlow(message, state, options = {}) {
-  if (!state?.hasSummaryBlockGenerated) return null;
-  // 確認文の後は必ずまとめ。フォローアップ（閉じメッセージ等）は絶対に返さない。
+/**
+ * フォロー質問フェーズ専用。まとめ生成ロジックと完全分離。
+ * summaryGenerated/summaryShown のときのみ呼ぶ。まとめを再生成しない。
+ */
+function generateFollowResponse(state, userInput, options = {}) {
+  if (!state?.hasSummaryBlockGenerated && !state?.summaryShown) return null;
   if (state.confirmationShown && !state.summaryShown) return null;
-  const trimmed = (message || "").trim();
-  const decisionType =
-    state?.decisionType ||
-    (state?.decisionLevel === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING");
-  if (!state.decisionType) state.decisionType = decisionType;
+
+  const trimmed = (userInput || "").trim();
+  const jt = state.decisionType || (state.decisionLevel === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING");
+  if (!state.decisionType) state.decisionType = jt;
   if (!state.judgmentSnapshot) {
     const history = options.history || [];
-    state.judgmentSnapshot = buildJudgmentSnapshot(state, history, decisionType);
+    state.judgmentSnapshot = buildJudgmentSnapshot(state, history, jt);
   }
-  const rawDestinationName =
-    state?.followUpDestinationName ||
-    (decisionType === "A_HOSPITAL"
-      ? state?.hospitalRecommendation?.name
-      : state?.pharmacyRecommendation?.name);
-  const destinationName = formatDestinationName(rawDestinationName, decisionType);
+  const snapshot = state.judgmentSnapshot || {};
 
-  // 最低限の行動生成に必要な情報が不足している場合のみ、1問だけ確認する
-  if (state.followUpSnapshotPendingField) {
-    if (isDecline(trimmed)) {
-      state.followUpPhase = "closed";
-      state.followUpSnapshotPendingField = null;
-      state.followUpSnapshotResume = null;
-      return { message: buildClosingMessage() };
-    }
-    state.judgmentSnapshot = patchSnapshotField(
-      state.judgmentSnapshot,
-      state.followUpSnapshotPendingField,
-      trimmed
-    );
-    const resume = state.followUpSnapshotResume;
-    state.followUpSnapshotPendingField = null;
-    state.followUpSnapshotResume = null;
-    if (resume === "watchful_actions" || resume === "watchful_checkbox") {
-      state.followUpStep = 2;
-      return { message: buildWatchfulCheckboxQuestion(state) };
-    }
-    if (resume === "communication_script") {
-      state.followUpStep = 2;
-      const script = buildCommunicationScript(state, destinationName, decisionType);
-      return { message: script };
-    }
-    if (resume === "red_prepare") {
-      state.followUpPhase = "closed";
-      const actions = buildImmediateActionsWithReasons(state, decisionType);
-      return { message: actions };
-    }
-    if (resume === "red_english") {
-      state.followUpPhase = "closed";
-      const script = buildCommunicationScript(state, destinationName, decisionType);
-      return { message: script };
-    }
-    if (resume === "red_both") {
-      state.followUpPhase = "closed";
-      const actions = buildImmediateActionsWithReasons(state, decisionType);
-      const englishPart = buildCommunicationScriptEnglishPart(state, destinationName, decisionType);
-      return { message: `${actions}\n\n${englishPart}` };
-    }
-  }
-
-  if (decisionType === "C_WATCHFUL_WAITING") {
-    const qWatchful = WATCHFUL_FOLLOW_UP_QUESTION;
-    const qCheckbox = buildWatchfulCheckboxQuestion(state);
-
+  if (jt === "C_WATCHFUL_WAITING") {
     if (state.followUpStep <= 1) {
       if (isRestChoice(trimmed)) {
         state.followUpPhase = "closed";
         return { message: buildWatchfulRestResponse() };
       }
       if (isDetailChoice(trimmed)) {
-        const missing = getMissingFieldForFollowUp(state.judgmentSnapshot);
-        if (missing) {
-          state.followUpSnapshotPendingField = missing.field;
-          state.followUpSnapshotResume = "watchful_checkbox";
-          return { message: missing.question };
-        }
         state.followUpStep = 2;
-        return { message: qCheckbox };
+        return { message: buildWatchfulCheckboxQuestion(state) };
       }
       if (isDecline(trimmed)) {
         state.followUpPhase = "closed";
-        return { message: buildClosingMessage() };
+        return { message: buildFollowClosingMessage() };
       }
       state.followUpPhase = "closed";
-      return { message: buildClosingMessage() };
+      return { message: buildFollowClosingMessage() };
     }
-
     if (state.followUpStep === 2) {
       if (isAffirmative(trimmed)) {
         state.followUpPhase = "closed";
@@ -4859,92 +4723,46 @@ function handleFollowUpFlow(message, state, options = {}) {
       }
       if (isDeclineToClose(trimmed)) {
         state.followUpPhase = "closed";
-        return { message: buildClosingMessage() };
+        return { message: buildFollowClosingMessage() };
       }
       if (isCheckboxCantDo(trimmed)) {
         state.followUpStep = 3;
         return { message: buildWatchfulDifficultyOptions(state) };
       }
-      return { message: qCheckbox };
+      return { message: buildWatchfulCheckboxQuestion(state) };
     }
-
     if (state.followUpStep === 3) {
       state.followUpPhase = "closed";
       return { message: buildWatchfulIndividualResponse(trimmed, state) };
     }
-
     state.followUpPhase = "closed";
-    return { message: buildClosingMessage() };
+    return { message: buildFollowClosingMessage() };
   }
 
-  // A_HOSPITAL（🔴）：質問①は診察前準備 or 英語伝え方の選択。B_PHARMACYは従来の伝え方質問。
-  const q1 =
-    decisionType === "A_HOSPITAL"
-      ? buildRedFollowUpQuestion()
-      : buildFollowUpQuestion1(destinationName);
-
-  if (state.followUpPhase === "closed") {
-    return { message: buildClosingMessage() };
-  }
-
-  if (state.followUpStep <= 1) {
+  if (jt === "A_HOSPITAL") {
     if (isDecline(trimmed)) {
       state.followUpPhase = "closed";
-      return { message: buildClosingMessage() };
+      return { message: buildFollowClosingMessage() };
     }
-    if (decisionType === "A_HOSPITAL") {
-      if (isRedChoiceBoth(trimmed)) {
-        const missing = getMissingFieldForFollowUp(state.judgmentSnapshot);
-        if (missing) {
-          state.followUpSnapshotPendingField = missing.field;
-          state.followUpSnapshotResume = "red_both";
-          return { message: missing.question };
-        }
-        state.followUpPhase = "closed";
-        const actions = buildImmediateActionsWithReasons(state, decisionType);
-        const englishPart = buildCommunicationScriptEnglishPart(state, destinationName, decisionType);
-        return { message: `${actions}\n\n${englishPart}` };
-      }
-      if (isRedChoicePrepare(trimmed)) {
-        const missing = getMissingFieldForFollowUp(state.judgmentSnapshot);
-        if (missing) {
-          state.followUpSnapshotPendingField = missing.field;
-          state.followUpSnapshotResume = "red_prepare";
-          return { message: missing.question };
-        }
-        state.followUpPhase = "closed";
-        const actions = buildImmediateActionsWithReasons(state, decisionType);
-        return { message: actions };
-      }
-      if (isRedChoiceEnglish(trimmed)) {
-        const missing = getMissingFieldForFollowUp(state.judgmentSnapshot);
-        if (missing) {
-          state.followUpSnapshotPendingField = missing.field;
-          state.followUpSnapshotResume = "red_english";
-          return { message: missing.question };
-        }
-        state.followUpPhase = "closed";
-        const script = buildCommunicationScript(state, destinationName, decisionType);
-        return { message: script };
-      }
-      return { message: "どちらにしますか？「ここで整理」か「英語」か、どちらか教えてください。" };
-    }
-    // B_PHARMACY：はい/いいえ
-    if (isAffirmative(trimmed)) {
-      const missing = getMissingFieldForFollowUp(state.judgmentSnapshot);
-      if (missing) {
-        state.followUpSnapshotPendingField = missing.field;
-        state.followUpSnapshotResume = "communication_script";
-        return { message: missing.question };
-      }
+    if (isRedChoiceBoth(trimmed)) {
       state.followUpPhase = "closed";
-      const script = buildCommunicationScript(state, destinationName, decisionType);
-      return { message: script };
+      const actions = buildRedPrepareBlock(state);
+      const englishPart = buildCommunicationScriptEnglishPart(state);
+      return { message: `${actions}\n\n${englishPart}` };
     }
-    return { message: "伝え方を一緒に考えますか？「はい」か「今はいいです」か、どちらか教えてください。" };
+    if (isRedChoicePrepare(trimmed)) {
+      state.followUpPhase = "closed";
+      return { message: buildRedPrepareBlock(state) };
+    }
+    if (isRedChoiceEnglish(trimmed)) {
+      state.followUpPhase = "closed";
+      return { message: buildCommunicationScript(state) };
+    }
+    return { message: "どちらにしますか？「整理」か「英語」か、どちらか教えてください。" };
   }
 
-  return { message: buildClosingMessage() };
+  state.followUpPhase = "closed";
+  return { message: buildFollowClosingMessage() };
 }
 
 function extractOptionsFromAssistant(text) {
@@ -9627,7 +9445,7 @@ async function generateSummaryForConfirmation(conversationId) {
     state.followUpPhase = "questioning";
     state.followUpStep = 1;
     state.followUpDestinationName = formatDestinationName(state.hospitalRecommendation?.name, decisionType);
-    followUpQuestion = buildRedFollowUpQuestion();
+    followUpQuestion = RED_FOLLOW_UP_QUESTION;
   } else {
     state.followUpPhase = "questioning";
     state.followUpStep = 1;
@@ -9873,12 +9691,12 @@ app.post("/api/chat", async (req, res) => {
         state.followUpPhase = "questioning";
         state.followUpStep = 1;
       }
-      const followUpResult = handleFollowUpFlow(message, state, {
+      const followUpResult = generateFollowResponse(state, message, {
         history: conversationHistory[conversationId] || [],
       });
       const outMessage = followUpResult?.message ?? (userAskedSummary(message)
         ? "既にまとめをお伝えしています。ほかに気になることはありますか？"
-        : (getInitialFollowUpQuestionBySpec(state) || buildClosingMessage()));
+        : (getInitialFollowUpQuestionBySpec(state) || buildFollowClosingMessage()));
       if (followUpResult && FORBIDDEN_FOLLOW_UP.test(String(followUpResult.message || ""))) {
         const judgeMeta = buildFollowUpJudgeMeta(state);
         return res.json({
@@ -10042,7 +9860,7 @@ app.post("/api/chat", async (req, res) => {
         sections,
         questionPayload: null,
         normalizedAnswer: state.lastNormalizedAnswer || null,
-        followUpQuestion: shouldSendFollowUpQuestion(sections) ? (followUpQ || (finalRisk === "🔴" ? buildRedFollowUpQuestion() : WATCHFUL_FOLLOW_UP_QUESTION)) : null,
+        followUpQuestion: shouldSendFollowUpQuestion(sections) ? (followUpQ || (finalRisk === "🔴" ? RED_FOLLOW_UP_QUESTION : WATCHFUL_FOLLOW_UP_QUESTION)) : null,
         followUpMessage: null,
         locationPromptMessage,
         locationRePromptMessage: null,
@@ -10073,7 +9891,7 @@ app.post("/api/chat", async (req, res) => {
           sections,
           questionPayload: null,
           normalizedAnswer: state.lastNormalizedAnswer || null,
-          followUpQuestion: shouldSendFollowUpQuestion(sections) ? (finalRisk === "🔴" ? buildRedFollowUpQuestion() : WATCHFUL_FOLLOW_UP_QUESTION) : null,
+          followUpQuestion: shouldSendFollowUpQuestion(sections) ? (finalRisk === "🔴" ? RED_FOLLOW_UP_QUESTION : WATCHFUL_FOLLOW_UP_QUESTION) : null,
           followUpMessage: null,
           locationPromptMessage,
           locationRePromptMessage: null,
@@ -10084,13 +9902,13 @@ app.post("/api/chat", async (req, res) => {
     }
 
     // confirmationShown && !summaryShown の場合は確認待ち。フォローアップで閉じメッセージを返さない。
-    const followUpResult = handleFollowUpFlow(message, state, {
+    const followUpResult = generateFollowResponse(state, message, {
       history: conversationHistory[conversationId] || [],
     });
     if (state.summaryShown && !followUpResult) {
       // 仕様8.2通り：フォロー質問は固定テンプレ。🔴は質問①、🟢🟡は質問②を返す。
       const specFollowUp = getInitialFollowUpQuestionBySpec(state);
-      const outMessage = specFollowUp || buildClosingMessage();
+      const outMessage = specFollowUp || buildFollowClosingMessage();
       if (!state.hasSummaryBlockGenerated) {
         state.hasSummaryBlockGenerated = true;
       }
@@ -10897,7 +10715,7 @@ app.post("/api/chat", async (req, res) => {
           destinationName,
           decisionType
         );
-        followUpQuestion = buildRedFollowUpQuestion();
+        followUpQuestion = RED_FOLLOW_UP_QUESTION;
       } else {
         conversationState[conversationId].followUpPhase = "questioning";
         conversationState[conversationId].followUpStep = 1;
@@ -11199,7 +11017,7 @@ app.post("/api/chat", async (req, res) => {
       ).map((entry) => entry.text);
       const fallbackFq =
         level === "🔴"
-          ? buildRedFollowUpQuestion()
+          ? RED_FOLLOW_UP_QUESTION
           : WATCHFUL_FOLLOW_UP_QUESTION;
       if (state) {
         state.summaryShown = true;

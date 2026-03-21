@@ -878,7 +878,7 @@ function createSummaryBlock(text) {
   };
 }
 
-// Extract summary from AI message (サマリーカード用)
+// Extract summary from AI message（未使用。サマリーカードは SUMMARY_CARD_TEMPLATES のテンプレのみ使用）
 function extractSummary(text) {
   // 病院をおすすめする場合（🏥 セクション）をチェック
   const hospitalMatch = text.match(/🏥[^⸻]*?(?:受診先の候補|Kairoの判断)[^⸻]*?([^⸻]*?)⸻/s);
@@ -1158,12 +1158,12 @@ function clearSummaryContainer() {
 const SUMMARY_CARD_TEMPLATES = {
   green: [
     "今は大きな心配なさそうです",
-    "今は一度休むだけで大丈夫そうです",
+    "落ち着いて様子を見られそうです",
     "今のところ安心して過ごせそうです",
   ],
   yellow: [
-    "今は体を休めることを優先して",
-    "今は一度休んで体を整えて",
+    "今は注意して様子を見てください",
+    "少し注意しながら様子を見ましょう",
   ],
   red: [
     "早めの受診をおすすめします",
@@ -1172,18 +1172,45 @@ const SUMMARY_CARD_TEMPLATES = {
   ],
 };
 
+/** サマリーカードは必ずテンプレのみ使用。judgeMeta.summaryLine は絶対に使わない。 */
 function pickSummaryCardText(level) {
   const templates = SUMMARY_CARD_TEMPLATES[level] || SUMMARY_CARD_TEMPLATES.yellow;
   return templates[Math.floor(Math.random() * templates.length)];
 }
 
+/** 許可されたテンプレ文言かチェック（🔴/🟡/🟢 + テンプレの形式） */
+function isAllowedSummaryCardText(text) {
+  if (!text || typeof text !== "string") return false;
+  const t = String(text).trim();
+  const emoji = t.slice(0, 2);
+  const rest = t.slice(2).trim();
+  const allTemplates = [
+    ...SUMMARY_CARD_TEMPLATES.green,
+    ...SUMMARY_CARD_TEMPLATES.yellow,
+    ...SUMMARY_CARD_TEMPLATES.red,
+  ];
+  return (emoji === "🔴" || emoji === "🟡" || emoji === "🟢") && allTemplates.includes(rest);
+}
+
 function renderSummaryBase(text) {
   const summaryCard = document.getElementById("summaryCard");
   if (!summaryCard) return;
+  // テンプレ以外の文言が渡された場合は無視し、appState.riskLevel に基づくテンプレのみ表示（バグ対策）
+  let safeText = text;
+  if (!isAllowedSummaryCardText(text)) {
+    const level =
+      appState.riskLevel === "RED"
+        ? "red"
+        : appState.riskLevel === "GREEN"
+          ? "green"
+          : "yellow";
+    const t = pickSummaryCardText(level);
+    safeText = (level === "red" ? "🔴 " : level === "green" ? "🟢 " : "🟡 ") + t;
+  }
   const contentDiv = document.createElement("div");
   contentDiv.id = "summaryCardContent";
   contentDiv.className = "summary-card-content";
-  contentDiv.textContent = text;
+  contentDiv.textContent = safeText;
   summaryCard.appendChild(contentDiv);
   summaryCard.style.display = "block";
   summaryCard.style.opacity = "1";
@@ -1394,6 +1421,7 @@ async function handleUserInput() {
       } else if (!isFirstResponse) {
         const level = triageState.triage_level || (aiResponse.judgeMeta?.judgement === "🔴" ? "red" : aiResponse.judgeMeta?.judgement === "🟡" ? "yellow" : "green");
         appState.riskLevel = level === "red" ? "RED" : level === "yellow" ? "YELLOW" : "GREEN";
+        // サマリーカードは SUMMARY_CARD_TEMPLATES のテンプレのみ使用。judgeMeta.summaryLine は絶対に使わない。
       }
 
       // フォロー文トリガー: 「最後に」の絵文字（🌱 or 💬）が実際に出力された時のみ。それ以外は絶対に出さない。
