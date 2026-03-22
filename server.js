@@ -1462,6 +1462,63 @@ async function fetchPlaceDetails(placeId, { language = "en", includeOpeningHours
 
 const MIN_RATING_FOR_CARE_DISPLAY = 3.8;
 
+/** Step2：強制フィルタ（veterinary, dental, 動物病院・歯科を除外） */
+function filterExcludedCareTypes(candidates) {
+  return (candidates || []).filter((c) => {
+    const types = c?.types || [];
+    if (types.includes("veterinary_care") || types.includes("dentist")) return false;
+    const name = String(c?.name || "").toLowerCase();
+    if (/動物|歯科|dental|dentist|veterinary|vet\b/i.test(name)) return false;
+    return true;
+  });
+}
+
+/** 🇸🇬 シンガポール専用：除外フィルタ（dental,aesthetic,tcm,physio,animal等） */
+const SG_EXCLUDE_PATTERN = /\b(dental|dentist|aesthetic|beauty|tcm|chinese\s*medicine|physio|rehab|animal|veterinary)\b/i;
+function filterSingaporeExcluded(candidates) {
+  return (candidates || []).filter((c) => {
+    if (filterExcludedCareTypes([c]).length === 0) return false;
+    const hay = [c?.name || "", c?.vicinity || "", ...(c?.types || [])].join(" ").toLowerCase();
+    return !SG_EXCLUDE_PATTERN.test(hay);
+  });
+}
+
+/** 🇸🇬 スコア：japaneseClinic*3 + gpMatch*3 + distanceScore*2 + ratingScore */
+function computeSingaporeCareScore(candidate) {
+  const text = [candidate?.name || "", candidate?.vicinity || "", ...(candidate?.types || [])].join(" ").toLowerCase();
+  const japaneseClinic = /japanese|日系|nihon|日本語/.test(text) ? 3 : 0;
+  const gpMatch = /\b(gp|general practitioner|family\s*clinic|family\s*doctor)\b/.test(text) ? 3 : 0;
+  const distM = candidate?.distanceM ?? 9999;
+  const distanceScore =
+    distM <= 500 ? 2 : distM <= 1000 ? 1 : distM <= 1500 ? 0 : -1;
+  const rating = Number(candidate?.rating ?? candidate?.details?.rating ?? 0) || 0;
+  const ratingScore = rating >= 4.5 ? 2 : rating >= 4.0 ? 1 : rating >= 3.8 ? 0 : -999;
+  return japaneseClinic * 3 + gpMatch * 3 + Math.max(0, distanceScore) * 2 + Math.max(0, ratingScore);
+}
+
+/** Step3：症状適合スコア（symptomMatchScore） */
+function symptomMatchScore(candidate, category) {
+  const name = String(candidate?.name || "").toLowerCase();
+  const types = (candidate?.types || []).join(" ").toLowerCase();
+  const hay = `${name} ${types}`;
+  let score = 0;
+  if (category === "PAIN") {
+    if (/内科|クリニック|internal|clinic/.test(hay)) score += 2;
+  } else if (category === "SKIN") {
+    if (/皮膚|derma|skin/.test(hay)) score += 3;
+    if (/内科|internal/.test(hay)) score += 1;
+  } else if (category === "GI") {
+    if (/消化器|gastro|digestive/.test(hay)) score += 3;
+    if (/内科|internal/.test(hay)) score += 1;
+  } else if (category === "INFECTION") {
+    if (/gp|general practitioner|family doctor|fever|internal/.test(hay)) score += 2;
+    if (/clinic/.test(hay)) score += 1;
+  } else {
+    if (/内科|クリニック|internal|clinic|gp/.test(hay)) score += 2;
+  }
+  return score;
+}
+
 function filterByMinRating(candidates) {
   return (candidates || []).filter((c) => {
     const r = c?.rating ?? c?.details?.rating;
@@ -1561,58 +1618,68 @@ const JAPANESE_CLINIC_SEARCH_KEYWORDS = [
   "Japanese doctor clinic",
 ];
 
-/** 症状カテゴリごとのGP検索キーワード */
+/** 症状カテゴリごとのGP検索キーワード（v2：専門科に寄せすぎずGP/内科軸） */
 function getGpSearchKeywordsByCategory(category) {
   switch (category) {
     case "PAIN":
-      return ["general practitioner", "clinic", "medical clinic"];
+      return ["general practitioner clinic", "internal medicine clinic", "family doctor"];
     case "SKIN":
-      return ["dermatology clinic", "skin clinic", "general practitioner"];
+      return ["dermatology clinic", "skin clinic", "general practitioner clinic"];
     case "GI":
-      return ["general practitioner", "gastroenterology clinic"];
+      return ["gastro clinic", "internal medicine clinic", "general practitioner clinic"];
     case "INFECTION":
-      return ["general practitioner", "family clinic"];
+      return ["general practitioner clinic", "family doctor", "fever clinic"];
     default:
-      return ["general practitioner", "clinic", "medical clinic"];
+      return ["general practitioner clinic", "family doctor", "medical clinic"];
   }
 }
 
-/** シンガポール専用：症状カテゴリに合った施設タイプで検索。日本人クリニック2件 + GP2件、合計4件。 */
+/** 🇸🇬 シンガポール専用：日本人クリニック + GP、最適1件決定（main + alternatives） */
 async function fetchCarePlacesForSingapore(location, state) {
   if (!getPlacesApiKey() || !location?.lat || !location?.lng) return [];
-  const category = state?.triageCategory || resolveQuestionCategoryFromState(state) || "PAIN";
-  const gpKeywords = getGpSearchKeywordsByCategory(category);
 
-  const japaneseResults = [];
-  for (const kw of JAPANESE_CLINIC_SEARCH_KEYWORDS) {
-    const places = await fetchPlacesByTextSearch(location, kw, { radius: 50000 });
-    japaneseResults.push(...places);
-    if (japaneseResults.length >= 2) break;
-  }
-  const japaneseMerged = mergePlaces(japaneseResults);
-  const japaneseSorted = sortPlacesByRatingThenDistance(japaneseMerged).filter(isJapaneseClinicOrSupport);
-  const japaneseTop = japaneseSorted.slice(0, 2);
+  // ① 日本人クリニック：Text Search "japanese clinic singapore"、半径制限なし、最大3件
+  const japaneseRaw = await fetchPlacesByTextSearch(location, "japanese clinic singapore", { radius: 50000 });
+  const japanese = filterSingaporeExcluded(
+    mergePlaces(japaneseRaw).filter(isJapaneseClinicOrSupport)
+  ).slice(0, 3);
 
-  const gpResults = [];
-  for (const radius of [1500, 5000, 10000, 20000, 50000]) {
-    for (const kw of gpKeywords) {
-      const places = await fetchPlacesByTextSearch(location, kw, { radius });
-      gpResults.push(...places);
-      if (gpResults.length >= 4) break;
-    }
-    if (gpResults.length >= 2) break;
+  // ② GP：Nearby Search、radius=1500、type=doctor
+  const gpKeywords = ["clinic", "GP", "family medicine"];
+  const gpRaw = [];
+  for (const kw of gpKeywords) {
+    const places = await fetchNearbyPlaces(location, { keyword: kw, type: "doctor", radius: 1500 });
+    gpRaw.push(...places);
   }
-  if (gpResults.length < 2) {
-    const fallback = await fetchPlacesByTextSearch(location, "general practitioner", { radius: 1500 });
-    gpResults.push(...fallback);
-  }
-  const gpMerged = mergePlaces(gpResults);
-  const gpFiltered = gpMerged.filter((c) => !isJapaneseClinicOrSupport(c));
-  const gpSorted = sortPlacesByRatingThenDistance(gpFiltered);
-  const gpTop = gpSorted.slice(0, 2);
+  const gp = filterSingaporeExcluded(
+    mergePlaces(gpRaw).filter((c) => !isJapaneseClinicOrSupport(c))
+  );
 
-  const combined = [...japaneseTop, ...gpTop];
-  return prioritizeCareCandidates(combined, state);
+  // ③④ フィルタ（rating 3.8+）＋スコアリング
+  const allCandidates = filterByMinRating(mergePlaces(japanese, gp));
+  const scored = allCandidates.map((c) => ({ ...c, _sgScore: computeSingaporeCareScore(c) }));
+  const meetsRating = scored.filter((c) => c._sgScore >= 0);
+
+  // ⑤ 意思決定：hasJapanese ? main=日系・alternatives=GP2 : main=GP1・alternatives=GP2
+  const japaneseSorted = meetsRating
+    .filter(isJapaneseClinicOrSupport)
+    .sort((a, b) => (b._sgScore || 0) - (a._sgScore || 0));
+  const gpSorted = meetsRating
+    .filter((c) => !isJapaneseClinicOrSupport)
+    .sort((a, b) => (b._sgScore || 0) - (a._sgScore || 0));
+
+  let main;
+  let alternatives;
+  if (japaneseSorted.length > 0) {
+    main = japaneseSorted[0];
+    alternatives = gpSorted.slice(0, 2);
+  } else {
+    main = gpSorted[0];
+    alternatives = gpSorted.slice(1, 3);
+  }
+
+  const result = [main, ...alternatives].filter(Boolean);
+  return result.map(({ _sgScore, ...rest }) => rest);
 }
 
 async function fetchCarePlacesWithFallbacks(location, plan, state) {
@@ -1721,9 +1788,21 @@ function scoreSingaporePreference(candidate) {
   return 0;
 }
 
+/** 総合スコア：symptomMatch * 0.5 + (1/distance) * 0.3 + rating * 0.2 */
+function computeCareCandidateScore(candidate, category) {
+  const sm = symptomMatchScore(candidate, category);
+  const distM = candidate?.distanceM ?? 500;
+  const distKm = Math.max(0.05, distM / 1000);
+  const distScore = 1 / distKm;
+  const rating = Number(candidate?.rating ?? candidate?.details?.rating ?? 0) || 0;
+  const rNorm = Math.min(5, Math.max(0, rating)) / 5;
+  return sm * 0.5 + Math.min(10, distScore) * 0.3 + rNorm * 0.2;
+}
+
 function prioritizeCareCandidates(candidates, state) {
   const list = Array.isArray(candidates) ? [...candidates] : [];
   const country = String(state?.locationContext?.country || "").toLowerCase();
+  const category = state?.triageCategory || resolveQuestionCategoryFromState(state) || "PAIN";
   if (country.includes("singapore")) {
     return list.sort((a, b) => {
       const p = scoreSingaporePreference(b) - scoreSingaporePreference(a);
@@ -1731,7 +1810,7 @@ function prioritizeCareCandidates(candidates, state) {
       return sortPlacesByRatingThenDistance([a, b])[0] === a ? -1 : 1;
     });
   }
-  return sortPlacesByRatingThenDistance(list);
+  return list.sort((a, b) => computeCareCandidateScore(b, category) - computeCareCandidateScore(a, category));
 }
 
 function formatDistanceForCare(distanceM) {
@@ -1784,6 +1863,48 @@ function getSymptomFitReasonsByCategory(category) {
         "初期相談の窓口として利用されることが多い",
       ];
   }
+}
+
+/** モーダル用：メイン1件の「役割」理由（なぜ最初にここでいいか） */
+function getMainFacilityRoleReasons(category, isSingapore) {
+  if (isSingapore) {
+    return [
+      "シンガポールではまず最初に受診する一般的な医療機関",
+      "幅広い症状をまとめて相談できるため、迷わず受診しやすい",
+    ];
+  }
+  return [
+    "幅広い症状をまとめて相談できるため、迷わず受診しやすい",
+    "初期相談の窓口として利用されることが多い",
+  ];
+}
+
+/** モーダル用：メイン1件のいいところ3つ（症状との相性・役割・安心材料） */
+function buildMainFacilityReasons(candidate, plan, state = null) {
+  const category = state ? (state.triageCategory || resolveQuestionCategoryFromState(state)) : "PAIN";
+  const isSingapore = String(state?.locationContext?.country || "").trim() === "Singapore";
+  const reasons = [];
+  const symptomPool = getSymptomFitReasonsByCategory(category);
+  const symptomPick = symptomPool.find((p) => !FORBIDDEN_REASON_PHRASES.test(p));
+  if (symptomPick) reasons.push(symptomPick);
+  const rolePool = getMainFacilityRoleReasons(category, isSingapore);
+  const rolePick = rolePool.find((p) => !FORBIDDEN_REASON_PHRASES.test(p) && !reasons.includes(p));
+  if (rolePick) reasons.push(rolePick);
+  if (isJapaneseClinicOrSupport(candidate)) {
+    reasons.push("日本語で症状を説明できるため安心");
+  } else if (!reasons.some((r) => /幅広い|まとめて/.test(r))) {
+    reasons.push("初診の相談先として利用されることが多い");
+  }
+  return reasons.slice(0, 3).map((r) => (r.startsWith("・") ? r : `・${r}`));
+}
+
+/** モーダル用：補助候補のシンプルな理由1つ */
+function buildAuxiliaryReason(candidate, plan, state = null) {
+  if (isJapaneseClinicOrSupport(candidate)) return "・日本語で症状を説明できる";
+  const category = state ? (state.triageCategory || resolveQuestionCategoryFromState(state)) : "PAIN";
+  const pool = getSymptomFitReasonsByCategory(category);
+  const pick = pool.find((p) => !FORBIDDEN_REASON_PHRASES.test(p));
+  return pick ? `・${pick}` : "・一般的な体調不良の相談に対応している";
 }
 
 /** いいところ生成：優先順位1〜4、最大2・最低1、禁止表現を避け、同じ文章を使い回さない */
@@ -2182,10 +2303,7 @@ function buildHospitalRecommendationDetail(state, locationContext, clinicCandida
   const meetsRating = filterByMinRating(filtered);
   let candidates;
   if (isSingapore) {
-    const prioritized = prioritizeCareCandidates(meetsRating, state);
-    const japanese = prioritized.filter(isJapaneseClinicOrSupport).slice(0, 1);
-    const gp = prioritized.filter((c) => !isJapaneseClinicOrSupport).slice(0, 1);
-    candidates = [...japanese, ...gp];
+    candidates = meetsRating.slice(0, 3);
   } else {
     const maxCandidates = 2;
     candidates = prioritizeCareCandidates(meetsRating, state).slice(0, maxCandidates);
@@ -2707,9 +2825,10 @@ async function resolveCareCandidates(state, destination) {
   const plan = buildCareSearchQueries(mainSymptomText, isSingapore ? null : destination);
   const results = await fetchCarePlacesWithFallbacks(location, plan, state);
   const mergedBase = mergePlaces(results);
-  const symptomFitted = isSingapore ? mergedBase : applySymptomFitFilter(mergedBase, plan);
-  const merged = prioritizeCareCandidates(symptomFitted, state).slice(0, 10);
-  const maxReturn = isSingapore ? 4 : 2;
+  const excludedFiltered = isSingapore ? filterSingaporeExcluded(mergedBase) : filterExcludedCareTypes(mergedBase);
+  const symptomFitted = isSingapore ? excludedFiltered : applySymptomFitFilter(excludedFiltered, plan);
+  const merged = isSingapore ? symptomFitted.slice(0, 10) : prioritizeCareCandidates(symptomFitted, state).slice(0, 10);
+  const maxReturn = isSingapore ? 3 : 2;
   const enriched = [];
   for (const item of merged) {
     const details = await fetchPlaceDetails(item.placeId, { language: "ja" });
@@ -2766,93 +2885,107 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
   const timeMessage = isLateNight
     ? "現在は夜間の時間帯です。症状が強くなければ、明日受診する形が選択肢の一つです。"
     : "";
-  const headerLine = isSingapore ? "おすすめの医療機関（日本人クリニック・近くのGP）" : destination.header;
-  const lines = [
-    "🏥 受診先の候補",
-    ...(timeMessage ? [timeMessage] : []),
-    "⸻",
-    headerLine,
-  ];
 
   const list = Array.isArray(candidates) ? candidates : [];
-  const usedReasons = new Set();
+  const lines = ["🏥 受診先の候補", ...(timeMessage ? [timeMessage] : []), "⸻"];
+
   if (list.length > 0) {
-    list.forEach((c, idx) => {
-      const normalizedName = String(c?.name || "").trim();
-      if (idx > 0) lines.push("");
-      const numLabel = ["①", "②", "③"][idx] || `・候補${idx + 1}`;
-      lines.push(`${numLabel} ${normalizedName}`);
-      lines.push("  いいところ：");
-      const reasons = buildHospitalRecommendationReasons(c, plan, state, usedReasons);
-      reasons.forEach((r) => lines.push(`  ${r}`));
-    });
+    lines.push("この症状であれば、まずは一般的な外来で相談できる内容です。");
+    lines.push(
+      isSingapore ? "シンガポールでは、まずGP（一般医）で相談する流れが一般的です。" : "無理に専門科を選ばなくても大丈夫そうです。"
+    );
+    lines.push("");
+    lines.push("🏥 まずはこちらがおすすめです");
+    const top = list[0];
+    const topName = String(top?.name || "").trim();
+    const usedReasons = new Set();
+    lines.push(`① ${topName}`);
+    const topReasons = buildHospitalRecommendationReasons(top, plan, state, usedReasons);
+    topReasons.forEach((r) => lines.push(r));
+    if (list.length >= 2) {
+      const alt = list[1];
+      lines.push("");
+      lines.push("必要であれば、こちらも選択肢になります");
+      lines.push(`② ${String(alt?.name || "").trim()}`);
+      const altReasons = buildHospitalRecommendationReasons(alt, plan, state, usedReasons);
+      altReasons.forEach((r) => lines.push(r));
+    }
+    lines.push("");
+    lines.push(list.length >= 2 ? "どちらでも対応できる内容なので、行きやすい方を選んで大丈夫そうです。" : "必要に応じて、相談する形で問題なさそうです。");
   } else {
     lines.push("位置情報から近くの医療機関を検索しましたが、見つかりませんでした。");
   }
   return lines.join("\n");
 }
 
-/** 🏥受診先モーダル用：一文＋本文2件を含めて4件、理由2つ、営業中（星評価なし） */
+/** 🏥受診先モーダル用：1件メイン＋補助2件まで（選ばせるのではなく任せる） */
 async function buildHospitalDetailsModalContent(state) {
-  const country = String(state?.locationContext?.country || "").trim();
-  const isSingapore = country === "Singapore";
   const clinicCandidates = state?.clinicCandidates || [];
   const hospitalCandidates = state?.hospitalCandidates || [];
   const mainTextCandidates = state?.hospitalRecommendation?.candidates || [];
   const historyText = state?.historyTextForCare || "";
   const plan = buildCareSearchQueries(detectCareMainSymptomText(state, historyText), null);
 
-  const intro = isSingapore
-    ? "シンガポールではまず、GPに相談するのが一般的です。"
-    : "この症状で相談できる近くの医療機関をまとめました。";
-
-  const lines = [intro, ""];
-
-  const source = hospitalCandidates.length > 0 ? hospitalCandidates : clinicCandidates;
+  const source = clinicCandidates.length > 0 ? clinicCandidates : hospitalCandidates;
   const seenIds = new Set((mainTextCandidates || []).map((c) => c?.placeId).filter(Boolean));
   let places = [...mainTextCandidates];
   for (const c of source) {
-    if (places.length >= 4) break;
+    if (places.length >= 3) break;
     if (c?.placeId && !seenIds.has(c.placeId)) {
       seenIds.add(c.placeId);
       places.push(c);
     }
   }
-  if (places.length < 4 && isSingapore) {
-    const rest = clinicCandidates.filter((c) => c?.placeId && !seenIds.has(c.placeId)).slice(0, 4 - places.length);
+  if (places.length < 3) {
+    const rest = clinicCandidates.filter((c) => c?.placeId && !seenIds.has(c.placeId)).slice(0, 3 - places.length);
     places = [...places, ...rest];
   }
 
-  const usedReasons = new Set();
-  let japaneseCount = 0;
-  let gpCount = 0;
-  for (let i = 0; i < Math.min(places.length, 4); i++) {
-    const c = places[i];
-    if (!c?.placeId) continue;
-    const details = await fetchPlaceDetails(c.placeId, { language: "ja", includeOpeningHours: true });
-    const name = details?.name || c.name || "";
-    const openNow = details?.openNow;
-    const openStr =
-      openNow === true ? " 営業中" : openNow === false ? " 休業中" : "";
-    const distanceStr = Number.isFinite(c?.distanceM) ? ` ${formatDistanceForCare(c.distanceM)}` : "";
+  const lines = [
+    "少し探すのは大変だと思うので、",
+    "この症状で無理なく相談できる場所をこちらで整理しました。",
+    "",
+    "今回の状態であれば、まずはこの1件を選べば大丈夫そうです。",
+    "",
+  ];
 
-    const enriched = { ...c, details: details || c.details };
-    const reasons = buildHospitalRecommendationReasons(enriched, plan, state, usedReasons);
-
-    if (i > 0) lines.push("");
-    const isJapanese = isSingapore && isJapaneseClinicOrSupport(c);
-    if (isJapanese) japaneseCount += 1;
-    else if (isSingapore) gpCount += 1;
-    const sectionLabel = isSingapore
-      ? isJapanese
-        ? `■日本人クリニック ${japaneseCount}`
-        : `■近くのGP ${gpCount}`
-      : `■候補${i + 1}`;
-    lines.push(sectionLabel);
-    lines.push(`${name}${distanceStr}${openStr}`);
-    reasons.forEach((r) => lines.push(r));
+  if (places.length === 0) {
+    lines.push("位置情報から近くの医療機関を検索しましたが、見つかりませんでした。");
+    return lines.join("\n");
   }
 
+  const main = places[0];
+  const mainDetails = await fetchPlaceDetails(main.placeId, { language: "ja" });
+  const mainName = mainDetails?.name || main.name || "";
+
+  lines.push("【まずはこちら】");
+  lines.push(mainName);
+  lines.push("");
+
+  const mainEnriched = { ...main, details: mainDetails || main.details };
+  const mainReasons = buildMainFacilityReasons(mainEnriched, plan, state);
+  mainReasons.forEach((r) => lines.push(r));
+
+  lines.push("");
+  lines.push("無理に探さなくても、この施設で十分対応できる内容です。");
+  lines.push("");
+
+  const auxPlaces = places.slice(1, 3);
+  if (auxPlaces.length > 0) {
+    lines.push("もし時間帯や場所の都合が合わない場合は、こちらも選択肢になります。");
+    lines.push("");
+    for (const aux of auxPlaces) {
+      const auxDetails = await fetchPlaceDetails(aux.placeId, { language: "ja" });
+      const auxName = auxDetails?.name || aux.name || "";
+      const auxEnriched = { ...aux, details: auxDetails || aux.details };
+      const auxReason = buildAuxiliaryReason(auxEnriched, plan, state);
+      lines.push(auxName);
+      lines.push(auxReason);
+      lines.push("");
+    }
+  }
+
+  lines.push("まずは上の施設を選んでおけば問題なさそうです。");
   return lines.join("\n");
 }
 

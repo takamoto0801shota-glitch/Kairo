@@ -1141,69 +1141,56 @@ function canRecommendSpecificPlace(snapshot: LocationSnapshot | null) {
   - 2件目は検索結果から `・<行動>` / `→ <理由>` 形式で生成する。
 
 #### 🏥 受診先の候補（施設案内・必須）
-- ワンクッションはここでは入れない。
-- 🔴（GP推奨レベル）のときのみ、夜間（20:00〜5:59）の場合に限り、最初に次の一文を追加してよい：
-- 「現在は夜間の時間帯です。症状が強くなければ、明日受診する形が選択肢の一つです。」
-- 夜間以外（6:00〜19:59）は追加しない（朝専用メッセージは禁止）。
-- 指示文：位置情報ベース実在医療機関推薦ロジック
-  - 目的：
-    - 実在する医療機関名を表示する。
-    - 緯度経度から半径検索する。
-    - 症状に対応可能な施設のみ抽出する。
-    - テンプレではない「いいところ」を生成する。
-  - 入力条件（必須）：
-    - `latitude`
-    - `longitude`
-    - 主症状
-    - 緊急度レベル
-  - 医療機関検索ロジック：
-    - Google Places API または Maps API を使用する。
-    - 検索条件は `type = hospital OR doctor OR clinic`。
-    - **シンガポール日系クリニックを除き、全ての場合で** `radius = 1500m`（1.5km以内）を優先する。
-    - `keyword = 主症状`（例：`abdominal pain OR gastro OR GP`）。
-  - シンガポール専用ロジック（`country === "Singapore"`）：
-    - **目的**：シンガポールでは医療受診のほとんどが GP から始まるため、表示する施設を以下の 2種類に限定する。専門科検索（眼科・神経内科など）は使用しない。
-    - **国判定**：ユーザーの位置情報（lat / lng）から逆ジオコードで `country = Singapore` を判定する。
-    - **検索① 日本人クリニック**：Google Places Text Search クエリ `japanese clinic singapore`（日系のみ半径制限なし）
-    - **検索② 近くのGP**：`radius = 1500m`（1.5km以内）
-    - **表示**：2検索を合わせて最大4件（モーダル用）
-    - **他国**：`radius = 1500m` で病院を検索。
-  - 症状適合フィルタ：
-    - 腹痛の場合は `gastro / digestive / GP / family medicine` を含む施設を優先する。
-    - 整形外科や皮膚科など、症状に無関係な施設は除外する。
-  - いいところ生成ルール（`buildHospitalRecommendationReasons`）：
-    - **目的**：ユーザーが「ここなら行けそう」と判断できる実用的な情報を提示する。
-    - **形式**：箇条書き、最大2つ・最低1つ。短く具体的に。同じ文章を使い回さない。
-    - **内容の優先順位**：
-      1. 症状との相性（例：皮膚トラブルの初期相談がしやすい、発熱や体調不良の相談で利用されることが多い）
-      2. 日本語対応（日本人クリニックの場合）（例：日本語で症状を説明できるため安心）
-      3. 通いやすさ（例：現在地から行きやすい場所にあります、駅や主要エリアからアクセスしやすい）
-      4. 初診の相談先として使いやすい（例：初期相談の窓口として利用されることが多い）
-    - **禁止表現**：説明が丁寧、評判が良い、相談しやすい、人気、おすすめ（根拠が弱くAIらしさが出るため）
-    - **出力例**：
-      - ① Tokyo Medical Clinic：・日本語で症状を説明できるため安心 / ・発熱など体調不良の初期相談で利用されることが多い
-      - ② Orchard GP Clinic：・体調不良の初期相談に対応しているGP / ・現在地から行きやすい場所にあります
-  - 表示制限：
-    - 本文：病院は2件固定（最低2件、最大2件）。
-    - モーダル：本文で述べた2件を含めて**4件**表示する。
-    - **評価3.8以下の施設は表示しない**。該当する場合は除外し、別の候補を検索・表示する。
-    - 表示形式は `① 施設名` / `② 施設名`（星評価は表示しない）。
-    - **施設名は日本語で表示する**（Place Details API で `language=ja` を指定して取得）。
-    - 表示内容は `施設名 / いいところ（箇条書き・最低1件、最大2件）`。
-    - Google Mapリンクは表示しない（強制）。
-  - 禁止事項：
-    - 実在しない施設名生成
-    - レビューの創作
-    - テンプレの「いいところ」
-    - 症状に無関係な施設の提示
-  - ブランド原則：
-    - Kairoは紹介エンジンではない。
-    - 「今の状態に合う選択肢を整理する」という立場で出力する。
-  - 補足：
-    - `INFECTION` カテゴリではオンライン診療案内4行は表示しない（強制）。
-    - **🔴のときはオンライン診療案内を表示しない**（強制。MC文削除と同期）。
-    - 「行く前に知っておくと安心なこと」セクションは出さない。
-    - `city` が取れないことを理由に案内を中止しない。
+
+**医療機関推薦ロジック v2：意思決定エンジン化。検索・スコアリングはモーダルと統一。**
+
+- ワンクッションなし。🔴夜間（20:00〜5:59）のみ「現在は夜間の時間帯です。症状が強くなければ、明日受診する形が選択肢の一つです。」を冒頭に追加可。
+- 目的：「どこに行くか」を決める。迷わせず「ここでいい」と思わせる。
+
+**本文フォーマット（2件固定）**
+```
+この症状であれば、まずは一般的な外来で相談できる内容です。
+[SG] シンガポールでは、まずGP（一般医）で相談する流れが一般的です。/[他国] 無理に専門科を選ばなくても大丈夫そうです。
+
+🏥 まずはこちらがおすすめです
+① {施設名} ・理由×2
+必要であれば、こちらも選択肢になります
+② {施設名} ・理由×2
+どちらでも対応できる内容なので、行きやすい方を選んで大丈夫そうです。
+```
+
+**モーダル（1件メイン＋補助2件まで）**
+```
+① クッション：「少し探すのは大変だと思うので、この症状で無理なく相談できる場所をこちらで整理しました。今回の状態であれば、まずはこの1件を選べば大丈夫そうです。」
+② メイン：【まずはこちら】{施設名} ・症状との相性／役割／安心材料×3＋「無理に探さなくても、この施設で十分対応できる内容です。」
+③ 補助（最大2件）：「もし時間帯や場所の都合が合わない場合は、こちらも選択肢になります。」{施設名}・理由1つ
+④ クロージング：「まずは上の施設を選んでおけば問題なさそうです。」
+```
+
+**共通ルール**
+- 表示禁止：距離・営業中/休業中・星評価・候補1/2/3・Mapリンク
+- いいところ：症状との相性→日本語対応（該当時）→行きやすさ。禁止：評判が良い、人気、丁寧、おすすめ
+- 施設名は Place Details `language=ja`。評価3.8以下は除外。
+- 補足：INFECTION/🔴ではオンライン診療案内を出さない。city が取れないことを理由に案内中止しない。
+
+**他国：検索・スコアリング**
+- カテゴリ別クエリ：PAIN→GP/内科、SKIN→dermatology+GP、GI→gastro+内科、INFECTION→GP/fever。専門科に寄せすぎない。
+- フィルタ：vet/dental/動物病院・歯科、評価3.8以下、無関係専門科を除外。
+- `score = symptomMatch*0.5 + (1/distance)*0.3 + rating*0.2`
+
+---
+
+### 🇸🇬 シンガポール専用ロジック
+
+- **戦略**：日本人クリニック OR GP のみ。専門科検索禁止。
+- **① 日系**：Text Search `japanese clinic singapore`、半径制限なし、max3件
+- **② GP**：Nearby Search、radius=1500、type=doctor、keyword=clinic/GP/family medicine
+- **③ 除外**：dental, aesthetic, tcm, physio, animal, veterinary
+- **④ スコア**：`japaneseClinic*3 + gpMatch*3 + distanceScore*2 + ratingScore`（distance: 0-500m=2, 500-1k=1, 1k-1.5k=0。rating 3.8未満は除外）
+- **⑤ 意思決定**：`hasJapanese ? main=日系・alternatives=GP2件 : main=GP1・alternatives=GP2件`
+- 出力：`candidates = [main, alt1, alt2]`（max3件）
+
+---
 
 ### 8.1 Places API 実装詳細（現行仕組み）
 
@@ -1224,7 +1211,7 @@ function canRecommendSpecificPlace(snapshot: LocationSnapshot | null) {
 #### 医療機関検索フロー（`fetchCarePlacesWithFallbacks`）
 1. **Nearby Search（半径順）**
    - types: `doctor`, `hospital`, `health`
-   - 半径: 1.5km → 3km → 5km → 10km → 20km → 50km（結果が出るまで順に試行。日系クリニック除く）
+   - 半径: 1.5km → 3km → 5km → 10km → 20km → 50km（結果が出るまで順に試行）
    - 日本: keywords に `クリニック`, `内科`, `病院`, `医療`, `診療所` を追加
 2. **rankByDistance（距離順）**
    - 0件の場合、`rankby=distance` で type ごとに検索（半径制限なし）
@@ -1240,36 +1227,23 @@ function canRecommendSpecificPlace(snapshot: LocationSnapshot | null) {
 #### 候補取得フロー（`resolveCareCandidates`）
 1. 位置取得: `locationSnapshot` → ジオコード（住所）→ `getFallbackCoordinates`
 2. **国判定**: lat/lng から逆ジオコードで `country` を取得。`country === "Singapore"` の場合はシンガポール専用ロジックへ
-3. **シンガポールの場合**（`fetchCarePlacesForSingapore`）:
-   - 症状カテゴリ（PAIN/SKIN/GI/INFECTION）に応じてGP検索キーワードを決定
-   - **日本人クリニック2件**: Text Search `Japanese clinic` / `Japanese medical clinic` / `Japanese doctor clinic`（ユーザー位置周辺）
-   - **GP2件**: カテゴリ別キーワード（PAIN: general practitioner, clinic, medical clinic / SKIN: dermatology clinic, skin clinic, general practitioner / GI: general practitioner, gastroenterology clinic / INFECTION: general practitioner, family clinic）
-   - 検索結果が少ない場合は `general practitioner` で補完
-   - 並び順: 日本人クリニック → GP、合計4件
-   - まとめブロック: 日系1件 + GP1件（おすすめを1件ずつ）
-4. **他国の場合**:
-   - 症状検出: `detectCareMainSymptomText` で主症状を抽出
-   - 検索キーワード: `buildCareSearchQueries` で症状に応じた keywords / includeTerms / excludeTerms を決定
-   - `fetchCarePlacesWithFallbacks` で検索
-5. `mergePlaces` で重複除去
-6. 他国の場合は `applySymptomFitFilter` で症状適合フィルタ（シンガポールはスキップ）
-7. `prioritizeCareCandidates` でソート（シンガポールは日系クリニック優先、それ以外は評価・距離順）
-8. 上位6件の `placeId` で Place Details を取得し、`rating`, `reviews`, `editorial_summary` を付与
-9. シンガポールは最大4件（日本人クリニック2+GP2）、他国は最大2件を返す
+3. **シンガポールの場合**（`fetchCarePlacesForSingapore`）：🇸🇬 シンガポール専用ロジックに従う。
+   - ① 日本人クリニック: Text Search `japanese clinic singapore`、半径制限なし、最大3件
+   - ② GP: Nearby Search、radius=1500、type=doctor、keyword=GP/clinic/family medicine
+   - ③ 除外: dental, aesthetic, tcm, physio, animal 等
+   - ④ スコアリング後、⑤ 意思決定：hasJapanese ? main=日系・alternatives=GP2件 : main=GP1・alternatives=GP2件
+   - 出力: `[main, alt1, alt2]`（最大3件）
+4. **他国**：`detectCareMainSymptomText` → `buildCareSearchQueries` → `fetchCarePlacesWithFallbacks`
+5. `mergePlaces` で重複除去 → 他国のみ `applySymptomFitFilter` → `prioritizeCareCandidates`（SGは順序維持）
+6. Place Details で `rating`/`reviews`/`editorial_summary` 付与。SGは最大3件、他国は最大2件。
 
 #### いいところ生成（`buildHospitalRecommendationReasons`）
-症状カテゴリ（PAIN/SKIN/GI/INFECTION）と候補情報に基づき、優先順位に従って最大2件・最低1件を生成する。
-1. **優先1 症状との相性**：`getSymptomFitReasonsByCategory` でカテゴリ別の文言を選択（例：PAIN「痛みや体調不良の初期相談で〜」、SKIN「皮膚トラブルの初期相談がしやすい」、GI「腹痛・消化器症状の初期相談で〜」、INFECTION「発熱や体調不良の相談で〜」）
-2. **優先2 日本語対応**：`isJapaneseClinicOrSupport` なら「日本語で症状を説明できるため安心」を追加
-3. **優先3 通いやすさ**：「現在地から行きやすい場所にあります」「駅や主要エリアからアクセスしやすい」から選択
-4. **優先4 初診の相談先**：「初期相談の窓口として利用されることが多い」「体調不良の初期相談に対応しているGP」から選択
-5. **重複回避**：`usedReasons` Set で複数候補間で同じ文言を使い回さない
-6. **禁止表現**：説明が丁寧、評判が良い、相談しやすい、人気、おすすめ は使用しない
+優先順：① 症状との相性（`getSymptomFitReasonsByCategory`）② 日本語対応 ③ 通いやすさ ④ 初診の相談先。`usedReasons` で重複回避。禁止：評判が良い、人気、おすすめ等。
 
-#### 病院・クリニック・薬局検索
-- **`resolveHospitalCandidates`**: シンガポールの場合は `[]` を返す（GP・日本人クリニックのみ表示）。他国は type `hospital`, `doctor`, `health`、keywords `病院`（日本）、rankByDistance、Text Search 半径 5km〜50km。位置未取得時はジオコード→`getFallbackCoordinates`
-- **`resolveClinicCandidates`**: type `doctor`, `hospital`, `health`、keywords `クリニック`, `内科`（日本）、rankByDistance、Text Search 半径 5km〜20km
-- **`resolvePharmacyCandidates`**: type `pharmacy`, `drugstore`、keywords `薬局`, `ドラッグストア`（日本）、Text Search 半径 5km〜50km
+#### 病院・クリニック・薬局
+- `resolveHospitalCandidates`：SG→`[]`。他国→hospital/doctor、rankByDistance、5〜50km。
+- `resolveClinicCandidates`：doctor/hospital、クリニック/内科（日本）、5〜20km。
+- `resolvePharmacyCandidates`：pharmacy、薬局/ドラッグストア（日本）、5〜50km。
 
 #### フォールバック
 - フォールバック候補（固定名称）は使用しない
