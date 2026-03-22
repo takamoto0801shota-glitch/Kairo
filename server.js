@@ -1462,24 +1462,26 @@ async function fetchPlaceDetails(placeId, { language = "en", includeOpeningHours
 
 const MIN_RATING_FOR_CARE_DISPLAY = 3.8;
 
-/** Step2：強制フィルタ（veterinary, dental, 動物病院・歯科を除外） */
-function filterExcludedCareTypes(candidates) {
+/** Step2：強制フィルタ（veterinary, dental, pediatric, 動物病院・歯科・小児科を除外。allowDental=trueの時は歯科を許可） */
+function filterExcludedCareTypes(candidates, allowDental = false) {
   return (candidates || []).filter((c) => {
     const types = c?.types || [];
-    if (types.includes("veterinary_care") || types.includes("dentist")) return false;
-    const name = String(c?.name || "").toLowerCase();
-    if (/動物|歯科|dental|dentist|veterinary|vet\b/i.test(name)) return false;
+    if (!allowDental && (types.includes("veterinary_care") || types.includes("dentist"))) return false;
+    const hay = [c?.name || "", c?.vicinity || "", ...(c?.types || [])].join(" ").toLowerCase();
+    if (/動物|veterinary|vet\b|小児科|pediatric|children\s*clinic/i.test(hay)) return false;
+    if (!allowDental && /歯科|dental|dentist/i.test(hay)) return false;
     return true;
   });
 }
 
-/** 🇸🇬 シンガポール専用：除外フィルタ（dental,aesthetic,tcm,physio,animal等） */
-const SG_EXCLUDE_PATTERN = /\b(dental|dentist|aesthetic|beauty|tcm|chinese\s*medicine|physio|rehab|animal|veterinary)\b/i;
-function filterSingaporeExcluded(candidates) {
+/** 🇸🇬 シンガポール専用：除外フィルタ（allowDental=trueの時は歯科を許可） */
+const SG_EXCLUDE_PATTERN = /\b(dental|dentist|aesthetic|beauty|tcm|chinese\s*medicine|physio|rehab|animal|veterinary|pediatric|children)\b|小児科/i;
+const SG_EXCLUDE_PATTERN_NO_DENTAL = /\b(aesthetic|beauty|tcm|chinese\s*medicine|physio|rehab|animal|veterinary|pediatric|children)\b|小児科/i;
+function filterSingaporeExcluded(candidates, allowDental = false) {
   return (candidates || []).filter((c) => {
-    if (filterExcludedCareTypes([c]).length === 0) return false;
+    if (filterExcludedCareTypes([c], allowDental).length === 0) return false;
     const hay = [c?.name || "", c?.vicinity || "", ...(c?.types || [])].join(" ").toLowerCase();
-    return !SG_EXCLUDE_PATTERN.test(hay);
+    return !(allowDental ? SG_EXCLUDE_PATTERN_NO_DENTAL : SG_EXCLUDE_PATTERN).test(hay);
   });
 }
 
@@ -1490,7 +1492,7 @@ function computeSingaporeCareScore(candidate) {
   const gpMatch = /\b(gp|general practitioner|family\s*clinic|family\s*doctor)\b/.test(text) ? 3 : 0;
   const distM = candidate?.distanceM ?? 9999;
   const distanceScore =
-    distM <= 500 ? 2 : distM <= 1000 ? 1 : distM <= 1500 ? 0 : -1;
+    distM <= 500 ? 2 : distM <= 1000 ? 1 : -1;
   const rating = Number(candidate?.rating ?? candidate?.details?.rating ?? 0) || 0;
   const ratingScore = rating >= 4.5 ? 2 : rating >= 4.0 ? 1 : rating >= 3.8 ? 0 : -999;
   return japaneseClinic * 3 + gpMatch * 3 + Math.max(0, distanceScore) * 2 + Math.max(0, ratingScore);
@@ -1587,6 +1589,14 @@ function buildCareSearchQueries(mainSymptomText = "", destination) {
       symptomLabel: "皮膚・粘膜症状",
     };
   }
+  if (/歯|歯ぐき|虫歯|親知らず|奥歯/.test(s) || destination?.label === "歯医者") {
+    return {
+      searchKeywords: ["dentist", "dental clinic", "歯科", "歯医者"],
+      includeTerms: ["dentist", "dental", "歯科", "歯医者", "clinic"],
+      excludeTerms: ["orthopedic", "orthopaedic", "dermatology", "美容", "整形", "皮膚"],
+      symptomLabel: "歯の症状",
+    };
+  }
   return {
     searchKeywords: destination?.places?.keywords || ["clinic", "general practitioner", "medical clinic"],
     includeTerms: ["clinic", "gp", "general practitioner", "family", "internal medicine"],
@@ -1634,26 +1644,38 @@ function getGpSearchKeywordsByCategory(category) {
   }
 }
 
-/** 🇸🇬 シンガポール専用：日本人クリニック + GP、最適1件決定（main + alternatives） */
+function isToothPainSymptom(text) {
+  return /歯|歯ぐき|虫歯|親知らず|奥歯/.test(text || "");
+}
+
+/** 🇸🇬 シンガポール専用：日本人クリニック + GP、最適1件決定（main + alternatives）。歯痛時は歯科も検索・表示。 */
 async function fetchCarePlacesForSingapore(location, state) {
   if (!getPlacesApiKey() || !location?.lat || !location?.lng) return [];
+  const historyText = state?.historyTextForCare || "";
+  const allowDental = isToothPainSymptom(historyText);
 
   // ① 日本人クリニック：Text Search "japanese clinic singapore"、半径制限なし、最大3件
   const japaneseRaw = await fetchPlacesByTextSearch(location, "japanese clinic singapore", { radius: 50000 });
   const japanese = filterSingaporeExcluded(
-    mergePlaces(japaneseRaw).filter(isJapaneseClinicOrSupport)
+    mergePlaces(japaneseRaw).filter(isJapaneseClinicOrSupport),
+    allowDental
   ).slice(0, 3);
 
-  // ② GP：Nearby Search、radius=1500（1.5km以内に限定）、type=doctor
-  const gpKeywords = ["clinic", "GP", "family medicine"];
+  // ② GP／歯科（歯痛時）：Nearby Search、radius=1000、type=doctor or dentist
+  const gpKeywords = allowDental ? ["clinic", "GP", "family medicine", "dentist", "dental clinic"] : ["clinic", "GP", "family medicine"];
   const gpRaw = [];
   for (const kw of gpKeywords) {
-    const places = await fetchNearbyPlaces(location, { keyword: kw, type: "doctor", radius: 1500 });
+    const places = await fetchNearbyPlaces(location, {
+      keyword: kw,
+      type: allowDental && /dentist|dental/.test(kw) ? "dentist" : "doctor",
+      radius: 1000,
+    });
     gpRaw.push(...places);
   }
   const gp = filterSingaporeExcluded(
-    mergePlaces(gpRaw).filter((c) => !isJapaneseClinicOrSupport(c))
-  ).filter((c) => (c?.distanceM ?? 0) <= 1500);
+    mergePlaces(gpRaw).filter((c) => !isJapaneseClinicOrSupport(c)),
+    allowDental
+  ).filter((c) => (c?.distanceM ?? 0) <= 1000);
 
   // ③④ フィルタ（rating 3.8+）＋スコアリング
   const allCandidates = filterByMinRating(mergePlaces(japanese, gp));
@@ -1692,13 +1714,14 @@ async function fetchCarePlacesWithFallbacks(location, plan, state) {
   if (country === "Singapore") {
     return fetchCarePlacesForSingapore(location, state);
   }
-  const types = ["doctor", "hospital", "health"];
+  const hasDentalIntent = /dentist|dental/.test((plan?.searchKeywords || []).join(" "));
+  const types = hasDentalIntent ? ["dentist", "doctor", "hospital", "health"] : ["doctor", "hospital", "health"];
   const baseKeywords = plan?.searchKeywords || ["clinic", "general practitioner", "medical clinic"];
   const isJapan = /japan|jp|日本/i.test(country);
   const keywords = isJapan
     ? [...baseKeywords, "クリニック", "内科", "病院", "医療", "診療所"]
     : [...baseKeywords, "medical"];
-  const radiuses = [1500, 3000, 5000, 10000, 20000, 50000];
+  const radiuses = [1000, 3000, 5000, 10000, 20000, 50000];
   const results = [];
   for (const radius of radiuses) {
     for (const type of types) {
@@ -2845,7 +2868,10 @@ async function resolveCareCandidates(state, destination) {
   const plan = buildCareSearchQueries(mainSymptomText, isSingapore ? null : destination);
   const results = await fetchCarePlacesWithFallbacks(location, plan, state);
   const mergedBase = mergePlaces(results);
-  const excludedFiltered = isSingapore ? filterSingaporeExcluded(mergedBase) : filterExcludedCareTypes(mergedBase);
+  const allowDental = destination?.label === "歯医者" || isToothPainSymptom(mainSymptomText);
+  const excludedFiltered = isSingapore
+    ? filterSingaporeExcluded(mergedBase, allowDental)
+    : filterExcludedCareTypes(mergedBase, allowDental);
   const symptomFitted = isSingapore ? excludedFiltered : applySymptomFitFilter(excludedFiltered, plan);
   const merged = isSingapore ? symptomFitted.slice(0, 10) : prioritizeCareCandidates(symptomFitted, state).slice(0, 10);
   const maxReturn = isSingapore ? 5 : 2;
@@ -2921,7 +2947,7 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
     if (isSingapore) {
       const insTop = getInsuranceLabel(top, true);
       const insAlt = alt ? getInsuranceLabel(alt, true) : "";
-      lines.push("🏥 まずはこちらで問題なさそうです");
+      lines.push("まずはこちらで問題なさそうです");
       lines.push(`① ${String(top?.name || "").trim()}${insTop ? " " + insTop : ""}`);
       const topReasons = buildHospitalRecommendationReasons(top, plan, state, usedReasons);
       topReasons.forEach((r) => lines.push(r));
@@ -2935,7 +2961,7 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
       lines.push("");
       lines.push(alt ? "まずは近くのGPで問題ない内容なので、行きやすい方を選べば大丈夫そうです。" : "必要に応じて、相談する形で問題なさそうです。");
     } else {
-      lines.push("🏥 まずはこちらがおすすめです");
+      lines.push("まずはこちらがおすすめです");
       lines.push(`① ${String(top?.name || "").trim()}`);
       buildHospitalRecommendationReasons(top, plan, state, usedReasons).forEach((r) => lines.push(r));
       if (alt) {
@@ -3095,26 +3121,11 @@ const RED_PAIN_INFECTION_SAFE_WAIT_FIRST = {
   reason: "体を休息モードに切り替えることで、自然な回復の流れが働きやすくなります。",
 };
 
-function buildRedImmediateActionsFallback() {
-  // 1件目ですでに受診を推奨しているため、2件目以降では受診を勧める内容を含めない
-  return [
-    {
-      title: "水分をこまめに取り、無理をしないでください",
-      reason: "体の負担を減らすことが、次の判断の土台になります。",
-    },
-    {
-      title: "安静にして、刺激を減らして過ごしてください",
-      reason: "体を回復モードに入れることで、変化が読み取りやすくなります。",
-    },
-  ];
-}
-
 const RED_MODAL_CLOSING_LINE =
   "今動いていること自体が、安全に近づく行動です。今は慌てる段階ではありません。ひとつずつ確認していけば大丈夫です。";
 
 function buildRedModalContent(state, historyText = "", research = null) {
   const cushion = buildRedCushionLine(historyText);
-  const category = resolveQuestionCategoryFromState(state);
   const safeWaitItems = buildRedSafeWaitSection(state, research);
   const parts = [
     cushion,
@@ -3131,44 +3142,38 @@ function buildRedModalContent(state, historyText = "", research = null) {
   return parts.join("\n");
 }
 
-/** 受診までの過ごし方：最低2件・最大2件。各項目の間に空行を設ける。 */
-function buildRedSafeWaitSection(state, research) {
+/** 受診までの過ごし方：🟢/🟡と同じパイプライン。フォールバックなし。最低2件・最大2件。PAIN/INFECTIONのみ1件目固定。 */
+function buildRedSafeWaitSection(state, research, refinedActionsOverride = null) {
   const formatItems = (items) =>
     items.slice(0, 2).map((a) => `・${a.title}\n→ ${a.reason}`).join("\n\n");
-  const category = resolveQuestionCategoryFromState(state);
-  const historyText = state?.historyTextForCare || "";
-  if (research && (Array.isArray(research?.actions) ? research.actions : []).length > 0) {
-    const context = research?.currentStateContext || buildCurrentStateContext(state, historyText, state?.lastConcreteDetailsText || "");
-    const searchActions = sanitizeImmediateActions(
-      pickActionsForBlock(research, 2),
-      buildSafeImmediateFallbackAction()
-    );
-    const baseActions = searchActions.length > 0 ? searchActions : ensureActionCount([], 2, context, research?.evidence || {});
-    const safeWaitActions = ensureActionCount(baseActions, 2, context, research?.evidence || {});
+  const category = state?.triageCategory || resolveQuestionCategoryFromState(state);
+  const evidence = research?.evidence || {};
+  const toItem = (a) => ({ title: a?.title ?? a?.action ?? "", reason: ensureReliableReason(a?.reason, evidence) });
+  if (refinedActionsOverride && Array.isArray(refinedActionsOverride) && refinedActionsOverride.length > 0) {
+    const doItems = refinedActionsOverride.map(toItem).filter((x) => x.title);
     if (category === "PAIN" || category === "INFECTION") {
-      const second = safeWaitActions[0]
-        ? { title: toConciseActionTitle(safeWaitActions[0].title), reason: ensureReliableReason(safeWaitActions[0].reason, research?.evidence || {}) }
-        : buildRedImmediateActionsFallback()[0];
-      return formatItems([RED_PAIN_INFECTION_SAFE_WAIT_FIRST, second]);
+      const second = doItems[0];
+      if (second) return formatItems([RED_PAIN_INFECTION_SAFE_WAIT_FIRST, second]);
     }
-    return formatItems(
-      safeWaitActions.map((a) => ({ title: toConciseActionTitle(a.title), reason: ensureReliableReason(a.reason, research?.evidence || {}) }))
-    );
+    return formatItems(doItems.slice(0, 2));
   }
-  const fallbackActions = buildRedImmediateActionsFallback();
+  const plan = research;
+  const doActions = buildDoActionsFromPlan(plan, state, "🟢", { forSummary: true });
+  const mapped = doActions.slice(0, 2).map((x) => ({ title: toConciseActionTitle(x.action), reason: ensureReliableReason(x.reason, evidence) }));
   if (category === "PAIN" || category === "INFECTION") {
-    return formatItems([RED_PAIN_INFECTION_SAFE_WAIT_FIRST, fallbackActions[0]]);
+    const second = mapped[0];
+    if (second) return formatItems([RED_PAIN_INFECTION_SAFE_WAIT_FIRST, second]);
   }
-  return formatItems(fallbackActions);
+  return formatItems(mapped);
 }
 
-function buildRedImmediateActionsBlock(state, historyText, research = null) {
+function buildRedImmediateActionsBlock(state, historyText, research = null, refinedSafeWaitActions = null) {
   const cushion = buildRedCushionLine(historyText);
   const fixedFirst = [
     "・本日中に医療機関へ連絡する",
     "→ 早い段階で確認することで、重大な問題でないことが分かるケースも多くあります。",
   ];
-  const safeWaitSection = buildRedSafeWaitSection(state, research);
+  const safeWaitSection = buildRedSafeWaitSection(state, research, refinedSafeWaitActions);
   return [
     "✅ 今すぐやること",
     cushion,
@@ -3200,9 +3205,29 @@ function ensureHospitalMemoBlock(text, state, historyText = "") {
   );
 }
 
-function ensureRedImmediateActionsBlock(text, state, historyText = "", research = null) {
+async function ensureRedImmediateActionsBlock(text, state, historyText = "", research = null) {
   if (!text) return text;
-  const block = buildRedImmediateActionsBlock(state, historyText, research);
+  let plan = research;
+  let refinedSafeWait = null;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    if (!plan) {
+      try {
+        plan = await buildImmediateActionHypothesisPlan(state, historyText, text);
+      } catch (_) {
+        if (attempt >= 9) break;
+        continue;
+      }
+    }
+    if (!plan) continue;
+    try {
+      refinedSafeWait = await refineDoActionsWithLLM(plan, state, "🟡", { forSummary: true });
+      if (refinedSafeWait && refinedSafeWait.length > 0) break;
+    } catch (_) {
+      if (attempt >= 9) break;
+    }
+  }
+  if (!plan) plan = await buildImmediateActionFallbackPlanFromState(state);
+  const block = buildRedImmediateActionsBlock(state, historyText, plan, refinedSafeWait);
   const replaced = replaceSummaryBlock(text, "✅ 今すぐやること", block);
   if (replaced === text) {
     const insertAfter = "📝 今の状態について";
@@ -3771,7 +3796,7 @@ function buildDoActionsFromPlan(plan, state, level, options = {}) {
   const { forSummary = false, actionsOverride } = options;
   const ctx = plan?.currentStateContext || buildCurrentStateContext(state, state?.historyTextForCare || "", state?.lastConcreteDetailsText || "");
   const evidence = plan?.evidence || {};
-  const category = resolveQuestionCategoryFromState(state);
+  const category = state?.triageCategory || resolveQuestionCategoryFromState(state);
 
   const rawActions =
     Array.isArray(actionsOverride) && actionsOverride.length > 0
@@ -4771,6 +4796,39 @@ const RED_FOLLOW_UP_QUESTION =
 const B_MC_FOLLOW_UP_QUESTION =
   "休むためにMC（診断書）が必要な場合、オンライン診療という方法もあります。もしよければ、おすすめの診療先を紹介できますが、見てみますか？";
 
+/** 直近のassistant群にフォロー質問が含まれるか（8.2仕様）。まとめ→フォロー質問の順でpushするため、最後 or 最後から2番目をチェック。 */
+function lastAssistantIsFollowUpQuestion(history) {
+  if (!Array.isArray(history) || history.length === 0) return false;
+  const assistants = history.filter((m) => m.role === "assistant");
+  const lastTwo = assistants.slice(-2);
+  const hasFollowUp = (text) =>
+    text.includes("このまま休みますか？") ||
+    text.includes("もう少し詳しく確認しますか？") ||
+    text.includes("診察までの間にできることを整理しますか？") ||
+    text.includes("英語でどう伝えるか一緒に考えますか？") ||
+    text.includes("おすすめの診療先を紹介できますが、見てみますか？");
+  return lastTwo.some((m) => hasFollowUp(m?.content || ""));
+}
+
+/** 【不変条件】まとめ表示後は絶対にまとめを再生成しない。この条件がtrueのときは必ずhandleFollowUpPhaseへ。 */
+function mustUseFollowUpPhase(state, history, clientMeta, userMessageCountBefore) {
+  const isFirstUserMessage = userMessageCountBefore === 0;
+  if (isFirstUserMessage) return false;
+  const summaryGenerated = !!(
+    state?.summaryShown ||
+    state?.summaryGenerated ||
+    state?.hasSummaryBlockGenerated
+  );
+  const clientReportedSummaryShown = !!(clientMeta?.summaryShown === true && userMessageCountBefore >= 2);
+  const lastMsgIsFollowUp = lastAssistantIsFollowUpQuestion(history || []);
+  return (
+    state?.phase === "FOLLOW_UP" ||
+    summaryGenerated ||
+    clientReportedSummaryShown ||
+    lastMsgIsFollowUp
+  );
+}
+
 /** B_MC 肯定時の完全固定ブロック（LLM生成禁止） */
 const B_MC_ONLINE_CLINICS_BLOCK = [
   "シンガポールでは、会社や学校に所属している場合、",
@@ -4966,6 +5024,7 @@ function handleFollowUpPhase(res, conversationId, message, state, locationPrompt
       triage_state: buildTriageState(true, judgeMeta.judgement, judgeMeta.slotsFilledCount),
       questionPayload: null,
       normalizedAnswer: state.lastNormalizedAnswer || null,
+      isFollowUpOnlyResponse: true,
       locationPromptMessage,
       locationRePromptMessage,
       locationSnapshot: state.locationSnapshot,
@@ -4985,6 +5044,7 @@ function handleFollowUpPhase(res, conversationId, message, state, locationPrompt
     normalizedAnswer: state.lastNormalizedAnswer || null,
     followUpQuestion: null,
     followUpMessage: null,
+    isFollowUpOnlyResponse: true,
     locationPromptMessage,
     locationRePromptMessage,
     locationSnapshot: state.locationSnapshot,
@@ -7362,6 +7422,7 @@ async function buildDiseaseSafetyFilteredMessage(
       "厳守：",
       "- 出力は必ずJSONのみ：{\"common\":[],\"conditional\":[],\"rare_emergency\":[]}",
       "- common = 一般的に頻度が高い原因（2〜4件）。各項目は「・<原因名> → <短い理由>」形式",
+      "- common には**少なくとも1件**、医学的に一般的な病名・状態名（例：偏頭痛、緊張型頭痛、片頭痛、急性胃腸炎、感冒、急性咽頭炎）を含める。体調不良・痛みの種類・症状の悪化・チクチクする痛みなど、ユーザー言動の要約だけの表現は避け、検索結果から該当する病名を選ぶ。",
       "- 「→」の理由は**ユーザーの言動を要約**して記載。ユーザーが言っていないことは書かない。固定文（例：肩こりやストレスで）は使わず、ユーザーが実際に言った内容に合わせる。",
       "- conditional = 条件付きで考慮すべき状況（2〜4件）。各項目は「・<病名> → <関連した理由>」形式。本当の病名を使い、理由はユーザー症状と関連付ける（例：群発頭痛 → ズキズキする痛みが目の奥に集中することがある）。検索結果＋ユーザー症状から要約。煽らない表現。固定テンプレート禁止。",
       "- 禁止：理由に痛みの強さ（3/10、〇/10など）を絶対に使わない。",
@@ -7426,7 +7487,16 @@ async function buildDiseaseSafetyFilteredMessage(
     return `${item.slice(0, arrowIdx + 3)}${fixed}`;
   });
 
-  if (common.length < 2) {
+  const GENERIC_CAUSE = /^(体調不良|症状の悪化|痛みの種類|チクチクする痛み|日常生活に影響|症状が続いている|経過の変化|変化が|強い痛み|だるさ)$/;
+  const looksLikeProperName = (cause) =>
+    cause &&
+    !GENERIC_CAUSE.test(String(cause).trim()) &&
+    /(頭痛|胃炎|腸炎|感冒|扁桃|咽頭|ヘルペス|皮膚炎|熱中症|自律神経|片頭痛|緊張型|偏頭痛|症候群|炎$)/.test(cause);
+  const hasProperName = common.some((c) => {
+    const cause = (c.indexOf(" → ") >= 0 ? c.slice(0, c.indexOf(" → ")) : c).replace(/^・\s*/, "").trim();
+    return looksLikeProperName(cause);
+  });
+  if (common.length < 2 || !hasProperName) {
     const fallbackItems = fallbackPair.map((d) => {
       const reason = d.desc.replace(/とされる状態です。?$/, "").trim();
       const fixed = replaceUnsaidPhrasesInReason(reason, userWords);
@@ -7435,7 +7505,22 @@ async function buildDiseaseSafetyFilteredMessage(
     for (const item of fallbackItems) {
       if (common.length >= 4) break;
       const name = (item.match(/^・([^→]+)/) || [])[1]?.trim?.() || "";
-      if (!name || !common.some((c) => c.includes(name))) common.push(item);
+      if (!name || !common.some((c) => c.includes(name))) {
+        common.push(item);
+        if (!hasProperName) break;
+      }
+    }
+  }
+  const hasProperNameNow = common.some((c) => {
+    const cause = (c.indexOf(" → ") >= 0 ? c.slice(0, c.indexOf(" → ")) : c).replace(/^・\s*/, "").trim();
+    return looksLikeProperName(cause);
+  });
+  if (!hasProperNameNow && common.length > 0) {
+    const firstFallback = fallbackPair[0];
+    if (firstFallback && !common.some((c) => c.includes(firstFallback.name))) {
+      const reason = firstFallback.desc.replace(/とされる状態です。?$/, "").trim();
+      const fixed = replaceUnsaidPhrasesInReason(reason, userWords);
+      common = [`・${firstFallback.name} → ${fixed}`, ...common].slice(0, 4);
     }
   }
   common = common.slice(0, 4);
@@ -9582,10 +9667,13 @@ async function generateSummaryForConfirmation(conversationId) {
   }
   if (level === "🔴") {
     state.decisionLevel = "🔴";
-    try {
-      immediateActionPlan = await buildImmediateActionHypothesisPlan(state, historyTextForOtc, aiResponse);
-    } catch (_) {
-      immediateActionPlan = null;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      try {
+        immediateActionPlan = await buildImmediateActionHypothesisPlan(state, historyTextForOtc, aiResponse);
+        if (immediateActionPlan) break;
+      } catch (_) {
+        if (attempt >= 9) immediateActionPlan = null;
+      }
     }
   }
   aiResponse = ensureOutlookBlock(aiResponse, state);
@@ -9593,7 +9681,7 @@ async function generateSummaryForConfirmation(conversationId) {
   aiResponse = enforceYellowOtcPositionStrict(aiResponse, level);
   if (level === "🔴") {
     aiResponse = ensureHospitalMemoBlock(aiResponse, state, historyTextForOtc);
-    aiResponse = ensureRedImmediateActionsBlock(aiResponse, state, historyTextForOtc, immediateActionPlan);
+    aiResponse = await ensureRedImmediateActionsBlock(aiResponse, state, historyTextForOtc, immediateActionPlan);
     aiResponse = ensureHospitalBlock(aiResponse, state, historyTextForOtc);
   }
   state.summaryText = aiResponse;
@@ -9803,6 +9891,14 @@ app.post("/api/chat", async (req, res) => {
 
     const locationPromptMessage = null;
     const locationRePromptMessage = null;
+
+    // 🔥 【最優先】まとめ後のフォロー：state/history/clientMeta ベースで最早判定。以降の処理より先に実行。
+    const historyForGuard = conversationHistory[conversationId] || [];
+    if (mustUseFollowUpPhase(state, historyForGuard, clientMeta, userMessageCountBefore)) {
+      console.log("🛑 FORCE FOLLOW MODE (earliest guard) - summary generation blocked");
+      return handleFollowUpPhase(res, conversationId, message, state, locationPromptMessage, locationRePromptMessage);
+    }
+
     ensureSlotFilledConsistency(conversationState[conversationId]);
     const filledBeforeTurn = countFilledSlots(conversationState[conversationId].slotFilled, conversationState[conversationId]);
     applySpontaneousSlotFill(conversationState[conversationId], message, { isFirstMessage: userMessageCountBefore === 0 });
@@ -9822,20 +9918,16 @@ app.post("/api/chat", async (req, res) => {
       (conversationState[conversationId].confirmationShown && !conversationState[conversationId].summaryShown) ||
       (filledBeforeTurn >= getRequiredSlotCount(state) && !conversationState[conversationId].summaryShown && lastMsgLooksLikeConfirmation);
 
-    const isFollowUpPhase = state.phase === "FOLLOW_UP";
-    const forceFollowMode = isFollowUpPhase || (summaryGenerated && !isFirstUserMessage);
+    const forceFollowMode = mustUseFollowUpPhase(state, history, clientMeta, userMessageCountBefore);
     console.log("[PHASE_GUARD]", {
       PHASE: state.phase,
-      summaryGenerated: state.summaryGenerated,
       summaryShown: state.summaryShown,
-      isFollowUpPhase,
       forceFollowMode,
       conversationStep: userMessageCountBefore,
     });
-
-    // 🔥 最上位ガード（絶対）: phase=FOLLOW_UP または まとめ済みならフォローのみ。まとめ再生成は物理的に禁止。
-    if (forceFollowMode && !isFirstUserMessage) {
-      console.log("🛑 FORCE FOLLOW MODE - summary generation blocked");
+    // 二重ガード（最早ガードで既にreturn済みのはず。ここは保険。）
+    if (forceFollowMode) {
+      console.log("🛑 FORCE FOLLOW MODE (secondary guard) - redirecting to handleFollowUpPhase");
       return handleFollowUpPhase(res, conversationId, message, state, locationPromptMessage, locationRePromptMessage);
     }
 
@@ -10091,6 +10183,7 @@ app.post("/api/chat", async (req, res) => {
         sections: [],
         questionPayload: null,
         normalizedAnswer: state.lastNormalizedAnswer || null,
+        isFollowUpOnlyResponse: true,
         locationPromptMessage,
         locationRePromptMessage,
         locationSnapshot: state.locationSnapshot,
@@ -10112,6 +10205,7 @@ app.post("/api/chat", async (req, res) => {
           sections: [],
           questionPayload: null,
           normalizedAnswer: state.lastNormalizedAnswer || null,
+          isFollowUpOnlyResponse: true,
           locationPromptMessage,
           locationRePromptMessage,
           locationSnapshot: state.locationSnapshot,
@@ -10140,6 +10234,7 @@ app.post("/api/chat", async (req, res) => {
         sections: [],
         questionPayload: null,
         normalizedAnswer: state.lastNormalizedAnswer || null,
+        isFollowUpOnlyResponse: true,
         locationPromptMessage,
         locationRePromptMessage,
         locationSnapshot: state.locationSnapshot,
@@ -10784,7 +10879,7 @@ app.post("/api/chat", async (req, res) => {
       aiResponse = enforceYellowOtcPositionStrict(aiResponse, level);
       if (level === "🔴") {
         aiResponse = ensureHospitalMemoBlock(aiResponse, conversationState[conversationId], historyTextForOtc);
-        aiResponse = ensureRedImmediateActionsBlock(aiResponse, conversationState[conversationId], historyTextForOtc, immediateActionPlan);
+        aiResponse = await ensureRedImmediateActionsBlock(aiResponse, conversationState[conversationId], historyTextForOtc, immediateActionPlan);
         aiResponse = ensureHospitalBlock(
           aiResponse,
           conversationState[conversationId],
@@ -11122,6 +11217,29 @@ app.post("/api/chat", async (req, res) => {
       shouldJudge: shouldJudgeNow,
     };
     const triage_state = buildTriageState(shouldJudgeNow, finalRisk, slotsFilledCount);
+    // 最終ガード: まとめ返却直前。万が一ここに到達したらリダイレクト＋履歴ロールバック
+    const mustFollow = mustUseFollowUpPhase(
+      conversationState[conversationId],
+      conversationHistory[conversationId],
+      conversationState[conversationId]?.clientMeta,
+      (conversationHistory[conversationId] || []).filter((m) => m.role === "user").length
+    );
+    if (sections.length > 0 && mustFollow) {
+      console.error("🛑 CRITICAL: About to return summary in follow-up phase. Rolling back and redirecting.");
+      const hist = conversationHistory[conversationId];
+      let toPop = 1;
+      if (followUpMessage) toPop++;
+      if (followUpQuestion && shouldSendFollowUpQuestion(sections)) toPop++;
+      for (let i = 0; i < toPop && hist?.length; i++) hist.pop();
+      return handleFollowUpPhase(
+        res,
+        conversationId,
+        req.body?.message || message,
+        conversationState[conversationId],
+        locationPromptMessage,
+        locationRePromptBeforeSummary
+      );
+    }
     res.json({
       message: aiResponse,
       response: aiResponse,
@@ -11356,7 +11474,7 @@ app.post("/api/action-details", async (req, res) => {
       .join("\n");
     if (retryState?.decisionLevel === "🔴") {
       let research = null;
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < 10; i++) {
         try {
           research = await buildImmediateActionHypothesisPlan(
             retryState,

@@ -728,7 +728,7 @@ slot_status = {
 
 ##### 🤝/📝 モーダルの表示構造（固定）
 - `あなたの状態の理解を深める`（見出し固定）
-- **🟢 よくある原因**：2〜4件。`・<原因名> → <理由>` 形式。理由は**ユーザーの言動を要約**して記載（固定にしない）。
+- **🟢 よくある原因**：2〜4件。`・<原因名> → <理由>` 形式。**少なくとも1件は病名・医学的に一般的な呼び名**（例：偏頭痛、緊張型頭痛、急性胃腸炎、感冒）を含める。体調不良・痛みの種類・症状の悪化など、ユーザー言動の要約だけの表現は避ける。理由は**ユーザーの言動を要約**して記載（固定にしない）。
 - **🟡 状況によっては確認が必要**：2〜4件。`・<病名> → <関連した理由>` 形式。本当の病名を使い、理由はユーザー症状と関連付ける。検索＋症状まとめから要約。煽らない表現。
 - **🔴 すぐ受診が必要なサイン**：**2件のみ**（強制）。折りたたみ・初期非表示。「強い症状がある場合はこちら」で展開。
 - **🟢/🟡のとき**：`現時点の安心材料` → `こんな変化があれば受診を検討`（最大3）
@@ -910,6 +910,14 @@ SKIN（皮膚症状など）：
 ### 8.2 まとめ後のフォロー質問フェーズ
 
 **絶対ルール**：`summaryShown === true` のときは**絶対にまとめを再生成しない**。`generateFollowResponse(snapshot, userInput)` のみ実行。まとめ生成と完全分離。
+
+**実装不変条件（保証）**：以下のいずれかが成り立つとき、`/api/chat` は必ず `handleFollowUpPhase` にのみ処理を委ね、まとめ（sections）を返さない。
+- `state.phase === "FOLLOW_UP"`
+- `state.summaryShown || state.summaryGenerated || state.hasSummaryBlockGenerated` のいずれかが true
+- `clientMeta.summaryShown === true`（クライアントがまとめ表示済みと報告）かつユーザーメッセージ数 ≥ 2
+- 直近2件の assistant 発言にフォロー質問（「このまま休みますか？」等）が含まれる
+
+ガードは最優先で実行し、まとめ返却直前にも二重チェックする。この条件を満たす限り、フォロー応答以外は返さない。
 
 **SNAPSHOT**：`{ main_symptom, category, duration, severity, red_flags, judgment_type }`。category は `"PAIN"|"INFECTION"|"GI"|"SKIN"`。
 
@@ -1132,13 +1140,13 @@ function canRecommendSpecificPlace(snapshot: LocationSnapshot | null) {
 - **1件目は固定**：
   - `・本日中に医療機関へ連絡する`
   - `→ 早い段階で確認することで、重大な問題でないことが分かるケースも多くあります。`
-- **2件目以降（受診までの過ごし方）**は、**モーダル・🟢/🟡と同じクエリ**（10.3：主症状 + 箇条書き全文 + 対処法）を使用して検索し、🟢/🟡と**同じパイプライン**（検索強化・信頼ドメイン優先・フォールバック順など）で生成する。
+- **2件目以降（受診までの過ごし方）**は、**🟢/🟡と完全に同一実装**（refineDoActionsWithLLM + buildDoActionsFromPlan）を使用する。フォールバックは使わず、失敗時は最大10回リトライする。
   - 箇条書きは**必ず最低2件、最大2件**とする。
   - 各項目の間（`→ <理由>` の後）に**空行を1つ**設ける。
   - PAIN系・INFECTION系の場合は、以下を**1件目に必ず入れる**（既存ルール維持）：
     - `・今すぐ受診が難しい場合は、今はベッドに入り、横になって数時間ゆっくり過ごしてください`
     - `→ 体を休息モードに切り替えることで、自然な回復の流れが働きやすくなります。`
-  - 2件目は検索結果から `・<行動>` / `→ <理由>` 形式で生成する。
+  - 2件目は🟢/🟡と同じパイプラインで `・<行動>` / `→ <理由>` 形式で生成する。
 
 #### 🏥 受診先の候補（施設案内・必須）
 
@@ -1152,7 +1160,7 @@ function canRecommendSpecificPlace(snapshot: LocationSnapshot | null) {
 この症状であれば、まずは一般的な外来で相談できる内容です。
 [SG] シンガポールでは、まずGP（一般医）で相談する流れが一般的です。/[他国] 無理に専門科を選ばなくても大丈夫そうです。
 
-🏥 まずはこちらがおすすめです
+まずはこちらがおすすめです
 ① {施設名} ・理由×2
 必要であれば、こちらも選択肢になります
 ② {施設名} ・理由×2
@@ -1168,7 +1176,7 @@ function canRecommendSpecificPlace(snapshot: LocationSnapshot | null) {
 この症状であれば、まずは一般的な外来で相談できる内容です。
 シンガポールでは、体調不良のときはまずGP（一般医）に相談するのが一般的です。
 
-🏥 まずはこちらで問題なさそうです
+まずはこちらで問題なさそうです
 ① Raffles Medical（ラッフルズ・メディカル）
 ・体調不良の初期相談に対応している
 ・幅広い症状をまとめて見てもらえる
@@ -1225,7 +1233,7 @@ Healthway Medical Clinic
 
 **他国：検索・スコアリング**
 - カテゴリ別クエリ：PAIN→GP/内科、SKIN→dermatology+GP、GI→gastro+内科、INFECTION→GP/fever。専門科に寄せすぎない。
-- フィルタ：vet/dental/動物病院・歯科、評価3.8以下、無関係専門科を除外。
+- フィルタ：vet/動物病院・小児科、評価3.8以下、無関係専門科を除外。**歯痛時は歯科を許可**。
 - `score = symptomMatch*0.5 + (1/distance)*0.3 + rating*0.2`
 
 ---
@@ -1234,9 +1242,9 @@ Healthway Medical Clinic
 
 - **戦略**：日本人クリニック OR GP のみ。専門科検索禁止。
 - **① 日系**：Text Search `japanese clinic singapore`、半径制限なし、max3件
-- **② GP**：Nearby Search、**radius=1500（1.5km以内に限定）**、type=doctor、keyword=clinic/GP/family medicine
-- **③ 除外**：dental, aesthetic, tcm, physio, animal, veterinary
-- **④ スコア**：`japaneseClinic*3 + gpMatch*3 + distanceScore*2 + ratingScore`（distance: 0-500m=2, 500-1k=1, 1k-1.5k=0。rating 3.8未満は除外）
+- **② GP**：Nearby Search、**radius=1000（1.0km以内に限定）**、type=doctor、keyword=clinic/GP/family medicine
+- **③ 除外**：aesthetic, tcm, physio, animal, veterinary, pediatric（小児科）。**歯痛時は dental を検索・表示**。
+- **④ スコア**：`japaneseClinic*3 + gpMatch*3 + distanceScore*2 + ratingScore`（distance: 0-500m=2, 500-1k=1, 1k超=-1。rating 3.8未満は除外）
 - **⑤ 意思決定**：**主役＝GP（必須）**。`main=GP1`、`alternatives=[日系(あれば), GP2, 日系orGP]`
 - 出力：`candidates = [GP, 日系?, GP?, 日系?]`（本文2件、モーダル最大5件）
 
@@ -1272,7 +1280,7 @@ Healthway Medical Clinic
 #### 医療機関検索フロー（`fetchCarePlacesWithFallbacks`）
 1. **Nearby Search（半径順）**
    - types: `doctor`, `hospital`, `health`
-   - 半径: 1.5km → 3km → 5km → 10km → 20km → 50km（結果が出るまで順に試行）
+   - 半径: 1km → 3km → 5km → 10km → 20km → 50km（結果が出るまで順に試行）
    - 日本: keywords に `クリニック`, `内科`, `病院`, `医療`, `診療所` を追加
 2. **rankByDistance（距離順）**
    - 0件の場合、`rankby=distance` で type ごとに検索（半径制限なし）
@@ -1290,8 +1298,8 @@ Healthway Medical Clinic
 2. **国判定**: lat/lng から逆ジオコードで `country` を取得。`country === "Singapore"` の場合はシンガポール専用ロジックへ
 3. **シンガポールの場合**（`fetchCarePlacesForSingapore`）：🇸🇬 シンガポール専用ロジックに従う。
    - ① 日本人クリニック: Text Search `japanese clinic singapore`、半径制限なし、最大3件
-   - ② GP: Nearby Search、radius=1500、type=doctor、keyword=GP/clinic/family medicine
-   - ③ 除外: dental, aesthetic, tcm, physio, animal 等
+   - ② GP: Nearby Search、radius=1000、type=doctor、keyword=GP/clinic/family medicine
+   - ③ 除外: aesthetic, tcm, physio, animal, pediatric（小児科）等。歯痛時は歯科を検索・表示。
    - ④ スコアリング後、⑤ 意思決定：hasJapanese ? main=日系・alternatives=GP2件 : main=GP1・alternatives=GP2件
    - 出力: `[main, alt1, alt2]`（最大3件）
 4. **他国**：`detectCareMainSymptomText` → `buildCareSearchQueries` → `fetchCarePlacesWithFallbacks`

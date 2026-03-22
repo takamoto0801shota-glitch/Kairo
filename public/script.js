@@ -317,7 +317,10 @@ function saveHistory() {
   localStorage.setItem(HISTORY_KEY, JSON.stringify(messages));
 }
 
-// Load conversation history (再描画は行わない。将来実装する場合も、addMessageのフォローガードにより未許可経路からのフォロー表示はブロックされる)
+// Load conversation history (再描画は行わない)
+// 【将来実装時】履歴復元で addMessage を呼ぶ場合:
+// 1) まとめブロック(🟢🤝✅⏳🏥等)を含むメッセージを復元する前に appState.summaryGenerated = true を設定すること
+// 2) 復元時は addMessage(text, false, false, { skipSummaryBlock: true }) でまとめ二重表示を防ぐこと
 function loadHistory() {
   return;
 }
@@ -1007,8 +1010,9 @@ function addMessage(text, isUser = false, save = true, options = {}) {
     // 判断が完了しているかチェック
     const decisionCompleted = isDecisionCompleted(text);
     
-    // 判断が完了している場合は、必ずまとめブロックを追加
-    if (decisionCompleted) {
+    // まとめは初回のみ：summaryGenerated済みの場合やフォロー専用応答では絶対にまとめを追加しない
+    const shouldAddSummary = decisionCompleted && !appState.summaryGenerated && !options.skipSummaryBlock;
+    if (shouldAddSummary) {
       console.log("[DEBUG] isCollecting will be set false");
       isCollecting = false;
       console.log("[Kairo] decision completed, addSummaryBlock", { decisionCompleted });
@@ -1304,7 +1308,8 @@ async function callOpenAI(message, resetSession = false) {
             lang: navigator.language || "",
             tz: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
             locationPromptShown: sessionStorage.getItem(LOCATION_PROMPT_KEY) === "true",
-          locationSnapshot: getLocationSnapshot(),
+            locationSnapshot: getLocationSnapshot(),
+            summaryShown: appState.summaryGenerated,
           },
         }),
       });
@@ -1426,15 +1431,6 @@ async function handleUserInput() {
         // サマリーカードは SUMMARY_CARD_TEMPLATES のテンプレのみ使用。judgeMeta.summaryLine は絶対に使わない。
       }
 
-      // フォロー文トリガー: 「最後に」の絵文字（🌱 or 💬）が実際に出力された時のみ。それ以外は絶対に出さない。
-      // エンコーディング耐性: Unicode正規化(NFC) + コードポイント(\u{1F331}=\u{1F4AC})で判定
-      const isLastSectionEmojiOutput = (sectionText) => {
-        if (!sectionText || typeof sectionText !== "string") return false;
-        const normalized = String(sectionText).normalize("NFC").trim();
-        const firstLine = normalized.split("\n")[0] || "";
-        return /^[\u{1F331}\u{1F4AC}]\s*最後に/u.test(firstLine) || /^[🌱💬]\s*最後に/.test(firstLine);
-      };
-
       const shouldShowSections = !isFirstResponse && triageState.is_final && sections.length > 0;
       if (triageState.is_final && !isFirstResponse && !aiResponse.isPreSummaryConfirmation) appState.summaryGenerated = true;
 
@@ -1444,8 +1440,8 @@ async function handleUserInput() {
         const followUpMessage = aiResponse.followUpMessage;
         const followUpQuestion = aiResponse.followUpQuestion || DEFAULT_FOLLOW_UP_QUESTION;
 
-        const onSectionRendered = (sectionText) => {
-          if (!isLastSectionEmojiOutput(sectionText)) return;
+        // フォロー文: APIがfollowUpQuestionを返している場合は必ず表示。サーバー側のshouldSendFollowUpQuestionで判定済み。
+        const onLastSectionRendered = () => {
           if (followUpMessage) addMessage(followUpMessage, false, true, { fromFollowUpTrigger: true });
           addMessage(followUpQuestion, false, true, { fromFollowUpTrigger: true });
         };
@@ -1455,7 +1451,7 @@ async function handleUserInput() {
           if (sections[0]) {
             renderSection(sections[0]);
             if (sections.length === 1) {
-              const t = setTimeout(() => onSectionRendered(sections[0]), 300);
+              const t = setTimeout(onLastSectionRendered, 300);
               appState.sectionTimers.push(t);
             }
           }
@@ -1467,7 +1463,7 @@ async function handleUserInput() {
           const timerId = setTimeout(() => {
             renderSection(sections[idx]);
             if (isLast) {
-              const t = setTimeout(() => onSectionRendered(sections[idx]), 300);
+              const t = setTimeout(onLastSectionRendered, 300);
               appState.sectionTimers.push(t);
             }
           }, firstDelay + idx * interval);
@@ -1475,13 +1471,15 @@ async function handleUserInput() {
         }
       } else {
         setTimeout(() => {
-          // まとめ後のフォロー応答（sections空）ではrenderSummaryを呼ばない。再度まとめを出さずフォロー文のみ表示。
-          if (triageState.is_final && !isFirstResponse && !aiResponse.isPreSummaryConfirmation && sections.length > 0) {
+          // まとめ後のフォロー応答（sections空 or isFollowUpOnlyResponse）ではrenderSummaryを絶対に呼ばない
+          if (triageState.is_final && !isFirstResponse && !aiResponse.isPreSummaryConfirmation && sections.length > 0 && !aiResponse.isFollowUpOnlyResponse) {
             renderSummary();
           }
           const msgToShow = stripFollowUpFromMessage(aiMessage);
-          addMessage(msgToShow, false, true, { animateFromTop: !!aiResponse.isPreSummaryConfirmation });
-          // フォローは出さない（「最後に」の絵文字が出力されていない）
+          addMessage(msgToShow, false, true, {
+            animateFromTop: !!aiResponse.isPreSummaryConfirmation,
+            skipSummaryBlock: !!aiResponse.isFollowUpOnlyResponse,
+          });
         }, QUESTION_DELAY_MS);
       }
     } catch (error) {
