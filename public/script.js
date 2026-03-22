@@ -411,13 +411,15 @@ function parseAIMessage(text) {
     // 見出しを探す
     let foundHeader = null;
     for (const pattern of headerPatterns) {
-      if (line.includes(pattern.icon)) {
-        foundHeader = pattern;
-        // 見出し名を抽出（絵文字以降のテキスト）
-        const nameMatch = line.match(new RegExp(`${pattern.icon}\\s*(.+)`));
-        foundHeader.name = nameMatch ? nameMatch[1].trim() : pattern.name;
-        break;
+      if (!line.includes(pattern.icon)) continue;
+      if (pattern.icon === '🏥') {
+        const name = (line.match(new RegExp(`${pattern.icon}\\s*(.+)`)) || [])[1]?.trim() || '';
+        if (!/受診先の候補|Kairoの判断/.test(name)) continue;
       }
+      foundHeader = { ...pattern };
+      const nameMatch = line.match(new RegExp(`${pattern.icon}\\s*(.+)`));
+      foundHeader.name = nameMatch ? nameMatch[1].trim() : pattern.name;
+      break;
     }
 
     if (foundHeader) {

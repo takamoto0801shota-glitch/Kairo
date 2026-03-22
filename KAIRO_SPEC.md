@@ -1159,11 +1159,61 @@ function canRecommendSpecificPlace(snapshot: LocationSnapshot | null) {
 どちらでも対応できる内容なので、行きやすい方を選んで大丈夫そうです。
 ```
 
-**モーダル（1件メイン＋補助2件まで）**
+**🇸🇬 シンガポール専用 出力ロジック**
+
+目的：「どこ行けばいいか分からない」をゼロにする。主役＝GP、日系＝「英語不安の選択肢」。比較ではなく状況別に導線を分ける。
+
+**本文（SG）構造**：① 状況整理 ② SG前提（GP文化）③ 主役（GP）④ サブ主役（日系）⑤ クロージング
 ```
-① クッション：「少し探すのは大変だと思うので、この症状で無理なく相談できる場所をこちらで整理しました。今回の状態であれば、まずはこの1件を選べば大丈夫そうです。」
-② メイン：【まずはこちら】{施設名} ・症状との相性／役割／安心材料×3＋「無理に探さなくても、この施設で十分対応できる内容です。」
-③ 補助（最大2件）：「もし時間帯や場所の都合が合わない場合は、こちらも選択肢になります。」{施設名}・理由1つ
+この症状であれば、まずは一般的な外来で相談できる内容です。
+シンガポールでは、体調不良のときはまずGP（一般医）に相談するのが一般的です。
+
+🏥 まずはこちらで問題なさそうです
+① Raffles Medical（ラッフルズ・メディカル）
+・体調不良の初期相談に対応している
+・幅広い症状をまとめて見てもらえる
+
+英語での説明が不安な場合は、こちらも安心です
+② Japan Green Medical Centre
+・日本語で症状をそのまま伝えられる
+・海外でも安心して相談しやすい
+
+まずは近くのGPで問題ない内容なので、行きやすい方を選べば大丈夫そうです。
+```
+
+**モーダル（SG）構造**：① クッション ② 主役（GP）③ サブ主役（日系）④ サブサブ（最大2件：日系＋GP）⑤ クロージング
+```
+少し探すのは大変だと思うので、
+シンガポールでの一般的な流れも含めて整理しました。
+
+【まずはこちら（いちばんスムーズです）】
+Raffles Medical（ラッフルズ・メディカル）
+
+・体調不良のときに最初に相談する一般的な医療機関
+・その場で必要な対応や次の判断まで見てもらえる
+・シンガポールではまずここから受診する流れが基本
+
+英語での説明が不安な場合は、こちらを選ぶと安心です。
+Japan Green Medical Centre
+・日本語で症状をそのまま伝えられる
+・海外でも安心して相談しやすい環境
+
+もし上記が難しい場合は、こちらも選択肢になります。
+
+Healthway Medical Clinic
+・一般的な体調不良の相談に対応している
+
+（もう1件 GP or 日系）
+・近くで受診しやすい
+
+基本的には、最初に紹介したGPを選んでおけば問題ない流れです。
+```
+
+**他国：本文・モーダル（共通）**
+```
+① クッション＋メイン1件＋補助2件＋クロージング
+② メイン：【まずはこちら】{施設名} ・理由×3
+③ 補助：「もし時間帯や場所の都合が合わない場合は、こちらも選択肢になります。」{施設名}・理由1つ
 ④ クロージング：「まずは上の施設を選んでおけば問題なさそうです。」
 ```
 
@@ -1184,11 +1234,26 @@ function canRecommendSpecificPlace(snapshot: LocationSnapshot | null) {
 
 - **戦略**：日本人クリニック OR GP のみ。専門科検索禁止。
 - **① 日系**：Text Search `japanese clinic singapore`、半径制限なし、max3件
-- **② GP**：Nearby Search、radius=1500、type=doctor、keyword=clinic/GP/family medicine
+- **② GP**：Nearby Search、**radius=1500（1.5km以内に限定）**、type=doctor、keyword=clinic/GP/family medicine
 - **③ 除外**：dental, aesthetic, tcm, physio, animal, veterinary
 - **④ スコア**：`japaneseClinic*3 + gpMatch*3 + distanceScore*2 + ratingScore`（distance: 0-500m=2, 500-1k=1, 1k-1.5k=0。rating 3.8未満は除外）
-- **⑤ 意思決定**：`hasJapanese ? main=日系・alternatives=GP2件 : main=GP1・alternatives=GP2件`
-- 出力：`candidates = [main, alt1, alt2]`（max3件）
+- **⑤ 意思決定**：**主役＝GP（必須）**。`main=GP1`、`alternatives=[日系(あれば), GP2, 日系orGP]`
+- 出力：`candidates = [GP, 日系?, GP?, 日系?]`（本文2件、モーダル最大5件）
+
+---
+
+### 🇸🇬 保険表示ロジック（確率ベース）
+
+**目的**：保険の不安を解消しつつ、誤情報を出さない。Google Placesからは保険情報を取得できないため、施設タイプから「傾向ベース」で表示する。
+
+**表示形式（施設名の横）**
+- **GP**：`保険: ◯ 使えることが多い`
+- **日系クリニック**：`保険: △ 要確認（自費になることも）`
+- **その他**：`保険: -`
+
+**判定**：`isJapaneseClinic`（nameに`japanese`含む）→ △ / `isGPClinic`（clinic, gp, family）→ ◯
+
+**例**：`① Raffles Medical（ラッフルズ・メディカル）［保険: ◯ 使えることが多い］`
 
 ---
 
@@ -1198,15 +1263,11 @@ function canRecommendSpecificPlace(snapshot: LocationSnapshot | null) {
 - `GOOGLE_PLACES_API_KEY` または `GOOGLE_MAPS_API_KEY` を指定
 - 未設定時は `[]` を返し、検索をスキップ
 
-#### 使用するAPI
-1. **Nearby Search** (`/place/nearbysearch/json`)
-   - `location`, `radius` または `rankby=distance`, `keyword`, `type`
-2. **Text Search** (`/place/textsearch/json`)
-   - `query`, `location`, `radius`, `type`（省略可）
-3. **Place Details** (`/place/details/json`)
-   - `place_id`, `fields`: rating, reviews, types, url, editorial_summary
-4. **Geocoding** (`/geocode/json`)
-   - 住所→緯度経度、逆ジオコード（緯度経度→都市名）
+#### 使用するAPI（既存実装の4種のみ使用）
+1. **Nearby Search** (`nearbysearch`)：`location`, `radius` or `rankby=distance`, `keyword`, `type`
+2. **Text Search** (`textsearch`)：`query`, `location`, `radius`, `type`（省略可）
+3. **Place Details** (`place/details`)：`place_id`, `fields`: rating, reviews, types, url, editorial_summary
+4. **Geocoding** (`geocode`)：住所↔緯度経度、逆ジオコード
 
 #### 医療機関検索フロー（`fetchCarePlacesWithFallbacks`）
 1. **Nearby Search（半径順）**
