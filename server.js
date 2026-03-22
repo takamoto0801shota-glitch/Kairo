@@ -843,6 +843,7 @@ function initConversationState(input = {}) {
     summaryShown: false,
     summaryGenerated: false,
     hasSummaryBlockGenerated: false,
+    phase: "HEARING",
     decisionType: null,
     decisionLevel: null,
     decisionRatio: null,
@@ -1593,13 +1594,16 @@ async function fetchCarePlacesForSingapore(location, state) {
   const japaneseTop = japaneseSorted.slice(0, 2);
 
   const gpResults = [];
-  for (const kw of gpKeywords) {
-    const places = await fetchPlacesByTextSearch(location, kw, { radius: 50000 });
-    gpResults.push(...places);
+  for (const radius of [1500, 5000, 10000, 20000, 50000]) {
+    for (const kw of gpKeywords) {
+      const places = await fetchPlacesByTextSearch(location, kw, { radius });
+      gpResults.push(...places);
+      if (gpResults.length >= 4) break;
+    }
     if (gpResults.length >= 2) break;
   }
   if (gpResults.length < 2) {
-    const fallback = await fetchPlacesByTextSearch(location, "general practitioner", { radius: 50000 });
+    const fallback = await fetchPlacesByTextSearch(location, "general practitioner", { radius: 1500 });
     gpResults.push(...fallback);
   }
   const gpMerged = mergePlaces(gpResults);
@@ -1630,7 +1634,7 @@ async function fetchCarePlacesWithFallbacks(location, plan, state) {
   const keywords = isJapan
     ? [...baseKeywords, "クリニック", "内科", "病院", "医療", "診療所"]
     : [...baseKeywords, "medical"];
-  const radiuses = [3000, 5000, 10000, 20000, 50000];
+  const radiuses = [1500, 3000, 5000, 10000, 20000, 50000];
   const results = [];
   for (const radius of radiuses) {
     for (const type of types) {
@@ -2775,13 +2779,9 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
   if (list.length > 0) {
     list.forEach((c, idx) => {
       const normalizedName = String(c?.name || "").trim();
-      const rating = c?.rating ?? c?.details?.rating;
-      const ratingStr = Number.isFinite(rating)
-        ? ` ★${rating.toFixed(1)}${Number.isFinite(c?.userRatingsTotal ?? c?.details?.userRatingsTotal) ? `（${(c?.userRatingsTotal ?? c?.details?.userRatingsTotal)}件）` : ""}`
-        : "";
       if (idx > 0) lines.push("");
       const numLabel = ["①", "②", "③"][idx] || `・候補${idx + 1}`;
-      lines.push(`${numLabel} ${normalizedName}${ratingStr}`);
+      lines.push(`${numLabel} ${normalizedName}`);
       lines.push("  いいところ：");
       const reasons = buildHospitalRecommendationReasons(c, plan, state, usedReasons);
       reasons.forEach((r) => lines.push(`  ${r}`));
@@ -2792,12 +2792,13 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
   return lines.join("\n");
 }
 
-/** 🏥受診先モーダル用：一文＋日系2＋GP2（SG）or 病院2（他国）、理由2つ、営業中、星評価 */
+/** 🏥受診先モーダル用：一文＋本文2件を含めて4件、理由2つ、営業中（星評価なし） */
 async function buildHospitalDetailsModalContent(state) {
   const country = String(state?.locationContext?.country || "").trim();
   const isSingapore = country === "Singapore";
   const clinicCandidates = state?.clinicCandidates || [];
   const hospitalCandidates = state?.hospitalCandidates || [];
+  const mainTextCandidates = state?.hospitalRecommendation?.candidates || [];
   const historyText = state?.historyTextForCare || "";
   const plan = buildCareSearchQueries(detectCareMainSymptomText(state, historyText), null);
 
@@ -2807,30 +2808,29 @@ async function buildHospitalDetailsModalContent(state) {
 
   const lines = [intro, ""];
 
-  let places = [];
-  if (isSingapore) {
-    const japanese = clinicCandidates.filter(isJapaneseClinicOrSupport).slice(0, 2);
-    const gp = clinicCandidates.filter((c) => !isJapaneseClinicOrSupport).slice(0, 2);
-    places = [...japanese, ...gp];
-    if (places.length < 4) {
-      const rest = clinicCandidates.filter((c) => !places.includes(c)).slice(0, 4 - places.length);
-      places = [...places, ...rest];
+  const source = hospitalCandidates.length > 0 ? hospitalCandidates : clinicCandidates;
+  const seenIds = new Set((mainTextCandidates || []).map((c) => c?.placeId).filter(Boolean));
+  let places = [...mainTextCandidates];
+  for (const c of source) {
+    if (places.length >= 4) break;
+    if (c?.placeId && !seenIds.has(c.placeId)) {
+      seenIds.add(c.placeId);
+      places.push(c);
     }
-  } else {
-    const source = hospitalCandidates.length > 0 ? hospitalCandidates : clinicCandidates;
-    places = source.slice(0, 4);
+  }
+  if (places.length < 4 && isSingapore) {
+    const rest = clinicCandidates.filter((c) => c?.placeId && !seenIds.has(c.placeId)).slice(0, 4 - places.length);
+    places = [...places, ...rest];
   }
 
   const usedReasons = new Set();
+  let japaneseCount = 0;
+  let gpCount = 0;
   for (let i = 0; i < Math.min(places.length, 4); i++) {
     const c = places[i];
     if (!c?.placeId) continue;
     const details = await fetchPlaceDetails(c.placeId, { language: "ja", includeOpeningHours: true });
     const name = details?.name || c.name || "";
-    const rating = details?.rating ?? c?.rating ?? c?.details?.rating;
-    const ratingStr = Number.isFinite(rating)
-      ? ` ★${rating.toFixed(1)}${Number.isFinite(details?.userRatingsTotal ?? c?.userRatingsTotal ?? c?.details?.userRatingsTotal) ? `（${(details?.userRatingsTotal ?? c?.userRatingsTotal ?? c?.details?.userRatingsTotal)}件）` : ""}`
-      : "";
     const openNow = details?.openNow;
     const openStr =
       openNow === true ? " 営業中" : openNow === false ? " 休業中" : "";
@@ -2840,13 +2840,16 @@ async function buildHospitalDetailsModalContent(state) {
     const reasons = buildHospitalRecommendationReasons(enriched, plan, state, usedReasons);
 
     if (i > 0) lines.push("");
+    const isJapanese = isSingapore && isJapaneseClinicOrSupport(c);
+    if (isJapanese) japaneseCount += 1;
+    else if (isSingapore) gpCount += 1;
     const sectionLabel = isSingapore
-      ? i < 2
-        ? `■日本人クリニック ${i + 1}`
-        : `■近くのGP ${i - 1}`
+      ? isJapanese
+        ? `■日本人クリニック ${japaneseCount}`
+        : `■近くのGP ${gpCount}`
       : `■候補${i + 1}`;
     lines.push(sectionLabel);
-    lines.push(`${name}${ratingStr}${distanceStr}${openStr}`);
+    lines.push(`${name}${distanceStr}${openStr}`);
     reasons.forEach((r) => lines.push(r));
   }
 
@@ -2891,39 +2894,7 @@ const RED_MODAL_CLOSING_LINE =
 function buildRedModalContent(state, historyText = "", research = null) {
   const cushion = buildRedCushionLine(historyText);
   const category = resolveQuestionCategoryFromState(state);
-  let safeWaitItems = [];
-  if (research && (Array.isArray(research?.actions) ? research.actions : []).length > 0) {
-    const context = research?.currentStateContext || buildCurrentStateContext(state, historyText || "", state?.lastConcreteDetailsText || "");
-    const searchActions = sanitizeImmediateActions(
-      pickActionsForBlock(research, 2),
-      buildSafeImmediateFallbackAction()
-    );
-    const baseActions = searchActions.length > 0 ? searchActions : ensureActionCount([], 2, context, research?.evidence || {});
-    const safeWaitActions = ensureActionCount(baseActions, 2, context, research?.evidence || {});
-    if (category === "PAIN" || category === "INFECTION") {
-      safeWaitItems = [
-        `・${RED_PAIN_INFECTION_SAFE_WAIT_FIRST.title}`,
-        `→ ${RED_PAIN_INFECTION_SAFE_WAIT_FIRST.reason}`,
-        ...safeWaitActions.slice(0, 2).flatMap((a) => [`・${toConciseActionTitle(a.title)}`, `→ ${ensureReliableReason(a.reason, research?.evidence || {})}`]),
-      ];
-    } else {
-      safeWaitItems = safeWaitActions.flatMap((a) => [
-        `・${toConciseActionTitle(a.title)}`,
-        `→ ${ensureReliableReason(a.reason, research?.evidence || {})}`,
-      ]);
-    }
-  } else {
-    const fallbackActions = buildRedImmediateActionsFallback();
-    if (category === "PAIN" || category === "INFECTION") {
-      safeWaitItems = [
-        `・${RED_PAIN_INFECTION_SAFE_WAIT_FIRST.title}`,
-        `→ ${RED_PAIN_INFECTION_SAFE_WAIT_FIRST.reason}`,
-        ...fallbackActions.slice(0, 2).flatMap((a) => [`・${a.title}`, `→ ${a.reason}`]),
-      ];
-    } else {
-      safeWaitItems = fallbackActions.slice(0, 2).flatMap((a) => [`・${a.title}`, `→ ${a.reason}`]);
-    }
-  }
+  const safeWaitItems = buildRedSafeWaitSection(state, research);
   const parts = [
     cushion,
     "",
@@ -2932,11 +2903,42 @@ function buildRedModalContent(state, historyText = "", research = null) {
     "→ 早い段階で確認することで、重大な問題でないことが分かるケースも多くあります。",
     "",
     "② 受診までの過ごし方（安全待機モード）",
-    ...safeWaitItems,
+    safeWaitItems,
     "",
     RED_MODAL_CLOSING_LINE,
   ];
   return parts.join("\n");
+}
+
+/** 受診までの過ごし方：最低2件・最大2件。各項目の間に空行を設ける。 */
+function buildRedSafeWaitSection(state, research) {
+  const formatItems = (items) =>
+    items.slice(0, 2).map((a) => `・${a.title}\n→ ${a.reason}`).join("\n\n");
+  const category = resolveQuestionCategoryFromState(state);
+  const historyText = state?.historyTextForCare || "";
+  if (research && (Array.isArray(research?.actions) ? research.actions : []).length > 0) {
+    const context = research?.currentStateContext || buildCurrentStateContext(state, historyText, state?.lastConcreteDetailsText || "");
+    const searchActions = sanitizeImmediateActions(
+      pickActionsForBlock(research, 2),
+      buildSafeImmediateFallbackAction()
+    );
+    const baseActions = searchActions.length > 0 ? searchActions : ensureActionCount([], 2, context, research?.evidence || {});
+    const safeWaitActions = ensureActionCount(baseActions, 2, context, research?.evidence || {});
+    if (category === "PAIN" || category === "INFECTION") {
+      const second = safeWaitActions[0]
+        ? { title: toConciseActionTitle(safeWaitActions[0].title), reason: ensureReliableReason(safeWaitActions[0].reason, research?.evidence || {}) }
+        : buildRedImmediateActionsFallback()[0];
+      return formatItems([RED_PAIN_INFECTION_SAFE_WAIT_FIRST, second]);
+    }
+    return formatItems(
+      safeWaitActions.map((a) => ({ title: toConciseActionTitle(a.title), reason: ensureReliableReason(a.reason, research?.evidence || {}) }))
+    );
+  }
+  const fallbackActions = buildRedImmediateActionsFallback();
+  if (category === "PAIN" || category === "INFECTION") {
+    return formatItems([RED_PAIN_INFECTION_SAFE_WAIT_FIRST, fallbackActions[0]]);
+  }
+  return formatItems(fallbackActions);
 }
 
 function buildRedImmediateActionsBlock(state, historyText, research = null) {
@@ -2945,47 +2947,14 @@ function buildRedImmediateActionsBlock(state, historyText, research = null) {
     "・本日中に医療機関へ連絡する",
     "→ 早い段階で確認することで、重大な問題でないことが分かるケースも多くあります。",
   ];
-  const category = resolveQuestionCategoryFromState(state);
-  let extra = [];
-  if (research && (Array.isArray(research?.actions) ? research.actions : []).length > 0) {
-    const context = research?.currentStateContext || buildCurrentStateContext(state, historyText || "", state?.lastConcreteDetailsText || "");
-    const searchActions = sanitizeImmediateActions(
-      pickActionsForBlock(research, 2),
-      buildSafeImmediateFallbackAction()
-    );
-    const baseActions = searchActions.length > 0 ? searchActions : ensureActionCount([], 2, context, research?.evidence || {});
-    const safeWaitActions = ensureActionCount(baseActions, 2, context, research?.evidence || {});
-    if (category === "PAIN" || category === "INFECTION") {
-      extra = [
-        `・${RED_PAIN_INFECTION_SAFE_WAIT_FIRST.title}`,
-        `→ ${RED_PAIN_INFECTION_SAFE_WAIT_FIRST.reason}`,
-        ...safeWaitActions.slice(0, 2).flatMap((a) => [`・${toConciseActionTitle(a.title)}`, `→ ${ensureReliableReason(a.reason, research?.evidence || {})}`]),
-      ];
-    } else {
-      extra = safeWaitActions.flatMap((a) => [
-        `・${toConciseActionTitle(a.title)}`,
-        `→ ${ensureReliableReason(a.reason, research?.evidence || {})}`,
-      ]);
-    }
-  } else {
-    const fallbackActions = buildRedImmediateActionsFallback();
-    if (category === "PAIN" || category === "INFECTION") {
-      extra = [
-        `・${RED_PAIN_INFECTION_SAFE_WAIT_FIRST.title}`,
-        `→ ${RED_PAIN_INFECTION_SAFE_WAIT_FIRST.reason}`,
-        ...fallbackActions.slice(0, 2).flatMap((a) => [`・${a.title}`, `→ ${a.reason}`]),
-      ];
-    } else {
-      extra = fallbackActions.slice(0, 2).flatMap((a) => [`・${a.title}`, `→ ${a.reason}`]);
-    }
-  }
+  const safeWaitSection = buildRedSafeWaitSection(state, research);
   return [
     "✅ 今すぐやること",
     cushion,
     "",
     ...fixedFirst,
     "",
-    ...extra,
+    safeWaitSection,
   ].join("\n");
 }
 
@@ -3592,7 +3561,7 @@ function buildDoActionsFromPlan(plan, state, level, options = {}) {
     reason: ensureReliableReason(a.reason, evidence),
   }));
 
-  const minCount = forSummary ? 2 : 3;
+  const minCount = forSummary ? 2 : 4;
   const maxCount = forSummary ? 3 : 4;
   const skipSupplements = Boolean(actionsOverride && actionsOverride.length > 0);
   let ensured = ensureMinimumDoActions(
@@ -3613,10 +3582,10 @@ function buildDoActionsFromPlan(plan, state, level, options = {}) {
       ensured = [...ensured, getOtcActionForYellowModal(topic)].slice(0, maxCount);
     }
   }
-  if (!forSummary && ensured.length < 3 && !skipSupplements) {
+  if (!forSummary && ensured.length < 4 && !skipSupplements) {
     const extra = ensureMinimumDoActions(
       ensured.map((x) => ({ title: x.action, reason: x.reason, isOtc: false })),
-      3,
+      4,
       ctx,
       evidence
     )
@@ -3985,14 +3954,10 @@ function buildDontActionsFromContext(context = {}, evidence = {}) {
 
 /** PAIN/INFECTION+🟡のとき、モーダル末尾に追加。MC問題を解決する「現実の行動（会社対応）」サポート。フォールバック用。 */
 const SINGAPORE_REST_SECTION_FALLBACK = [
-  "■シンガポールでの休み方",
-  "シンガポールでは、軽い体調不良で1日休む場合でも、",
-  "会社に提出するMC（診断書）が必要になることがよくあります。",
-  "MCがない場合、有給休暇として扱われなかったり、",
-  "別の休暇が使われることもあります。",
-  "この状態であれば、",
-  "オンライン診療で数分でMCを取得できることが多く、",
-  "外出せずに対応することも可能です。",
+  "■シンガポールの休み方",
+  "シンガポールでは、一日休むだけでもMC（診断書）が必要になります。",
+  "ない場合は有給扱いにならないこともあります。",
+  "必要であれば、外出せずにオンライン診療で数分で取得できます。",
 ];
 
 function shouldAppendSingaporeRestSection(state) {
@@ -4001,22 +3966,20 @@ function shouldAppendSingaporeRestSection(state) {
   return category === "PAIN" || category === "INFECTION";
 }
 
-/** ■シンガポールでの休み方セクションを型に沿って生成。必ず①〜④の順で含める。 */
+/** ■シンガポールの休み方セクションを型に沿って生成。3〜4行程度。 */
 async function generateSingaporeRestSection() {
   const systemPrompt = `あなたはシンガポール在住者向けの体調サポート文を生成するアシスタントです。
-以下の型に厳密に沿って、■シンガポールでの休み方セクションの本文を生成してください。
+以下の型に厳密に沿って、■シンガポールの休み方セクションの本文を生成してください。
 
 【必須構成（順番固定）】
-① 軽い症状でもMCが必要な文化（1〜2文）
-② MCがない場合のリスク（有給消費など）（1〜2文）
-③ 簡単な解決手段（オンライン診療）（1文）
-④ 手軽さ（数分・外出不要）（1文）
+① 一日休むだけでもMCが必要（1文）
+② MCがない場合のリスク（有給扱いにならない等）（1文）
+③ オンライン診療で外出せず数分で取得可能（1文）
 
 【ルール】
 - 医療説明は禁止。不安を煽らない。
-- 事実ベース。断定しすぎない（「〜することがよくあります」等）。
-- 4〜6行以内。長すぎる説明禁止。
-- 見出し「■シンガポールでの休み方」は含めない（呼び出し側で付与）。
+- 事実ベース。3〜4行程度。長すぎる説明禁止。
+- 見出しは含めない（呼び出し側で付与）。
 - 出力は本文のみ。改行は\\nで。`;
 
   for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
@@ -4028,7 +3991,7 @@ async function generateSingaporeRestSection() {
           {
             role: "user",
             content:
-              "上記の型に沿って、■シンガポールでの休み方の本文を生成してください。見出しは含めず、本文のみ出力。",
+              "上記の型に沿って、■シンガポールの休み方の本文を生成してください。見出しは含めず、本文のみ出力。",
           },
         ],
         temperature: 0.3,
@@ -4037,8 +4000,8 @@ async function generateSingaporeRestSection() {
       const raw = (completion?.choices?.[0]?.message?.content || "").trim();
       if (!raw) continue;
       const lines = raw.split("\n").map((l) => l.trim()).filter(Boolean);
-      if (lines.length < 3) continue;
-      return ["■シンガポールでの休み方", ...lines];
+      if (lines.length < 2) continue;
+      return ["■シンガポールの休み方", ...lines];
     } catch (e) {
       if (attempt >= LLM_RETRY_COUNT - 1) break;
     }
@@ -4333,6 +4296,24 @@ function isDetailChoice(text) {
   );
 }
 
+/** B_MC「見てみますか？」への肯定（見る/教えて/はい等） */
+function isMcAffirmative(text) {
+  const t = (text || "").trim().replace(/\s+/g, " ");
+  if (!t) return false;
+  return (
+    /^(はい|うん|ええ|見る|見てみる|教えて|紹介|お願い)/.test(t) ||
+    /(見てみます|教えてください|紹介して|見たい|知りたい)/.test(t) ||
+    isAffirmative(text)
+  );
+}
+
+/** B_MC「見てみますか？」への否定 */
+function isMcDecline(text) {
+  const t = (text || "").trim().replace(/\s+/g, " ");
+  if (!t) return false;
+  return isDecline(text) || /^(今はいい|大丈夫|結構|不要)/.test(t);
+}
+
 function buildClosingMessage() {
   return [
     "わかりました。",
@@ -4562,9 +4543,58 @@ const WATCHFUL_FOLLOW_UP_QUESTION =
 const RED_FOLLOW_UP_QUESTION =
   "今の症状から見ると、念のため病院で確認してもらうと安心そうです。\n診察までの間にできることを整理しますか？\nそれとも英語でどう伝えるか一緒に考えますか？";
 
+/** 🟡 B_MC（PAIN系・INFECTION系で🟡のときのみ）フォロー質問（固定） */
+const B_MC_FOLLOW_UP_QUESTION =
+  "休むためにMC（診断書）が必要な場合、オンライン診療という方法もあります。もしよければ、おすすめの診療先を紹介できますが、見てみますか？";
+
+/** B_MC 肯定時の完全固定ブロック（LLM生成禁止） */
+const B_MC_ONLINE_CLINICS_BLOCK = [
+  "シンガポールでは、会社や学校に所属している場合、",
+  "保険が適用されて診療費が割安、または無料になるケースもあります。",
+  "",
+  "軽い体調不良でもMC（診断書）が必要になることが多く、",
+  "オンライン診療での取得が一般的です。",
+  "",
+  "■おすすめのオンライン診療",
+  "",
+  "【日系（日本語対応）】",
+  "",
+  "Cotovia Clinic（ことびあクリニック）",
+  "• 日本語で診察が受けられる",
+  "• 薬の配送にも対応",
+  "保険：一部保険対応あり（要確認） △",
+  "",
+  "Healthway Japanese Medical",
+  "• 日本人医師または日本語スタッフ対応",
+  "• WhatsAppで簡単に予約できる",
+  "保険：企業保険対応あり（要確認） △",
+  "",
+  "【ローカル】",
+  "",
+  "Doctor Anywhere",
+  "• 24時間対応で数分で診察可能",
+  "• アプリで完結し、MCが即発行される",
+  "保険：多くの企業保険に対応 ◯",
+  "",
+  "WhiteCoat",
+  "• 政府認可の信頼性の高いサービス",
+  "• 保険連携が多くスムーズに利用できる",
+  "保険：多くの企業保険に対応 ◯",
+].join("\n");
+
+/** B_MC 否定時の固定メッセージ */
+const B_MC_DECLINE_MESSAGE = "無理に使う必要はありません。\nまた必要になったら、いつでも確認してください。";
+
+function shouldShowBMcFollowUp(state) {
+  if (state?.decisionLevel !== "🟡") return false;
+  const category = state?.triageCategory || resolveQuestionCategoryFromState(state);
+  return category === "PAIN" || category === "INFECTION";
+}
+
 /** まとめ後の初期フォロー質問（generateFollowResponseがnullの時のフォールバック） */
 function getInitialFollowUpQuestionBySpec(state) {
   if (!state) return null;
+  if (shouldShowBMcFollowUp(state)) return B_MC_FOLLOW_UP_QUESTION;
   const jt = state.decisionType || (state.decisionLevel === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING");
   return jt === "A_HOSPITAL" ? RED_FOLLOW_UP_QUESTION : WATCHFUL_FOLLOW_UP_QUESTION;
 }
@@ -4680,8 +4710,9 @@ function buildFollowUpJudgeMeta(state) {
 }
 
 /**
- * フォロー質問フェーズ専用ハンドラ。まとめ生成・triage・resetSummary は絶対に呼ばない。
- * summaryGenerated/summaryShown のときのみここに入る。
+ * 🛑 フォロー専用ハンドラ（完全隔離）。
+ * generateSummary / runTriage / runHearing は絶対に呼ばない。
+ * phase=FOLLOW_UP または summaryGenerated のときのみここに入る。
  */
 function handleFollowUpPhase(res, conversationId, message, state, locationPromptMessage, locationRePromptMessage) {
   conversationHistory[conversationId].push({ role: "user", content: message });
@@ -4755,6 +4786,18 @@ function generateFollowResponse(state, userInput, options = {}) {
   const snapshot = state.judgmentSnapshot || {};
 
   if (jt === "C_WATCHFUL_WAITING") {
+    // 🟡 B_MC（PAIN系・INFECTION系で🟡のときのみ）: 強制表示。標準の休む/詳しく確認フローより優先。
+    if (shouldShowBMcFollowUp(state) && !state.bMcBlockShown) {
+      if (isMcAffirmative(trimmed)) {
+        state.bMcBlockShown = true;
+        state.followUpPhase = "closed";
+        return { message: B_MC_ONLINE_CLINICS_BLOCK };
+      }
+      // 否定・無反応・その他 → 固定クロージング
+      state.followUpPhase = "closed";
+      return { message: B_MC_DECLINE_MESSAGE };
+    }
+
     if (state.followUpStep <= 1) {
       if (isRestChoice(trimmed)) {
         state.followUpPhase = "closed";
@@ -8562,6 +8605,7 @@ async function generateImmediateActionsFromContextOnly(state, context, useSimple
   return [];
 }
 
+/** 今すぐやることモーダル用。コンテキストのみで生成（Google APIは使用しない）。 */
 async function buildImmediateActionHypothesisPlan(state, historyText = "", summarySection = "") {
   const summaryFacts = buildStateFactsBullets(state);
   const concrete = buildConcreteStatePatternMessage(state, summaryFacts, summarySection);
@@ -8571,147 +8615,13 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
     [concrete.message, state?.lastConcreteDetailsText || ""].filter(Boolean).join("\n")
   );
   const searchQuery = buildMandatoryGoogleQuery(currentStateContext);
-  const queryLevels = buildImmediateActionSearchQueries(currentStateContext);
 
   try {
-    if (!isGoogleCustomSearchConfigured()) {
-      const contextOnlyActions = await generateImmediateActionsFromContextOnly(state, currentStateContext);
-      return await buildImmediateActionFallbackPlanFromState(state, {
-        actions: contextOnlyActions && contextOnlyActions.length > 0 ? contextOnlyActions : undefined,
-        currentStateContext,
-        searchQuery,
-        concreteMessage: concrete.message,
-      });
-    }
-    const allQueries = [
-      ...queryLevels.ja.map((q) => ({ q, lang: "ja" })),
-      ...queryLevels.en.map((q) => ({ q, lang: "en" })),
-    ].filter((x) => x.q && String(x.q).trim().length > 0);
-    const searchPromises = allQueries.map(({ q, lang }) =>
-      fetchGoogleCustomSearchResults(q, lang)
-    );
-    const searchResults = await Promise.allSettled(searchPromises);
-    const allItems = searchResults.flatMap((r) =>
-      r.status === "fulfilled" && Array.isArray(r.value) ? r.value : []
-    );
-    let ranked = dedupeAndRankActionSearchResults(
-      allItems,
-      currentStateContext.features || {}
-    );
-    if (!ranked || ranked.length === 0) {
-      const mainSymptom = String(currentStateContext?.mainSymptom || currentStateContext?.location || "症状").trim();
-      const fallbackQueries = [
-        { q: `${mainSymptom} 対処法 セルフケア`, lang: "ja" },
-        { q: `${mainSymptom} 自宅 ケア`, lang: "ja" },
-        { q: `${MAIN_SYMPTOM_TO_EN[mainSymptom] || "symptom"} self care home`, lang: "en" },
-      ];
-      const fallbackPromises = fallbackQueries.map(({ q, lang }) =>
-        fetchGoogleCustomSearchResults(q, lang, 1)
-      );
-      const fallbackResults = await Promise.allSettled(fallbackPromises);
-      const fallbackItems = fallbackResults.flatMap((r) =>
-        r.status === "fulfilled" && Array.isArray(r.value) ? r.value : []
-      );
-      ranked = dedupeAndRankActionSearchResults(
-        fallbackItems,
-        currentStateContext.features || {}
-      );
-    }
-    if (!ranked || ranked.length === 0) {
-      const contextOnlyActions = await generateImmediateActionsFromContextOnly(state, currentStateContext);
-      return await buildImmediateActionFallbackPlanFromState(state, {
-        actions: contextOnlyActions && contextOnlyActions.length > 0 ? contextOnlyActions : undefined,
-        currentStateContext,
-        searchQuery,
-        concreteMessage: concrete.message,
-      });
-    }
-
-    const evidence = extractTopSearchEvidence(ranked);
-    const sourceNames = Array.from(
-      new Set(ranked.filter((r) => r.trusted).map((r) => r.host).filter(Boolean))
-    ).slice(0, 3);
-
-    let parsed = null;
-    try {
-      const stateAboutFacts = buildStateFactsBullets(state).map((line) => toBulletText(line)).join(" / ") || currentStateContext?.stateAboutQuery || "";
-      const llmPrompt = [
-        "You convert medical search evidence into immediate actions.",
-        "Use ONLY provided currentStateContext and extractedSearchEvidence.",
-        "Do not invent sources. Do not diagnose.",
-        "CRITICAL: Do NOT lump main symptom and user answers into 'associated symptoms'. Treat main symptom as main symptom, and reflect each slot's content distinctly in action/reason.",
-        "Each action must reference or address the user's specific symptoms (e.g., pain level, duration, triggers, associated symptoms).",
-        "Avoid generic advice. No vague expressions (e.g. '安静に' alone is forbidden). Use concrete actions with 'what and how much' plus light reason.",
-        "Reason line: do NOT use ・. No numbering (1) 1️⃣). No medical procedure instructions, dangerous acts, or professional procedures.",
-        "Return strict JSON: {\"topic\":\"...\",\"actions\":[{\"title\":\"...\",\"reason\":\"...\",\"isOtc\":false}]}",
-        "actions max 3, OTC max 1.",
-        "Keep Japanese output. Use recommending tone: 〜してください or 〜するといいです. Avoid 〜します.",
-      ].join("\n");
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: llmPrompt },
-          {
-            role: "user",
-            content: JSON.stringify({
-              currentStateContext,
-              stateAboutForActions: stateAboutFacts,
-              extractedSearchEvidence: {
-                selfCare: evidence.selfCare,
-                observe: evidence.observe,
-                danger: evidence.danger,
-              },
-            }),
-          },
-        ],
-        temperature: 0.2,
-        max_tokens: 500,
-      });
-      parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
-    } catch (_) {
-      parsed = null;
-    }
-
-    const candidateActions = Array.isArray(parsed?.actions)
-      ? parsed.actions
-      : buildSearchBackedHeuristicActions(currentStateContext, evidence);
-    const adviceTopic = normalizeAdviceTopic(parsed?.topic || currentStateContext.location || "");
-    const contextTopic = normalizeContextLocation(currentStateContext.location || "");
-    const topicMismatch = adviceTopic && contextTopic && adviceTopic !== contextTopic;
-
-    let otcUsed = false;
-    let finalActions = sanitizeImmediateActions(candidateActions, buildSafeImmediateFallbackAction())
-      .filter((a) => a && a.title && a.reason)
-      .filter((a) => {
-        const otc = Boolean(a.isOtc);
-        if (otc && otcUsed) return false;
-        if (otc) otcUsed = true;
-        return true;
-      })
-      .map((a) => ({
-        ...a,
-        title: toConciseActionTitle(a.title),
-        reason: ensureReliableReason(a.reason, evidence),
-      }))
-      .slice(0, 3);
-
-    if (topicMismatch || finalActions.length === 0) {
-      finalActions = sanitizeImmediateActions(
-        buildSearchBackedHeuristicActions(currentStateContext, evidence),
-        buildSafeImmediateFallbackAction()
-      ).map((a) => ({
-        ...a,
-        title: toConciseActionTitle(a.title),
-        reason: ensureReliableReason(a.reason, evidence),
-      }));
-    }
-
+    const contextOnlyActions = await generateImmediateActionsFromContextOnly(state, currentStateContext);
     return await buildImmediateActionFallbackPlanFromState(state, {
-      actions: finalActions.slice(0, 3),
+      actions: contextOnlyActions && contextOnlyActions.length > 0 ? contextOnlyActions : undefined,
       currentStateContext,
       searchQuery,
-      sourceNames,
-      evidence,
       concreteMessage: concrete.message,
     });
   } catch (error) {
@@ -9336,6 +9246,10 @@ async function generateSummaryForConfirmation(conversationId) {
   const state = conversationState[conversationId];
   const history = conversationHistory[conversationId];
   if (!state || !history) return { message: "", followUpQuestion: null, followUpMessage: null };
+  if (state.summaryGenerated === true || state.phase === "FOLLOW_UP") {
+    console.error("🚨 BLOCKED: summary already generated or phase=FOLLOW_UP");
+    return { message: "", followUpQuestion: null, followUpMessage: null };
+  }
   const level = finalizeRiskLevel(state);
   try {
   const historyTextForCare = history.filter((m) => m.role === "user").map((m) => m.content).join("\n");
@@ -9486,6 +9400,7 @@ async function generateSummaryForConfirmation(conversationId) {
   state.summaryShown = true;
   state.summaryGenerated = true;
   state.hasSummaryBlockGenerated = true;
+  state.phase = "FOLLOW_UP";
   state.decisionType = decisionType;
   state.decisionLevel = level === "🔴" ? "🔴" : level === "🟡" ? "🟡" : "🟢";
   if (!state.judgmentSnapshot) {
@@ -9505,7 +9420,7 @@ async function generateSummaryForConfirmation(conversationId) {
   } else {
     state.followUpPhase = "questioning";
     state.followUpStep = 1;
-    followUpQuestion = WATCHFUL_FOLLOW_UP_QUESTION;
+    followUpQuestion = getInitialFollowUpQuestionBySpec(state);
   }
   if (!aiResponse || !hasAllSummaryBlocks(aiResponse)) {
     aiResponse = await buildLocalSummaryFallback(level, history, state);
@@ -9683,17 +9598,20 @@ app.post("/api/chat", async (req, res) => {
       (conversationState[conversationId].confirmationShown && !conversationState[conversationId].summaryShown) ||
       (filledBeforeTurn >= getRequiredSlotCount(state) && !conversationState[conversationId].summaryShown && lastMsgLooksLikeConfirmation);
 
-    console.log("[FOLLOW_GUARD]", {
+    const isFollowUpPhase = state.phase === "FOLLOW_UP";
+    const forceFollowMode = isFollowUpPhase || (summaryGenerated && !isFirstUserMessage);
+    console.log("[PHASE_GUARD]", {
+      PHASE: state.phase,
       summaryGenerated: state.summaryGenerated,
       summaryShown: state.summaryShown,
-      hasSummaryBlockGenerated: state.hasSummaryBlockGenerated,
+      isFollowUpPhase,
+      forceFollowMode,
       conversationStep: userMessageCountBefore,
-      phase: summaryGenerated && !isFirstUserMessage ? "FOLLOW" : (isWaitingForConfirmationResponse ? "SUMMARY" : "QUESTIONS"),
     });
 
-    // 🔥 最終ガード（最優先）: まとめ済みなら絶対にフォローのみ。まとめ再生成は完全禁止。
-    if (summaryGenerated && !isFirstUserMessage) {
-      console.log("⚠️ FOLLOW PHASE - summary blocked");
+    // 🔥 最上位ガード（絶対）: phase=FOLLOW_UP または まとめ済みならフォローのみ。まとめ再生成は物理的に禁止。
+    if (forceFollowMode && !isFirstUserMessage) {
+      console.log("🛑 FORCE FOLLOW MODE - summary generation blocked");
       return handleFollowUpPhase(res, conversationId, message, state, locationPromptMessage, locationRePromptMessage);
     }
 
@@ -9847,6 +9765,7 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].summaryShown = true;
       conversationState[conversationId].summaryGenerated = true;
       conversationState[conversationId].hasSummaryBlockGenerated = true;
+      conversationState[conversationId].phase = "FOLLOW_UP";
       conversationHistory[conversationId].push({ role: "assistant", content: summaryMsg });
       const sections = extractSectionsBySpecs(summaryMsg, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text);
       const slotsFilledCount = countFilledSlots(state.slotFilled, state);
@@ -9872,7 +9791,7 @@ app.post("/api/chat", async (req, res) => {
         sections,
         questionPayload: null,
         normalizedAnswer: state.lastNormalizedAnswer || null,
-        followUpQuestion: shouldSendFollowUpQuestion(sections) ? (followUpQ || (finalRisk === "🔴" ? RED_FOLLOW_UP_QUESTION : WATCHFUL_FOLLOW_UP_QUESTION)) : null,
+        followUpQuestion: shouldSendFollowUpQuestion(sections) ? (followUpQ || getInitialFollowUpQuestionBySpec(state)) : null,
         followUpMessage: null,
         locationPromptMessage,
         locationRePromptMessage: null,
@@ -9893,6 +9812,7 @@ app.post("/api/chat", async (req, res) => {
         conversationState[conversationId].summaryShown = true;
         conversationState[conversationId].summaryGenerated = true;
         conversationState[conversationId].hasSummaryBlockGenerated = true;
+        conversationState[conversationId].phase = "FOLLOW_UP";
         const finalRisk = conversationState[conversationId].decisionLevel || level;
         const sections = extractSectionsBySpecs(fallbackSummary, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text);
         return res.json({
@@ -9904,7 +9824,7 @@ app.post("/api/chat", async (req, res) => {
           sections,
           questionPayload: null,
           normalizedAnswer: state.lastNormalizedAnswer || null,
-          followUpQuestion: shouldSendFollowUpQuestion(sections) ? (finalRisk === "🔴" ? RED_FOLLOW_UP_QUESTION : WATCHFUL_FOLLOW_UP_QUESTION) : null,
+          followUpQuestion: shouldSendFollowUpQuestion(sections) ? getInitialFollowUpQuestionBySpec(state) : null,
           followUpMessage: null,
           locationPromptMessage,
           locationRePromptMessage: null,
@@ -10706,6 +10626,7 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].summaryShown = true;
       conversationState[conversationId].summaryGenerated = true;
       conversationState[conversationId].hasSummaryBlockGenerated = true;
+      conversationState[conversationId].phase = "FOLLOW_UP";
       conversationState[conversationId].decisionType = decisionType;
       conversationState[conversationId].decisionLevel =
         level === "🔴" ? "🔴" : level === "🟡" ? "🟡" : "🟢";
@@ -10733,7 +10654,7 @@ app.post("/api/chat", async (req, res) => {
       } else {
         conversationState[conversationId].followUpPhase = "questioning";
         conversationState[conversationId].followUpStep = 1;
-        followUpQuestion = WATCHFUL_FOLLOW_UP_QUESTION;
+        followUpQuestion = getInitialFollowUpQuestionBySpec(conversationState[conversationId]);
       }
     }
 
@@ -11029,17 +10950,16 @@ app.post("/api/chat", async (req, res) => {
         fallbackSummary,
         getSummarySectionSpecsByJudgement(level)
       ).map((entry) => entry.text);
-      const fallbackFq =
-        level === "🔴"
-          ? RED_FOLLOW_UP_QUESTION
-          : WATCHFUL_FOLLOW_UP_QUESTION;
       if (state) {
+        state.decisionLevel = level;
         state.summaryShown = true;
         state.summaryGenerated = true;
         state.hasSummaryBlockGenerated = true;
+        state.phase = "FOLLOW_UP";
         state.summaryText = fallbackSummary;
         if (history.length > 0) history.push({ role: "assistant", content: fallbackSummary });
       }
+      const fallbackFq = getInitialFollowUpQuestionBySpec(state || { decisionLevel: level });
       return res.status(200).json({
         conversationId: cid,
         message: fallbackSummary,
