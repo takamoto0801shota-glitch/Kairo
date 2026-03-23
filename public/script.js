@@ -849,13 +849,13 @@ function createSummaryBlock(text) {
     // 🟡は🟢と同じ構成
     const stateMatch = text.match(/🤝[^⸻]*?今の状態について[^⸻]*?\*\*([^*]+)\*\*/s);
     if (stateMatch) {
-      summaryContent = stateMatch[1].trim() + '\n\n✅ 今やること\n\n今は一度休むだけで大丈夫そうです。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
+      summaryContent = stateMatch[1].trim() + '\n\n✅ 今やること\n\n今は一度休むだけで大丈夫です。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
     } else {
       const judgmentMatch = text.match(/\*\*([^*]+)\*\*/);
       if (judgmentMatch) {
-        summaryContent = judgmentMatch[1].trim() + '\n\n✅ 今やること\n\n今は一度休むだけで大丈夫そうです。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
+        summaryContent = judgmentMatch[1].trim() + '\n\n✅ 今やること\n\n今は一度休むだけで大丈夫です。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
       } else {
-        summaryContent = '✅ 今やること\n\n今は一度休むだけで大丈夫そうです。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
+        summaryContent = '✅ 今やること\n\n今は一度休むだけで大丈夫です。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
       }
     }
   } else {
@@ -865,14 +865,14 @@ function createSummaryBlock(text) {
     // 判断を抽出（🤝 セクションから）
     const stateMatch = text.match(/🤝[^⸻]*?今の状態について[^⸻]*?\*\*([^*]+)\*\*/s);
     if (stateMatch) {
-      summaryContent = stateMatch[1].trim() + '\n\n✅ 今やること\n\n今は一度休むだけで大丈夫そうです。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
+      summaryContent = stateMatch[1].trim() + '\n\n✅ 今やること\n\n今は一度休むだけで大丈夫です。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
     } else {
       // 別のパターンで判断を抽出
       const judgmentMatch = text.match(/\*\*([^*]+)\*\*/);
       if (judgmentMatch) {
-        summaryContent = judgmentMatch[1].trim() + '\n\n✅ 今やること\n\n今は一度休むだけで大丈夫そうです。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
+        summaryContent = judgmentMatch[1].trim() + '\n\n✅ 今やること\n\n今は一度休むだけで大丈夫です。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
       } else {
-        summaryContent = '✅ 今やること\n\n今は一度休むだけで大丈夫そうです。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
+        summaryContent = '✅ 今やること\n\n今は一度休むだけで大丈夫です。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
       }
     }
   }

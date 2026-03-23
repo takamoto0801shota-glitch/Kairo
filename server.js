@@ -3671,7 +3671,7 @@ function buildWhySection(context = {}) {
 /** ③ 予想経過（安心設計） */
 function buildExpectedCourse(context = {}) {
   const templates = [
-    "多くの場合、数時間〜1日程度で徐々に落ち着いていくことが多いです。",
+    "多くの場合、数時間〜1日程度で徐々に落ち着いていきます。",
     "多くのケースでは、数時間〜半日程度で変化の方向が見えやすくなることが多いです。",
     "一般的には、数時間〜1日程度で症状の波が落ち着いていくことが多いとされています。",
   ];
@@ -6506,8 +6506,158 @@ function sanitizeBulletPoints(bullets) {
     .filter(Boolean);
 }
 
-/** 情報整理ブロック：転記ではなく解釈で生成。医療的に意味のある形に変換する。forSummary: true のときは箇条書きのみ（確認文用の前後文を出さない） */
+/** 2段階生成 STEP1：ユーザー入力を意味JSON用に収集。カテゴリに応じた生データを渡す。 */
+function collectRawInputsForMeaningJson(state) {
+  const answers = state?.slotAnswers || {};
+  const val = (k, f = "") => getSlotStatusValue(state, k, f);
+  const lines = [];
+  const push = (label, v) => {
+    if (v && String(v).trim()) lines.push(`${label}: ${String(v).trim()}`);
+  };
+  const category = state?.triageCategory || resolveQuestionCategoryFromState(state) || "PAIN";
+  if (category === "PAIN") {
+    const painScore = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
+    if (painScore !== null) push("痛みの強さ", `${painScore}/10`);
+    else push("痛みの強さ", val("severity", answers.pain_score));
+  }
+  push("症状の様子・質", val("worsening", answers.worsening));
+  push("経過時間", val("duration", answers.duration));
+  if (isDurationNotJustNow(state)) push("悪化傾向", val("worsening_trend", answers.worsening_trend));
+  push("影響・見た目・体温など", val("impact", answers.daily_impact));
+  if (!state?.associatedSymptomsFromFirstMessage) push("付随症状・きっかけなど", val("associated", answers.associated_symptoms));
+  push("きっかけ・原因", state?.causeDetailText || val("cause_category", answers.cause_category));
+  (state?.confirmationExtraFacts || []).filter(Boolean).forEach((f) => {
+    if (!isConfirmationOnlyAnswer(f) && !isRejectionOnlyAnswer(f)) lines.push(`追加情報: ${String(f).trim()}`);
+  });
+  return { category, raw: lines.join("\n") || "ユーザーの回答がまだありません" };
+}
+
+/** 2段階生成 STEP2：カテゴリ別意味JSONから箇条書きを生成。統合優先・最大8行。 */
+function formatBulletsFromMeaningJson(meaning, category = "PAIN") {
+  if (!meaning || typeof meaning !== "object") return [];
+  const bullets = [];
+  let main = meaning.main_symptom;
+  if (!main && meaning.pain?.combined) {
+    const c = String(meaning.pain.combined).trim();
+    main = /痛み$/.test(c) ? c : /^(軽い|中程度|やや強い|強い)$/.test(c) ? c + "痛み" : c + "する痛み";
+  } else if (!main && meaning.pain?.type) {
+    main = String(meaning.pain.type).trim() + "する痛み";
+  }
+  if (main) {
+    const m = String(main).trim();
+    bullets.push(`・${m}${/出ている|伴っている|見られている/.test(m) ? "" : "が出ている"}`);
+  }
+  const onset = meaning.onset;
+  if (onset && onset !== "不明") {
+    if (/急に/.test(onset)) bullets.push("・症状は急に始まっている");
+    else if (/数時間/.test(onset)) bullets.push("・症状は数時間前から続いている");
+    else if (/徐々に/.test(onset)) bullets.push("・症状は徐々に出てきている");
+    else if (/継続|ずっと/.test(onset)) bullets.push("・症状は続いている");
+    else bullets.push(`・症状は${onset}から続いている`);
+  }
+  const trend = meaning.trend;
+  if (trend && trend !== "不明") {
+    if (/改善|回復/.test(trend)) bullets.push("・症状は回復方向に向かっている");
+    else if (/変化なし|変わらない/.test(trend)) bullets.push("・症状は大きく変化していない");
+    else if (/悪化/.test(trend)) bullets.push("・発症時より症状が強くなっている");
+  }
+  if (category === "INFECTION" && meaning.temperature) {
+    const t = String(meaning.temperature).trim();
+    if (t && t !== "不明") bullets.push(`・体温は${t}`);
+  }
+  if (category === "SKIN" && meaning.appearance) {
+    const a = String(meaning.appearance).trim();
+    if (a) bullets.push(`・${a}`);
+  }
+  if (category === "GI" && meaning.digestive_state) {
+    const d = String(meaning.digestive_state).trim();
+    if (d && d !== "不明") bullets.push(`・${d}`);
+  }
+  if (category === "INFECTION" && meaning.infection_context) {
+    const ic = String(meaning.infection_context).trim();
+    if (ic) bullets.push(`・${ic}`);
+  }
+  const others = meaning.otherSymptoms;
+  if (Array.isArray(others) && others.length > 0) {
+    others.slice(0, 2).forEach((s) => bullets.push(`・${String(s).trim()}を伴っている`));
+  } else if (meaning.noOtherSymptoms === true) {
+    bullets.push("・他の症状は今のところ見られていない");
+  }
+  if (meaning.context) {
+    const ctx = String(meaning.context).trim();
+    if (ctx) bullets.push(`・${ctx}`);
+  }
+  const cause = meaning.cause;
+  if (cause) bullets.push(`・${String(cause).trim()}${/可能性$/.test(String(cause)) ? "" : "の可能性"}`);
+  return bullets.slice(0, 8).filter(Boolean);
+}
+
+const MEANING_JSON_PROMPT_BY_CATEGORY = {
+  PAIN: `【PAIN】痛み系。以下の形式で必ずJSON出力：
+{"main_symptom":"痛みの統合表現（例：やや強いズキズキする頭痛）","onset":"急に|数時間前から|継続的|不明","trend":"改善|変化なし|悪化|不明","otherSymptoms":[],"noOtherSymptoms":true|false,"cause":"自由記述から解釈した原因","context":""}`,
+  SKIN: `【SKIN】皮膚系。以下の形式で必ずJSON出力：
+{"main_symptom":"皮膚の状態（例：赤みと乾燥が出ている）","appearance":"見た目の特徴","onset":"急に|徐々に|不明","otherSymptoms":[],"cause":"自由記述から解釈した原因","context":""}`,
+  INFECTION: `【INFECTION】発熱・喉系。以下の形式で必ずJSON出力：
+{"main_symptom":"発熱・喉・だるさなどの統合","temperature":"平熱|37度台|38度以上|実測値|不明","onset":"","trend":"","otherSymptoms":[],"infection_context":"感染可能性の文脈","cause":""}`,
+  GI: `【GI】消化器系。以下の形式で必ずJSON出力：
+{"main_symptom":"腹痛・吐き気など統合","digestive_state":"下痢|嘔吐|正常|不明","onset":"","trend":"","otherSymptoms":[],"cause":"","context":""}`,
+};
+
+/** 2段階生成：STEP1（カテゴリ別意味JSON）→ STEP2（箇条書き）。失敗時は従来ロジックにフォールバック。 */
+async function buildStateFactsBulletsTwoStage(state, opts = {}) {
+  if (!state || !process.env.OPENAI_API_KEY) return null;
+  const { category, raw } = collectRawInputsForMeaningJson(state);
+  const formatHint = MEANING_JSON_PROMPT_BY_CATEGORY[category] || MEANING_JSON_PROMPT_BY_CATEGORY.PAIN;
+  for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
+    try {
+      const prompt = [
+        "ユーザーの症状に関する回答を、カテゴリに合わせた意味構造のJSONに変換してください。",
+        "厳守：",
+        "- 出力は必ずJSONのみ。ユーザー入力をそのまま使わず、必ず「意味」に変換する。",
+        "- テンプレ一致は一切前提にしない。自由記述も解釈する。",
+        "- 曖昧な場合は「不明」。原因は1つまで。医学的断定・病名NG。「可能性」で止める。",
+        "- ユーザーが言っていない症状を追加しない。",
+        "",
+        formatHint,
+      ].join("\n");
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: prompt },
+          { role: "user", content: `主症状カテゴリ: ${category}\n\nユーザー回答:\n${raw}` },
+        ],
+        temperature: 0.2 + attempt * 0.03,
+        max_tokens: 400,
+      });
+      const rawText = completion?.choices?.[0]?.message?.content || "";
+      const parsed = parseJsonObjectFromText(rawText);
+      const bullets = formatBulletsFromMeaningJson(parsed, category);
+      if (bullets.length >= 2) {
+        const sanitized = sanitizeBulletPoints(bullets);
+        if (sanitized.length >= 2) {
+          state.stateAboutBulletsCache = sanitized;
+          return sanitized;
+        }
+      }
+    } catch (_) {
+      /* retry */
+    }
+  }
+  return null;
+}
+
+/** 情報整理ブロック：2段階生成を優先。キャッシュがなければ従来ロジック。forSummary: true のときは箇条書きのみ。 */
 function buildStateFactsBullets(state, opts = {}) {
+  if (state?.stateAboutBulletsCache?.length > 0) {
+    const cached = state.stateAboutBulletsCache;
+    if (opts?.forSummary) return cached;
+    return ["今の情報から見ると、", "", ...cached, "", "という状況です。"];
+  }
+  return buildStateFactsBulletsLegacy(state, opts);
+}
+
+/** 従来のテンプレベース生成（2段階失敗時のフォールバック） */
+function buildStateFactsBulletsLegacy(state, opts = {}) {
   const answers = state?.slotAnswers || {};
   const val = (statusKey, fallback = "") => getSlotStatusValue(state, statusKey, fallback);
   const isUnknownLike = (text) =>
@@ -6643,17 +6793,8 @@ function buildStateFactsBullets(state, opts = {}) {
     }
   }
 
-  // 追加事実（確認で得た情報）。自由記述をそのまま出さず型に合わせて整形する。
-  const extra = (state?.confirmationExtraFacts || []).filter(Boolean);
-  extra.forEach((f) => {
-    const s = String(f).trim();
-    if (!s) return;
-    if (isConfirmationOnlyAnswer(s)) return;
-    if (isRejectionOnlyAnswer(s)) return;
-    if (shouldHide(s)) return;
-    const toPush = isRawFreeText(`・${s}`) ? formatRawBulletToType(s) : (s.startsWith("・") ? s : `・${s}`);
-    if (toPush) pushIfValid(toPush);
-  });
+  // 追加事実（確認で得た情報）は絶対にテンプレ当てはめ・そのまま出力しない。
+  // 2段階生成（buildStateFactsBulletsTwoStage）でしか取り込まない。legacy では追加しない。
 
   const rawBullets = lines.slice(0, 8);
   const bullets = sanitizeBulletPoints(rawBullets);
@@ -6804,21 +6945,21 @@ function pickSymptomInfoForJudgment(state, level) {
 
 /** 🟢①②: ランダムで使用（決断型：休む1つに絞る。「様子を見て」禁止） */
 const STATE_JUDGMENT_GREEN_1 = () =>
-  "今の情報では、危険なサインは見当たりません。\n急な症状だと不安になりますよね。\n\n今は一度休むだけで大丈夫そうです。\nこのまま落ち着いていれば、自然に楽になっていくことが多いです。";
+  "今の情報では、危険なサインは見当たりません。\n急な症状だと不安になりますよね。\n\n今は一度休むだけで大丈夫です。\nこのまま落ち着いていれば、自然に楽になっていきます。";
 const STATE_JUDGMENT_GREEN_2 = () =>
-  "今の状態は、大きく心配しすぎなくても大丈夫そうです。\nこのような症状は多くの人にも見られます。\n\n今は無理に何かせず、少し休むだけで十分です。\n体が落ち着いてくると、自然と楽になっていくことが多いです。";
+  "今の状態は、大きく心配しすぎなくても大丈夫です。\nこのような症状は多くの人にも見られます。\n\n今は無理に何かせず、少し休むだけで十分です。\n体が落ち着いてくると、自然と楽になっていきます。";
 
 /** 🟢③: 経過が「さっき」のときのみ使用 */
 const STATE_JUDGMENT_GREEN_3 = () =>
-  "今の情報からは、深刻な状態は考えにくいです。\n急に症状が出ると不安になりますよね。\n\n今は体を休めることを優先すれば大丈夫そうです。\nこのまま無理をしなければ、ゆっくり回復に向かうことが多いです。";
+  "今の情報からは、深刻な状態は考えにくいです。\n急に症状が出ると不安になりますよね。\n\n今は体を休めることを優先すれば大丈夫です。\nこのまま無理をしなければ、ゆっくり回復に向かっていきます。";
 
 /** 🟡①: ランダムで使用（決断型：不安を残さない） */
 const STATE_JUDGMENT_YELLOW_1 = () =>
-  "今の情報では、危険なサインは見当たりません。\nつらい症状だと不安になりますよね。\n\n今は無理をせず、しっかり体を休めてください。\n体が落ち着いてくると、症状がやわらいでいくことが多いです。";
+  "今の情報では、危険なサインは見当たりません。\nつらい症状だと不安になりますよね。\n\n今は無理をせず、しっかり体を休めてください。\n体が落ち着いてくると、症状がやわらいでいきます。";
 
 /** 🟡②: ランダムで使用（フォールバック） */
 const STATE_JUDGMENT_YELLOW_2 = () =>
-  "今の状態は、落ち着いて対処できる範囲にあります。\n急な体調の変化は不安になりますよね。\n\n今は一度休んで体を整えることが大切です。\nそのまま過ごしていれば、自然に楽になっていくことが多いです。";
+  "今の状態は、落ち着いて対処できる範囲にあります。\n急な体調の変化は不安になりますよね。\n\n今は一度休んで体を整えることが大切です。\nそのまま過ごしていれば、自然に楽になっていきます。";
 
 /** 🟡③: 経過が「数時間前・一日以上前」のときのみ使用 */
 const STATE_JUDGMENT_YELLOW_DURATION_SPECIFIC = () =>
@@ -6845,7 +6986,7 @@ function buildStateAboutLine(state, level) {
     const template = candidates[Math.floor(Math.random() * candidates.length)];
     return template();
   }
-  return "なので、今は様子を見る判断で大丈夫そうです。";
+  return "なので、今は様子を見る判断で大丈夫です。";
 }
 
 function toBulletText(line) {
@@ -7285,6 +7426,27 @@ function toMainSymptomForDiseaseSearch(state) {
 /** 危険ワード：common/conditional に含めてはいけない。rare_emergency のみ可 */
 const DANGER_WORDS_INITIAL_HIDDEN = ["腫瘍", "出血", "致死", "がん", "破裂"];
 
+/** 原因名が主症状と関連するか。主症状と無関係な病名を弾く。 */
+function isCauseRelatedToMainSymptom(cause, mainSymptom) {
+  const c = String(cause || "").trim();
+  if (!c) return false;
+  const GENERIC_DESC = /^(体調不良|症状の悪化|痛みの種類|チクチクする痛み|日常生活に影響|症状が続いている|経過の変化|変化が|強い痛み|だるさ|筋肉の緊張|ストレス|疲労|脱水|寝不足|食べ過ぎ|冷え|乾燥|水分不足|デスクワーク|目の疲れ)$/;
+  if (GENERIC_DESC.test(c)) return true; // 病名でない記述は許可
+  const LOOKS_LIKE_DISEASE = /(炎|症|症候群|頭痛|胃炎|腸炎|感冒|扁桃|咽頭|ヘルペス|皮膚炎|熱中症|片頭痛|緊張型|偏頭痛|群発|副鼻腔|髄膜|虫垂|胆嚢|膵炎|敗血症|肺炎|蜂窩|丹毒|薬疹)/;
+  if (!LOOKS_LIKE_DISEASE.test(c)) return true; // 病名っぽくない記述は許可
+  const RELATED = {
+    頭痛: /頭痛|片頭痛|緊張型|偏頭痛|群発|副鼻腔|髄膜|頭/,
+    腹痛: /胃|腸|腹|虫垂|胆嚢|膵|過敏性|消化不良/,
+    "喉の痛み": /喉|のど|咽頭|扁桃|喉頭|感冒|インフル/,
+    "唇の痛み": /唇|口|ヘルペス|口角|皮膚炎/,
+    発熱: /熱|感冒|インフル|感染|敗血症|肺炎|尿路|ウイルス/,
+    皮膚症状: /皮膚|蜂窩|丹毒|アナフィラキシー|薬疹|接触|乾燥性|湿疹|蕁麻疹|かゆみ/,
+    体調不良: /感冒|自律神経|倦怠|だる|疲労|感染|熱/,
+  };
+  const pattern = RELATED[mainSymptom] || RELATED.体調不良;
+  return pattern.test(c);
+}
+
 /** 「→」理由に含まれがちな「ユーザーが言ったと仮定される」語。言っていなければ置換対象 */
 const ASSUMABLE_PHRASES_IN_REASON = [
   "肩こり",
@@ -7421,10 +7583,9 @@ async function buildDiseaseSafetyFilteredMessage(
       "検索結果と「今の状態について」のユーザー言動を参照し、原因を頻度順に3カテゴリに分類してください。",
       "厳守：",
       "- 出力は必ずJSONのみ：{\"common\":[],\"conditional\":[],\"rare_emergency\":[]}",
-      "- common = 一般的に頻度が高い原因（2〜4件）。各項目は「・<原因名> → <短い理由>」形式",
-      "- common には**少なくとも1件**、医学的に一般的な病名・状態名（例：偏頭痛、緊張型頭痛、片頭痛、急性胃腸炎、感冒、急性咽頭炎）を含める。体調不良・痛みの種類・症状の悪化・チクチクする痛みなど、ユーザー言動の要約だけの表現は避け、検索結果から該当する病名を選ぶ。",
+      "- common = 一般的に頻度が高い原因（2〜4件）。各項目は「・<原因名> → <短い理由>」形式。原因名は病名でもユーザー言動の要約でもよい。**主症状と無関係な病名・症状名は絶対に含めない**。無理に病名を挿入しない。",
       "- 「→」の理由は**ユーザーの言動を要約**して記載。ユーザーが言っていないことは書かない。固定文（例：肩こりやストレスで）は使わず、ユーザーが実際に言った内容に合わせる。",
-      "- conditional = 条件付きで考慮すべき状況（2〜4件）。各項目は「・<病名> → <関連した理由>」形式。本当の病名を使い、理由はユーザー症状と関連付ける（例：群発頭痛 → ズキズキする痛みが目の奥に集中することがある）。検索結果＋ユーザー症状から要約。煽らない表現。固定テンプレート禁止。",
+      "- conditional = 条件付きで考慮すべき状況（2〜4件）。各項目は「・<病名> → <関連した理由>」形式。**主症状に関連する病名のみ**使用。主症状と無関係な病名は絶対に含めない。理由はユーザー症状と関連付ける。検索結果＋ユーザー症状から要約。煽らない表現。固定テンプレート禁止。",
       "- 禁止：理由に痛みの強さ（3/10、〇/10など）を絶対に使わない。",
       "- rare_emergency = 稀だが緊急性あり。**2件のみ**（強制）。検索結果＋ユーザー症状から要約。腫瘍・出血・致死・がん・破裂などの重篤疾患はここにのみ入れる。固定テンプレート禁止。",
       "- common/conditional に腫瘍・出血・致死・がん・破裂を含めない",
@@ -7466,8 +7627,18 @@ async function buildDiseaseSafetyFilteredMessage(
       .filter((t) => t && String(t).trim().length > 0)
       .filter((t) => allowDanger || !hasDanger(t));
 
-  let common = sanitize(parsed?.common, false).slice(0, 4);
-  let conditional = sanitize(parsed?.conditional, false).slice(0, 4);
+  let common = sanitize(parsed?.common, false)
+    .filter((item) => {
+      const cause = (item.indexOf(" → ") >= 0 ? item.slice(0, item.indexOf(" → ")) : item).replace(/^・\s*/, "").trim();
+      return isCauseRelatedToMainSymptom(cause, mainSymptom);
+    })
+    .slice(0, 4);
+  let conditional = sanitize(parsed?.conditional, false)
+    .filter((item) => {
+      const cause = (item.indexOf(" → ") >= 0 ? item.slice(0, item.indexOf(" → ")) : item).replace(/^・\s*/, "").trim();
+      return isCauseRelatedToMainSymptom(cause, mainSymptom);
+    })
+    .slice(0, 4);
   let rare_emergency = sanitize(parsed?.rare_emergency, true).slice(0, 2);
 
   const userWords = rawFacts;
@@ -7487,16 +7658,8 @@ async function buildDiseaseSafetyFilteredMessage(
     return `${item.slice(0, arrowIdx + 3)}${fixed}`;
   });
 
-  const GENERIC_CAUSE = /^(体調不良|症状の悪化|痛みの種類|チクチクする痛み|日常生活に影響|症状が続いている|経過の変化|変化が|強い痛み|だるさ)$/;
-  const looksLikeProperName = (cause) =>
-    cause &&
-    !GENERIC_CAUSE.test(String(cause).trim()) &&
-    /(頭痛|胃炎|腸炎|感冒|扁桃|咽頭|ヘルペス|皮膚炎|熱中症|自律神経|片頭痛|緊張型|偏頭痛|症候群|炎$)/.test(cause);
-  const hasProperName = common.some((c) => {
-    const cause = (c.indexOf(" → ") >= 0 ? c.slice(0, c.indexOf(" → ")) : c).replace(/^・\s*/, "").trim();
-    return looksLikeProperName(cause);
-  });
-  if (common.length < 2 || !hasProperName) {
+  // common が2件未満のときのみ、主症状に紐づいた fallbackPair から補う。病名の強制はしない。
+  if (common.length < 2) {
     const fallbackItems = fallbackPair.map((d) => {
       const reason = d.desc.replace(/とされる状態です。?$/, "").trim();
       const fixed = replaceUnsaidPhrasesInReason(reason, userWords);
@@ -7505,22 +7668,7 @@ async function buildDiseaseSafetyFilteredMessage(
     for (const item of fallbackItems) {
       if (common.length >= 4) break;
       const name = (item.match(/^・([^→]+)/) || [])[1]?.trim?.() || "";
-      if (!name || !common.some((c) => c.includes(name))) {
-        common.push(item);
-        if (!hasProperName) break;
-      }
-    }
-  }
-  const hasProperNameNow = common.some((c) => {
-    const cause = (c.indexOf(" → ") >= 0 ? c.slice(0, c.indexOf(" → ")) : c).replace(/^・\s*/, "").trim();
-    return looksLikeProperName(cause);
-  });
-  if (!hasProperNameNow && common.length > 0) {
-    const firstFallback = fallbackPair[0];
-    if (firstFallback && !common.some((c) => c.includes(firstFallback.name))) {
-      const reason = firstFallback.desc.replace(/とされる状態です。?$/, "").trim();
-      const fixed = replaceUnsaidPhrasesInReason(reason, userWords);
-      common = [`・${firstFallback.name} → ${fixed}`, ...common].slice(0, 4);
+      if (!name || !common.some((c) => c.includes(name))) common.push(item);
     }
   }
   common = common.slice(0, 4);
@@ -8954,7 +9102,7 @@ function buildStateDecisionLine(state, level) {
   if (level === "🟢" || level === "🟡") {
     return "";
   }
-  return "なので、今は様子を見る判断で大丈夫そうです。";
+  return "なので、今は様子を見る判断で大丈夫です。";
 }
 
 function normalizeStateBlockForGreenYellow(text, state) {
@@ -9987,28 +10135,27 @@ app.post("/api/chat", async (req, res) => {
       conversationHistory[conversationId].push({ role: "user", content: message });
       const msg = String(message || "").trim();
       const isConfirmationOnly = isConfirmationOnlyAnswer(msg);
-      const hasAddedInfo = !isConfirmationOnly;
+      const isRejectionOnly = isRejectionOnlyAnswer(msg);
+      const hasAddedInfo = !isConfirmationOnly && !isRejectionOnly;
       if (hasAddedInfo) {
         (conversationState[conversationId].confirmationExtraFacts =
           conversationState[conversationId].confirmationExtraFacts || []).push(msg);
       }
+      await buildStateFactsBulletsTwoStage(conversationState[conversationId]);
       let summaryMsg = "";
       let followUpQ = null;
       try {
-        const promise = conversationState[conversationId].summaryGenerationPromise;
-        const result = promise
-          ? await promise
-          : await generateSummaryForConfirmation(conversationId);
-        conversationState[conversationId].summaryGenerationPromise = null;
+        let result;
+        if (hasAddedInfo) {
+          conversationState[conversationId].summaryGenerationPromise = null;
+          result = await generateSummaryForConfirmation(conversationId);
+        } else {
+          const promise = conversationState[conversationId].summaryGenerationPromise;
+          result = promise ? await promise : await generateSummaryForConfirmation(conversationId);
+          conversationState[conversationId].summaryGenerationPromise = null;
+        }
         summaryMsg = result?.message || "";
         followUpQ = result?.followUpQuestion || null;
-        if (hasAddedInfo && summaryMsg) {
-          const historyText = (conversationHistory[conversationId] || [])
-            .filter((m) => m.role === "user")
-            .map((m) => m.content)
-            .join("\n");
-          summaryMsg = replaceStateAboutBlockOnly(summaryMsg, state, historyText) || summaryMsg;
-        }
         if (!summaryMsg || !hasAllSummaryBlocks(summaryMsg)) {
           const level = finalizeRiskLevel(state);
           const history = conversationHistory[conversationId] || [];
@@ -10595,6 +10742,7 @@ app.post("/api/chat", async (req, res) => {
 
     // 6スロット完了時: 確認文を出すだけ。まとめは確認文と同時に生成開始。表示はユーザー応答時のみ。
     if (shouldJudgeNow && !conversationState[conversationId].confirmationShown && !conversationState[conversationId].summaryShown) {
+      await buildStateFactsBulletsTwoStage(conversationState[conversationId]);
       const confirmMsg = buildPreSummaryConfirmationMessage(
         conversationState[conversationId]
       );
