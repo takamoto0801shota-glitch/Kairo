@@ -8,8 +8,8 @@ const path = require("path");
 const app = express();
 const PORT = process.env.PORT || 3000;
 const IS_DEBUG = false;
-/** フォールバックを廃止。LLM で必ず成功するようリトライ・工夫する。失敗時は10回までリトライ。 */
-const LLM_RETRY_COUNT = 11;
+/** フォールバックを廃止。LLM で必ず成功するようリトライ・工夫する。失敗時は最大5回までリトライ。 */
+const LLM_RETRY_COUNT = 5;
 
 // Middleware
 app.use(cors());
@@ -1198,22 +1198,48 @@ function normalizeSummaryLevel(text, requiredLevel) {
   return updated;
 }
 
-/** 🟢/🟡まとめの先頭に「🟢 ここまでの情報を整理します」を強制。欠けている場合は必ず付与する。 */
+/** 🟢/🟡まとめの先頭に「🟢 ここまでの情報を整理します」を強制。欠け／順序違いは移動または付与（病院フローは対象外）。 */
 function ensureGreenHeaderForYellow(text, requiredLevel) {
   if (!text) return text;
   if (requiredLevel !== "🟢" && requiredLevel !== "🟡") return text;
+  const normalized = normalizeHospitalMemoHeaderText(text);
+  if (isHospitalFlow(normalized)) return text;
   const targetHeader = "🟢 ここまでの情報を整理します";
-  const trimmed = text.trimStart();
-  if (trimmed.startsWith(targetHeader)) return text;
-  if (trimmed.startsWith("🟡 ここまでの情報を整理します")) {
-    return text.replace("🟡 ここまでの情報を整理します", targetHeader);
+  const isIntroLine = (l) => {
+    const t = String(l || "").trimStart();
+    return t.startsWith("🟢 ここまでの情報を整理します") || t.startsWith("🟡 ここまでの情報を整理します");
+  };
+  const isNextBlockHeader = (l) => /^(🤝|✅|⏳|🌱|💊|📝|🏥|💬)\s/.test(String(l || "").trimStart());
+  const lines = normalized.split("\n");
+  const introIdx = lines.findIndex(isIntroLine);
+  if (introIdx === -1) {
+    const intro = buildSummaryIntroTemplate();
+    return `${targetHeader}\n${intro}\n\n${normalized.trim()}`;
   }
-  if (text.includes(targetHeader) || text.includes("🟡 ここまでの情報を整理します")) {
-    const normalized = text.replace("🟡 ここまでの情報を整理します", targetHeader);
-    if (normalized.trimStart().startsWith(targetHeader)) return normalized;
+  let introEnd = lines.length;
+  for (let i = introIdx + 1; i < lines.length; i++) {
+    if (isNextBlockHeader(lines[i])) {
+      introEnd = i;
+      break;
+    }
   }
-  const intro = buildSummaryIntroTemplate();
-  return `${targetHeader}\n${intro}\n\n${text}`;
+  const introSlice = lines.slice(introIdx, introEnd).map((l) =>
+    String(l).trimStart().startsWith("🟡 ここまでの情報を整理します")
+      ? l.replace("🟡 ここまでの情報を整理します", targetHeader)
+      : l
+  );
+  const introBlock = introSlice.join("\n");
+  if (introIdx === 0) {
+    return lines
+      .slice(0, introIdx)
+      .concat(introSlice, lines.slice(introEnd))
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n");
+  }
+  const before = lines.slice(0, introIdx);
+  const after = lines.slice(introEnd);
+  const rest = [...before, ...after].join("\n").trim();
+  return `${introBlock}\n\n${rest}`.replace(/\n{3,}/g, "\n\n");
 }
 
 function buildPostSummaryFollowUp(state, history) {
@@ -4283,12 +4309,15 @@ async function buildConcreteImmediateActionsDetails(state, actionSection = "") {
   const dontActions = buildDontActionsFromContext(plan?.currentStateContext || {}, plan?.evidence || {});
   const cushion = buildYellowPsychologicalCushionLine();
 
-  const refinedActions = await refineDoActionsWithLLM(plan, state, state?.decisionLevel || "🟢", { forSummary: false });
+  const appendSingaporeRest = shouldAppendSingaporeRestSection(state);
+  // refine と Singapore は互いに独立のため並列化し、モーダル応答の待ち時間を短縮する
+  const [refinedActions, singaporeRestLines] = await Promise.all([
+    refineDoActionsWithLLM(plan, state, state?.decisionLevel || "🟢", { forSummary: false }),
+    appendSingaporeRest ? generateSingaporeRestSection() : Promise.resolve(null),
+  ]);
   const ensuredDo = buildDoActionsFromPlan(plan, state, state?.decisionLevel || "🟢", {
     actionsOverride: refinedActions.length > 0 ? refinedActions : undefined,
   });
-  const appendSingaporeRest = shouldAppendSingaporeRestSection(state);
-  const singaporeRestLines = appendSingaporeRest ? await generateSingaporeRestSection() : null;
   return {
     message: renderActionDetailMessage(cushion, ensuredDo, dontActions, singaporeRestLines),
     query: plan?.searchQuery || "",
@@ -4411,7 +4440,18 @@ function enforceSummaryIntroTemplate(text) {
     line.startsWith("🟢 ここまでの情報を整理します") ||
     line.startsWith("🟡 ここまでの情報を整理します")
   );
-  if (headerIndex === -1) return text;
+  if (headerIndex === -1) {
+    if (isHospitalFlow(text)) return text;
+    const hasGreenStructure =
+      text.includes("🤝 今の状態について") ||
+      text.includes("✅ 今すぐやること") ||
+      text.includes("⏳ 今後の見通し") ||
+      text.includes("🌱 最後に");
+    if (hasGreenStructure) {
+      return `🟢 ここまでの情報を整理します\n${buildSummaryIntroTemplate()}\n\n${text}`;
+    }
+    return text;
+  }
   const templateLine = buildSummaryIntroTemplate();
   const nextBlockIndex = lines.findIndex(
     (line, idx) =>
@@ -6495,6 +6535,11 @@ function sanitizeBulletPoints(bullets) {
       // 重複接尾の修正（ようなような→ような、感じ感じ→感じ）
       s = s.replace(/(ような|感じ|タイプの痛み)\1+/g, "$1");
       s = s.replace(/痛み痛み/g, "痛み").replace(/症状症状/g, "症状");
+      s = s.replace(/ような痛みが出ているような痛みが出ている/g, "ような痛みが出ている");
+      s = s.replace(/ような痛みが出ているような/g, "ような痛みが出ている");
+      s = s.replace(/痛みが出ているような痛みが出ている/g, "痛みが出ている");
+      s = s.replace(/痛みが出ている痛み/g, "痛み");
+      s = s.replace(/ようなような/g, "ような");
       // ・の連続や空行
       s = s.replace(/^・+/g, "・").replace(/\s{2,}/g, " ");
       if (s.length <= 2) return null;
@@ -6532,11 +6577,129 @@ function collectRawInputsForMeaningJson(state) {
   return { category, raw: lines.join("\n") || "ユーザーの回答がまだありません" };
 }
 
-/** 2段階生成 STEP2：カテゴリ別意味JSONから箇条書きを生成。統合優先・最大8行。 */
+/** otherSymptoms：単語のみ禁止。必ず文章化。 */
+function formatOtherSymptomBulletLine(s) {
+  const t = String(s || "").trim();
+  if (!t) return null;
+  if (/を伴っている|がみられる|がある|を感じている|が出てきている|が強まっている|が続いている/.test(t)) {
+    return `・${t}`;
+  }
+  if (/^(発熱|熱|咳|だるさ|吐き気|嘔吐|下痢|便秘|めまい|寒気)$/.test(t)) {
+    return /^(発熱|熱)$/.test(t) ? `・${t}がみられる` : `・${t}を伴っている`;
+  }
+  return `・${t}を伴っている`;
+}
+
+/** context：状態として説明する文（other の後・cause の前）。 */
+function formatContextBulletLine(ctx) {
+  const c = String(ctx || "").trim();
+  if (!c) return null;
+  if (/状態$/.test(c)) return `・${c}`;
+  if (/続いている$|乱れている$|みられる$|伴っている$/.test(c)) return `・${c}状態`;
+  if (/いる$|ある$|だるい$/.test(c)) return `・${c}状態`;
+  return `・${c}が続いている状態`;
+}
+
+/** cause から原因の核となる語句を抽出（部分一致検証用） */
+function extractCauseCoreTokens(cause) {
+  const stripped = String(cause || "")
+    .replace(/の可能性$/g, "")
+    .replace(/による影響$/g, "")
+    .replace(/による負担$/g, "")
+    .replace(/の影響$/g, "")
+    .replace(/の負担$/g, "")
+    .trim();
+  if (!stripped || stripped.length < 2) return [];
+  if (/^(影響|負担|こと|の)$/.test(stripped)) return [];
+  const parts = stripped.split(/[、や､／と及び]/).map((p) => p.trim()).filter(Boolean);
+  const tokens = [];
+  for (let seg of parts) {
+    seg = seg
+      .replace(/^(強い|かなり|ある程度の|一部の|そうした)/, "")
+      .replace(/による.*$/g, "")
+      .replace(/の影響$|の負担$/g, "")
+      .trim();
+    if (seg.length >= 2 && !/^(影響|負担|こと)$/.test(seg)) tokens.push(seg);
+  }
+  if (tokens.length === 0 && stripped.length >= 2) {
+    const one = stripped.replace(/による.*$/g, "").trim();
+    if (one.length >= 2 && !/^(影響|負担)$/.test(one)) tokens.push(one);
+  }
+  return tokens.filter((t) => t.length >= 2);
+}
+
+function isCauseAbstractOnly(cause) {
+  const c = String(cause || "").trim();
+  if (!c) return false;
+  if (/^(影響の可能性|負担の可能性|影響|負担|ことの可能性)$/.test(c)) return true;
+  const noPos = c.replace(/の可能性$/, "");
+  if (/^(影響|負担)$/.test(noPos)) return true;
+  return false;
+}
+
+/** PAIN: type 列挙値 → 組み立て用フレーズ */
+function buildPainTypePhraseForAssembly(type) {
+  const t = String(type || "").trim();
+  if (!t || t === "不明") return "タイプ不明の";
+  if (t === "ズキズキ") return "ズキズキする";
+  if (t === "重い") return "重い感じの";
+  if (t === "締め付け") return "締め付けられるような";
+  if (t === "その他") return "";
+  return t;
+}
+
+/** PAIN: severity 列挙 → 組み立て用接頭（不明は明示） */
+function buildPainSeverityPrefixForAssembly(severity) {
+  const s = String(severity || "").trim();
+  if (!s || s === "不明") return "強さ不明の";
+  return s;
+}
+
+/** PAIN: symptom + severity + type から main_symptom をサーバ側で組み立て（LLMの main_symptom 直接生成は上書き） */
+function assemblePainMainSymptomFromParts(parsed) {
+  const symptom = String(parsed.symptom || "").trim();
+  const sev = String(parsed.severity || "").trim();
+  const typ = String(parsed.type || "").trim();
+  const typePhrase = buildPainTypePhraseForAssembly(typ);
+  if (!symptom) return "";
+  const sevPart = buildPainSeverityPrefixForAssembly(sev);
+  if (!typePhrase && !sevPart) return symptom;
+  if (!typePhrase) return `${sevPart}${symptom}`;
+  if (!sevPart) return `${typePhrase}${symptom}`;
+  return `${sevPart}${typePhrase}${symptom}`;
+}
+
+/** onset / trend が文章形式か（単語のみ禁止） */
+function formatOnsetTrendBullet(prefix, rawVal, kind) {
+  const v = String(rawVal || "").trim();
+  if (!v || v === "不明") return null;
+  if (/^症状は/.test(v)) return `・${v}`;
+  if (v.length < 8 || /^(さっき|数時間前|急に|今|昨日|一昨日)$/.test(v)) return null;
+  if (kind === "onset") {
+    if (/急に|さっき|今|たった今/.test(v)) return "・症状は急に始まっている";
+    if (/数時間|数十分/.test(v)) return "・症状は数時間前から続いている";
+    if (/徐々|だんだん/.test(v)) return "・症状は徐々に出てきている";
+    if (/継続|ずっと|一日/.test(v)) return "・症状は続いている";
+    return `・症状は${v}から続いている`;
+  }
+  if (kind === "trend") {
+    if (/改善|回復|良くな/.test(v)) return "・症状は回復方向に向かっている";
+    if (/変化なし|変わらない|横ばい/.test(v)) return "・症状は大きく変化していない";
+    if (/悪化|強くな|ひどくな/.test(v)) return "・発症時より症状が強くなっている";
+    return `・${v}`;
+  }
+  return null;
+}
+
+/** Phase2：統一JSONのみ参照。1行目は名詞句。出力順固定。最大6行。 */
 function formatBulletsFromMeaningJson(meaning, category = "PAIN") {
   if (!meaning || typeof meaning !== "object") return [];
   const bullets = [];
-  let main = meaning.main_symptom;
+  let main = String(meaning.main_symptom || "").trim();
+  if (category === "PAIN") {
+    const assembled = assemblePainMainSymptomFromParts(meaning);
+    if (assembled) main = assembled;
+  }
   if (!main && meaning.pain?.combined) {
     const c = String(meaning.pain.combined).trim();
     main = /痛み$/.test(c) ? c : /^(軽い|中程度|やや強い|強い)$/.test(c) ? c + "痛み" : c + "する痛み";
@@ -6544,81 +6707,323 @@ function formatBulletsFromMeaningJson(meaning, category = "PAIN") {
     main = String(meaning.pain.type).trim() + "する痛み";
   }
   if (main) {
-    const m = String(main).trim();
-    bullets.push(`・${m}${/出ている|伴っている|見られている/.test(m) ? "" : "が出ている"}`);
+    let m = main
+      .replace(/ような痛みが出ているような痛み/g, "ような痛み")
+      .replace(/痛みが出ているような痛み/g, "痛み");
+    m = m.replace(/が出ている$|である$|です$|ます$|ている$|あった$|なった$/, "").trim();
+    bullets.push(`・${m}`);
   }
-  const onset = meaning.onset;
+  const onset = String(meaning.onset || "").trim();
   if (onset && onset !== "不明") {
-    if (/急に/.test(onset)) bullets.push("・症状は急に始まっている");
-    else if (/数時間/.test(onset)) bullets.push("・症状は数時間前から続いている");
-    else if (/徐々に/.test(onset)) bullets.push("・症状は徐々に出てきている");
-    else if (/継続|ずっと/.test(onset)) bullets.push("・症状は続いている");
-    else bullets.push(`・症状は${onset}から続いている`);
+    if (/^症状は/.test(onset)) {
+      bullets.push(onset.startsWith("・") ? onset : `・${onset}`);
+    } else {
+      const line = formatOnsetTrendBullet("onset", onset, "onset");
+      if (line) bullets.push(line);
+    }
   }
-  const trend = meaning.trend;
+  const trend = String(meaning.trend || "").trim();
   if (trend && trend !== "不明") {
-    if (/改善|回復/.test(trend)) bullets.push("・症状は回復方向に向かっている");
-    else if (/変化なし|変わらない/.test(trend)) bullets.push("・症状は大きく変化していない");
-    else if (/悪化/.test(trend)) bullets.push("・発症時より症状が強くなっている");
-  }
-  if (category === "INFECTION" && meaning.temperature) {
-    const t = String(meaning.temperature).trim();
-    if (t && t !== "不明") bullets.push(`・体温は${t}`);
-  }
-  if (category === "SKIN" && meaning.appearance) {
-    const a = String(meaning.appearance).trim();
-    if (a) bullets.push(`・${a}`);
-  }
-  if (category === "GI" && meaning.digestive_state) {
-    const d = String(meaning.digestive_state).trim();
-    if (d && d !== "不明") bullets.push(`・${d}`);
-  }
-  if (category === "INFECTION" && meaning.infection_context) {
-    const ic = String(meaning.infection_context).trim();
-    if (ic) bullets.push(`・${ic}`);
+    if (/^症状は/.test(trend) || /^発症時より/.test(trend)) {
+      bullets.push(trend.startsWith("・") ? trend : `・${trend}`);
+    } else {
+      const line = formatOnsetTrendBullet("trend", trend, "trend");
+      if (line) bullets.push(line);
+    }
   }
   const others = meaning.otherSymptoms;
   if (Array.isArray(others) && others.length > 0) {
-    others.slice(0, 2).forEach((s) => bullets.push(`・${String(s).trim()}を伴っている`));
+    others.slice(0, 3).forEach((s) => {
+      const line = formatOtherSymptomBulletLine(String(s).trim());
+      if (line) bullets.push(line);
+    });
   } else if (meaning.noOtherSymptoms === true) {
     bullets.push("・他の症状は今のところ見られていない");
   }
-  if (meaning.context) {
-    const ctx = String(meaning.context).trim();
-    if (ctx) bullets.push(`・${ctx}`);
+  const ctx = String(meaning.context || "").trim();
+  if (ctx) {
+    const line = formatContextBulletLine(ctx);
+    if (line) bullets.push(line);
   }
-  const cause = meaning.cause;
-  if (cause) bullets.push(`・${String(cause).trim()}${/可能性$/.test(String(cause)) ? "" : "の可能性"}`);
-  return bullets.slice(0, 8).filter(Boolean);
+  const cause = String(meaning.cause || "").trim();
+  if (cause) bullets.push(`・${cause}${/可能性$/.test(cause) ? "" : "の可能性"}`);
+  const out = bullets.slice(0, 6).filter(Boolean);
+  return out;
 }
 
-const MEANING_JSON_PROMPT_BY_CATEGORY = {
-  PAIN: `【PAIN】痛み系。以下の形式で必ずJSON出力：
-{"main_symptom":"痛みの統合表現（例：やや強いズキズキする頭痛）","onset":"急に|数時間前から|継続的|不明","trend":"改善|変化なし|悪化|不明","otherSymptoms":[],"noOtherSymptoms":true|false,"cause":"自由記述から解釈した原因","context":""}`,
-  SKIN: `【SKIN】皮膚系。以下の形式で必ずJSON出力：
-{"main_symptom":"皮膚の状態（例：赤みと乾燥が出ている）","appearance":"見た目の特徴","onset":"急に|徐々に|不明","otherSymptoms":[],"cause":"自由記述から解釈した原因","context":""}`,
-  INFECTION: `【INFECTION】発熱・喉系。以下の形式で必ずJSON出力：
-{"main_symptom":"発熱・喉・だるさなどの統合","temperature":"平熱|37度台|38度以上|実測値|不明","onset":"","trend":"","otherSymptoms":[],"infection_context":"感染可能性の文脈","cause":""}`,
-  GI: `【GI】消化器系。以下の形式で必ずJSON出力：
-{"main_symptom":"腹痛・吐き気など統合","digestive_state":"下痢|嘔吐|正常|不明","onset":"","trend":"","otherSymptoms":[],"cause":"","context":""}`,
+/** ユーザー回答にきっかけ・原因らしき記述があるか（cause 必須判定用） */
+function hasRawCauseHintForValidation(raw) {
+  const t = String(raw || "");
+  return /(きっかけ|原因|太陽|日差し|紫外線|寝不足|睡眠|スマホ|画面|長時間|ストレス|食|あたり|乾燥|風邪|周り|咳|運動|飲酒|冷え|便秘|疲れ|仕事)/.test(
+    t
+  );
+}
+
+/** PAIN: main_symptom に強さ・タイプ・症状名が揃った名詞句か（動詞終わり・が出ている終わり禁止） */
+function isPainMainSymptomStructurallyValid(main, parsed = null) {
+  const m = String(main || "").trim();
+  if (m.length < 5) return false;
+  if (/が出ている$|である$|です$|ます$|ている$|あった$|なった$/.test(m)) return false;
+  if (/痛みがある$|痛みがある。|^痛み$|^症状$|^ズキズキする痛み$/.test(m)) return false;
+  if (/^(ズキズキ|キリキリ|重い|締め付け|鈍い)する痛み$/.test(m)) return false;
+  const hasIntensity =
+    /(強さ不明|軽い|軽め|軽度|中程度|やや|強い|強め|弱い|微し|わずか|微熱|不明|\d+\s*\/\s*10)/.test(m) ||
+    /\/10/.test(m);
+  const typField = parsed && String(parsed.type || "").trim();
+  const hasType =
+    /(タイプ不明|ズキズキ|キリキリ|締め付け|重い|鈍い|刺す|ヒリヒリ|チクチク|ジンジン|ドクドク|脈打|張っ|つり|引っ|電気)/.test(m) ||
+    typField === "不明" ||
+    typField === "その他";
+  const hasSymptomName =
+    /(頭痛|腰痛|腹痛|歯痛|のど|咽喉|咽頭|目|肩|首|腰|背中|こめかみ|片頭|耳|関節|腕|手|指|足|膝|しびれ|違和感|みぞおち|下腹|上腹)/.test(m) ||
+    /する痛み$/.test(m);
+  return hasIntensity && hasType && hasSymptomName;
+}
+
+/** context に原因・きっかけが混入していないか */
+function isContextContaminatedWithCause(ctx) {
+  const c = String(ctx || "");
+  if (!c) return false;
+  if (/原因|きっかけ|の影響|負担の可能性|使用しすぎ|長時間使用|の使用|による影響/.test(c)) return true;
+  if (/スマホ.*使い|スマホを見|画面.*長時間|見過ぎ/.test(c)) return true;
+  return false;
+}
+
+/** onset / trend が単語のみでないか（JSON 段階） */
+function isOnsetTrendJsonValid(val, kind) {
+  const v = String(val || "").trim();
+  if (!v || v === "不明") return true;
+  if (/^症状は/.test(v) || /^発症時より/.test(v)) return v.length >= 8;
+  if (v.length < 8) return false;
+  if (/^(さっき|数時間前|急に|今|昨日|一昨日|改善|悪化|回復)$/.test(v)) return false;
+  return true;
+}
+
+/** otherSymptoms の各要素が名詞単体でないか */
+function validateOtherSymptomsJsonEntries(arr) {
+  if (!Array.isArray(arr)) return false;
+  for (const item of arr) {
+    const s = String(item || "").trim();
+    if (!s || s.length < 6) return false;
+    if (!/を伴っている|がみられる|がある|を感じている|が出て|が続いている|が強い/.test(s)) return false;
+  }
+  return true;
+}
+
+const PAIN_SEVERITY_ENUM = new Set(["軽い", "中程度", "やや強い", "強い", "不明"]);
+const PAIN_TYPE_ENUM = new Set(["ズキズキ", "重い", "締め付け", "その他", "不明"]);
+
+/** Phase1 JSON が採用可能か */
+function validateMeaningJsonPhase1(parsed, category, raw) {
+  if (!parsed || typeof parsed !== "object") return false;
+  const others = Array.isArray(parsed.otherSymptoms) ? parsed.otherSymptoms : [];
+  const noOther = parsed.noOtherSymptoms === true;
+  if (others.length === 0 && !noOther) return false;
+  if (others.length > 0) {
+    if (!validateOtherSymptomsJsonEntries(others)) return false;
+  }
+  if (category === "PAIN") {
+    const symptom = String(parsed.symptom || "").trim();
+    const sev = String(parsed.severity || "").trim();
+    const typ = String(parsed.type || "").trim();
+    if (!symptom) return false;
+    if (!sev || !typ) return false;
+    if (!PAIN_SEVERITY_ENUM.has(sev) || !PAIN_TYPE_ENUM.has(typ)) return false;
+    if (/ズキズキする痛み|痛みだけ|する痛み$/.test(typ)) return false;
+    if (/^(痛み|症状|不調)$/.test(symptom)) return false;
+    const assembled = assemblePainMainSymptomFromParts(parsed);
+    if (!assembled || !isPainMainSymptomStructurallyValid(assembled, parsed)) return false;
+  } else {
+    const main = String(parsed.main_symptom || "").trim();
+    if (!main || main.length < 8) return false;
+    if (/^(症状|体調不良|痛み|だるさ|おかしい)$/.test(main)) return false;
+    if (/が出ている$|です$|ます$|ている$/.test(main)) return false;
+    if (!isMainSymptomUxValid(main, category)) return false;
+  }
+  const mainFinal = String(parsed.main_symptom || "").trim();
+  if (!mainFinal) return false;
+  if (category === "PAIN" && !isPainMainSymptomStructurallyValid(mainFinal, parsed)) return false;
+  if (!isMainSymptomUxValid(mainFinal, category)) return false;
+  if (!isOnsetTrendJsonValid(parsed.onset, "onset")) return false;
+  if (!isOnsetTrendJsonValid(parsed.trend, "trend")) return false;
+  const ctx = String(parsed.context || "").trim();
+  if (ctx && isContextContaminatedWithCause(ctx)) return false;
+  const cause = String(parsed.cause || "").trim();
+  if (cause && !/可能性$/.test(cause)) return false;
+  if (/原因は不明|原因不明|わからない原因|不明のみ/.test(cause)) return false;
+  if (cause && isCauseAbstractOnly(cause)) return false;
+  if (hasRawCauseHintForValidation(raw) && !cause) return false;
+  return true;
+}
+
+/** Phase1 直後：組み立て・cause 語尾の正規化 */
+function normalizeMeaningJsonAfterParse(parsed, category) {
+  if (!parsed || typeof parsed !== "object") return;
+  if (Array.isArray(parsed.details) && parsed.details.length > 0) parsed.details = [];
+  if (category === "PAIN") {
+    const assembled = assemblePainMainSymptomFromParts(parsed);
+    if (assembled) parsed.main_symptom = assembled;
+  }
+  const c = String(parsed.cause || "").trim();
+  if (c && !/可能性$/.test(c)) parsed.cause = `${c}の可能性`;
+}
+
+/** main_symptom のUX：抽象的・主語不明・想像できない表現を却下 */
+function isMainSymptomUxValid(main, category) {
+  const m = String(main || "").trim();
+  const minLen = category === "PAIN" ? 5 : 8;
+  if (m.length < minLen) return false;
+  if (/が出ている$|です$|ます$|ている$|あった$|なった$/.test(m)) return false;
+  if (/^(体調不良|不調|症状|痛み|だるさ|おかしい|違和感|気になる)$/.test(m)) return false;
+  if (/(不調がある|症状がある|体調が悪い|状態が悪い)$/.test(m)) return false;
+  if (/^(不調|不調な状態|体調の問題|何かしらの不調)$/.test(m)) return false;
+  if (category !== "PAIN" && m.length < 12 && /^(だるさ|熱|咳|痛み)$/.test(m)) return false;
+  return true;
+}
+
+/** 1行目：情報量・具体性の最低ライン（一読で状態が分かる） */
+function isFirstLineInformativeEnough(firstLine, category = "PAIN") {
+  const s = String(firstLine || "").replace(/^・/, "").trim();
+  if (category === "PAIN") {
+    if (s.length < 5) return false;
+    if (/、|・|\d/.test(s)) return true;
+    if (/(頭痛|腹痛|腰痛|歯痛|のど|肩|首|強さ不明|タイプ不明|ズキズキ|締め付け|重い感じ)/.test(s)) return true;
+    return s.length >= 9;
+  }
+  if (s.length < 9) return false;
+  if (/、|・|\d/.test(s)) return true;
+  if (s.length >= 13) return true;
+  return s.length >= 10;
+}
+
+/** 同一文内の不自然な同語連続 */
+function hasUnnaturalIntraLineRepetition(s) {
+  const t = String(s || "");
+  return /痛みが出ている痛み|痛み痛み|ようなような|出ている出ている|症状症状/.test(t);
+}
+
+/** 箇条書き品質チェック。parsed があれば cause の反映も検証。 */
+function validateStateAboutBulletsQuality(bullets, raw = "", parsed = null, category = "PAIN") {
+  if (!Array.isArray(bullets) || bullets.length < 2) return false;
+  const younaCount = (bullets.join(" ").match(/ような/g) || []).length;
+  if (younaCount >= 2) return false;
+  const first = String(bullets[0] || "").replace(/^・/, "");
+  if (!isMainSymptomUxValid(first, category)) return false;
+  if (!isFirstLineInformativeEnough(first, category)) return false;
+  for (const b of bullets) {
+    const s = String(b || "").replace(/^・/, "");
+    if (hasUnnaturalIntraLineRepetition(s)) return false;
+    if (/ような痛みが出ているような|ですです|。。。{2,}/.test(s)) return false;
+    if (/が出ているが出ている/.test(s)) return false;
+  }
+  const normalizedLines = bullets.map((b) =>
+    String(b || "")
+      .replace(/^・/, "")
+      .replace(/\s+/g, "")
+  );
+  for (let i = 0; i < normalizedLines.length; i++) {
+    for (let j = i + 1; j < normalizedLines.length; j++) {
+      const a = normalizedLines[i];
+      const b = normalizedLines[j];
+      if (a.length < 6 || b.length < 6) continue;
+      if (a === b) return false;
+    }
+  }
+  if (hasRawCauseHintForValidation(raw)) {
+    const text = bullets.join(" ");
+    if (!/(可能性|影響|負担|日差し|暑さ|睡眠|画面|感染|乾燥|紫外線|ストレス|食|あたり|きっかけ)/.test(text)) return false;
+  }
+  if (parsed) {
+    const causeJson = String(parsed.cause || "").trim();
+    if (causeJson && !validateCauseCoreNounsInBullets(causeJson, bullets)) return false;
+    const ctxJson = String(parsed.context || "").trim();
+    if (ctxJson && !validateContextReflectedInBullets(ctxJson, bullets)) return false;
+  }
+  if (!validateOtherSymptomLinesAreSentences(bullets)) return false;
+  return true;
+}
+
+/** cause の核名詞が箇条書きに1つ以上含まれるか。抽象のみは NG。 */
+function validateCauseCoreNounsInBullets(cause, bullets) {
+  const c = String(cause || "").trim();
+  if (!c) return true;
+  if (isCauseAbstractOnly(c)) return false;
+  const cores = extractCauseCoreTokens(c);
+  if (cores.length === 0) return !isCauseAbstractOnly(c);
+  const joined = bullets.join("\n");
+  return cores.some((core) => core.length >= 2 && joined.includes(core));
+}
+
+/** context の内容が箇条書きに反映されているか */
+function validateContextReflectedInBullets(contextRaw, bullets) {
+  const ctx = String(contextRaw || "").trim();
+  if (!ctx) return true;
+  const joined = bullets.join("\n");
+  const probe = ctx.slice(0, Math.min(10, ctx.length));
+  if (probe.length >= 4 && !joined.includes(probe)) return false;
+  return true;
+}
+
+/** otherSymptoms 由来の行が名詞単体でないか（1行目・定型は除外） */
+function validateOtherSymptomLinesAreSentences(bullets) {
+  for (let i = 1; i < bullets.length; i++) {
+    const s = String(bullets[i] || "").replace(/^・/, "").trim();
+    if (/^症状は/.test(s)) continue;
+    if (/^他の症状は/.test(s)) continue;
+    if (/^発症時より|^症状は回復|^症状は大きく|^症状は続いている$/.test(s)) continue;
+    if (/可能性$|の可能性$/.test(s)) continue;
+    if (/状態$|続いている|みられる|乱れている|伴っている|いる状態|ある状態/.test(s)) continue;
+    if (/を伴っている|がみられる|がある|を感じている|が出て/.test(s)) continue;
+    if (s.length <= 5) return false;
+  }
+  return true;
+}
+
+const MEANING_JSON_UNIFIED_SCHEMA = `JSONキー（details は常に []。Phase2では使わない）:
+{
+  "symptom": "",
+  "severity": "",
+  "type": "",
+  "main_symptom": "",
+  "details": [],
+  "onset": "",
+  "trend": "",
+  "otherSymptoms": [],
+  "noOtherSymptoms": false,
+  "cause": "",
+  "context": ""
+}
+【PAIN】symptom・severity・type は必須（不明は "不明" と明示）。main_symptom は空でもよい（サーバが組み立て）。非PAINでは symptom・severity・type は空文字でよい。`;
+
+const MEANING_JSON_CATEGORY_HINT = {
+  PAIN: `【PAIN・必須順】①symptom（例:頭痛）②severity（軽い／中程度／やや強い／強い／不明）③type（ズキズキ／重い／締め付け／その他／不明）を先に埋める。④main_symptom は上記から論理的に組み立てた名詞句（例:やや強いズキズキする頭痛）。禁止:main_symptom だけ先に書いて symptom を空にする・「ズキズキする痛み」だけを type に入れる。`,
+  INFECTION: `【INFECTION】symptom・severity・type は空。main_symptom はのど・熱・だるさ等を一文で具体的に。`,
+  SKIN: `【SKIN】symptom・severity・type は空。main_symptom は皮膚の状態を一文で具体的に。`,
+  GI: `【GI】symptom・severity・type は空。main_symptom は腹部・消化器の主訴を一文で具体的に。`,
 };
 
-/** 2段階生成：STEP1（カテゴリ別意味JSON）→ STEP2（箇条書き）。失敗時は従来ロジックにフォールバック。 */
+const MEANING_JSON_CAUSE_RULES = `【cause】「なぜ起きたか」。必ず「〜の可能性」で終わる。なければ空。禁止:「原因は不明」。核となる名詞（日差し・暑さ・睡眠不足・ストレス等）を含め、「影響の可能性」だけの抽象1語は禁止。`;
+
+const MEANING_JSON_CONTEXT_RULES = `【context】「今どういう状態か」背景・継続のみ。原因・きっかけは書かない。禁止:スマホの使いすぎ／〜の影響／長時間使用／原因／の使用 など原因語。OK:目の疲れが続いている／睡眠が足りていない状態 など。空でなければ状態の文にする。単語だけ禁止。`;
+
+/** 2段階生成：Phase1 JSON → Phase2 箇条書き。main_symptom・validate 通過まで再生成。 */
 async function buildStateFactsBulletsTwoStage(state, opts = {}) {
   if (!state || !process.env.OPENAI_API_KEY) return null;
   const { category, raw } = collectRawInputsForMeaningJson(state);
-  const formatHint = MEANING_JSON_PROMPT_BY_CATEGORY[category] || MEANING_JSON_PROMPT_BY_CATEGORY.PAIN;
+  const catHint = MEANING_JSON_CATEGORY_HINT[category] || MEANING_JSON_CATEGORY_HINT.PAIN;
   for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
     try {
       const prompt = [
-        "ユーザーの症状に関する回答を、カテゴリに合わせた意味構造のJSONに変換してください。",
-        "厳守：",
-        "- 出力は必ずJSONのみ。ユーザー入力をそのまま使わず、必ず「意味」に変換する。",
-        "- テンプレ一致は一切前提にしない。自由記述も解釈する。",
-        "- 曖昧な場合は「不明」。原因は1つまで。医学的断定・病名NG。「可能性」で止める。",
-        "- ユーザーが言っていない症状を追加しない。",
+        "Phase1のみ：JSONのみ出力。箇条書き・解説文は禁止。",
+        "絶対禁止：ユーザー文のコピー、テンプレ直貼り、病名の推定、抽象的すぎる主訴（例:不調がある）、details に本文を書く（details は必ず []）。",
+        MEANING_JSON_UNIFIED_SCHEMA,
+        MEANING_JSON_CAUSE_RULES,
+        MEANING_JSON_CONTEXT_RULES,
+        catHint,
+        "【onset・trend】必ず短文（例:症状は数時間前から続いている／症状は回復方向に向かっている／不明）。「さっき」「数時間前」など単語のみ禁止。",
+        "【otherSymptoms】各要素は文にする（例:吐き気を伴っている）。名詞単体禁止。付随なしなら otherSymptoms:[] と noOtherSymptoms:true。",
+        "自由記述は 状態→時間→強さ→原因 の順で解釈し onset / context / cause に反映。PAIN は symptom・severity・type を先に決める。",
         "",
-        formatHint,
       ].join("\n");
       const completion = await openai.chat.completions.create({
         model: "gpt-4o-mini",
@@ -6626,19 +7031,21 @@ async function buildStateFactsBulletsTwoStage(state, opts = {}) {
           { role: "system", content: prompt },
           { role: "user", content: `主症状カテゴリ: ${category}\n\nユーザー回答:\n${raw}` },
         ],
-        temperature: 0.2 + attempt * 0.03,
-        max_tokens: 400,
+        temperature: 0.15 + attempt * 0.04,
+        max_tokens: 500,
       });
       const rawText = completion?.choices?.[0]?.message?.content || "";
       const parsed = parseJsonObjectFromText(rawText);
+      if (!parsed || typeof parsed !== "object") continue;
+      normalizeMeaningJsonAfterParse(parsed, category);
+      if (!validateMeaningJsonPhase1(parsed, category, raw)) continue;
       const bullets = formatBulletsFromMeaningJson(parsed, category);
-      if (bullets.length >= 2) {
-        const sanitized = sanitizeBulletPoints(bullets);
-        if (sanitized.length >= 2) {
-          state.stateAboutBulletsCache = sanitized;
-          return sanitized;
-        }
-      }
+      if (bullets.length < 2) continue;
+      const sanitized = sanitizeBulletPoints(bullets);
+      if (sanitized.length < 2) continue;
+      if (!validateStateAboutBulletsQuality(sanitized, raw, parsed, category)) continue;
+      state.stateAboutBulletsCache = sanitized;
+      return sanitized;
     } catch (_) {
       /* retry */
     }
@@ -6796,7 +7203,7 @@ function buildStateFactsBulletsLegacy(state, opts = {}) {
   // 追加事実（確認で得た情報）は絶対にテンプレ当てはめ・そのまま出力しない。
   // 2段階生成（buildStateFactsBulletsTwoStage）でしか取り込まない。legacy では追加しない。
 
-  const rawBullets = lines.slice(0, 8);
+  const rawBullets = lines.slice(0, 6);
   const bullets = sanitizeBulletPoints(rawBullets);
   if (bullets.length === 0) return [];
   if (opts?.forSummary) return bullets;
