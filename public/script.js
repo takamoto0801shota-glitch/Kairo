@@ -61,6 +61,12 @@ const appState = {
   location: null,
   redFlagDetected: false,
   hasUserSentMessageThisSession: false,
+  /** 初回バナー「体調の不安…」表示中〜初回ユーザー応答処理まで true。まとめ（カード・ブロック）を出さない */
+  introSummarySuppress: false,
+  /** フォロー文／フォロー質問を出した直後〜次の非フォロー応答まで true */
+  followUpSummarySuppress: false,
+  /** まとめカード表示の直後にフォロー文を出したあと〜フォロー終了まで true。まとめを絶対に再出さない */
+  postSummaryFollowUpSuppress: false,
 };
 
 function resetConversation() {
@@ -78,6 +84,9 @@ function resetConversation() {
   appState.painScore = null;
   appState.slots = {};
   appState.hasUserSentMessageThisSession = false;
+  appState.introSummarySuppress = false;
+  appState.followUpSummarySuppress = false;
+  appState.postSummaryFollowUpSuppress = false;
 }
 
 const INTRO_TEMPLATE_TEXTS = {
@@ -1011,7 +1020,13 @@ function addMessage(text, isUser = false, save = true, options = {}) {
     const decisionCompleted = isDecisionCompleted(text);
     
     // まとめは初回のみ：summaryGenerated済みの場合やフォロー専用応答では絶対にまとめを追加しない
-    const shouldAddSummary = decisionCompleted && !appState.summaryGenerated && !options.skipSummaryBlock;
+    const shouldAddSummary =
+      decisionCompleted &&
+      !appState.summaryGenerated &&
+      !options.skipSummaryBlock &&
+      !appState.introSummarySuppress &&
+      !appState.followUpSummarySuppress &&
+      !appState.postSummaryFollowUpSuppress;
     if (shouldAddSummary) {
       console.log("[DEBUG] isCollecting will be set false");
       isCollecting = false;
@@ -1244,6 +1259,15 @@ function renderSafeFallback() {
 }
 
 function renderSummary() {
+  // 初回バナー直後・フォロー文直後はまとめカードを出さない（ヒアリング／フォロー分岐のみ）
+  if (
+    appState.introSummarySuppress ||
+    appState.followUpSummarySuppress ||
+    appState.postSummaryFollowUpSuppress
+  ) {
+    hideSummaryCard();
+    return;
+  }
   // 最終防御: ユーザー送信前は判定UIを絶対に描画しない
   if (!appState.userHasSubmitted) {
     hideSummaryCard();
@@ -1273,7 +1297,11 @@ function renderSummary() {
 // Show initial message
 function showInitialMessage() {
   const initialMessage = `体調の不安、1分で安心に変えます`;
-  setTimeout(() => addMessage(initialMessage), QUESTION_DELAY_MS);
+  appState.introSummarySuppress = true;
+  setTimeout(
+    () => addMessage(initialMessage, false, true, { skipSummaryBlock: true }),
+    QUESTION_DELAY_MS
+  );
 }
 
 
@@ -1402,6 +1430,7 @@ async function handleUserInput() {
   input.value = "";
   clearSectionTimers();
 
+  const wasFirstUserTurn = appState.conversationStep === 0;
     try {
       // 質問フェーズは従来どおり通常APIで即時応答
       const data = await callOpenAI(userText, resetSession);
@@ -1415,13 +1444,31 @@ async function handleUserInput() {
         : aiResponse.message;
 
       const triageState = aiResponse.triage_state || { is_final: false, triage_level: null, required_fields_filled: 0 };
-      const isFirstResponse = appState.conversationStep === 0;
+      const isFirstResponse = wasFirstUserTurn;
+      const sections = Array.isArray(aiResponse.sections) ? aiResponse.sections.filter(Boolean) : [];
+      const shouldShowSections = !isFirstResponse && triageState.is_final && sections.length > 0;
+
+      if (aiResponse.isFollowUpOnlyResponse) {
+        appState.followUpSummarySuppress = true;
+        appState.postSummaryFollowUpSuppress = true;
+      } else {
+        appState.followUpSummarySuppress = false;
+        if (!shouldShowSections) {
+          appState.postSummaryFollowUpSuppress = false;
+        }
+      }
+
+      const suppressInlineSummary =
+        wasFirstUserTurn ||
+        !!aiResponse.isFollowUpOnlyResponse ||
+        appState.followUpSummarySuppress ||
+        appState.postSummaryFollowUpSuppress;
+
       if (isFirstResponse) {
         hideSummaryCard();
         appState.riskLevel = null;
         appState.conversationStep = 1;
       }
-      const sections = Array.isArray(aiResponse.sections) ? aiResponse.sections.filter(Boolean) : [];
       if (!triageState.is_final) {
         hideSummaryCard();
         appState.riskLevel = null;
@@ -1431,8 +1478,16 @@ async function handleUserInput() {
         // サマリーカードは SUMMARY_CARD_TEMPLATES のテンプレのみ使用。judgeMeta.summaryLine は絶対に使わない。
       }
 
-      const shouldShowSections = !isFirstResponse && triageState.is_final && sections.length > 0;
-      if (triageState.is_final && !isFirstResponse && !aiResponse.isPreSummaryConfirmation) appState.summaryGenerated = true;
+      if (
+        triageState.is_final &&
+        !isFirstResponse &&
+        !aiResponse.isPreSummaryConfirmation &&
+        !appState.introSummarySuppress &&
+        !appState.followUpSummarySuppress &&
+        !appState.postSummaryFollowUpSuppress
+      ) {
+        appState.summaryGenerated = true;
+      }
 
       if (shouldShowSections) {
         const firstDelay = QUESTION_DELAY_MS + 600;
@@ -1441,13 +1496,26 @@ async function handleUserInput() {
         const followUpQuestion = aiResponse.followUpQuestion || DEFAULT_FOLLOW_UP_QUESTION;
 
         // フォロー文: APIがfollowUpQuestionを返している場合は必ず表示。サーバー側のshouldSendFollowUpQuestionで判定済み。
+        // まとめカード → その後にフォロー文（仕様）。フォロー後は postSummaryFollowUpSuppress でまとめ再出しを禁止。
         const onLastSectionRendered = () => {
+          const canShowSummaryCard =
+            !suppressInlineSummary &&
+            !appState.followUpSummarySuppress &&
+            !appState.postSummaryFollowUpSuppress;
+          let showedSummaryCard = false;
+          if (canShowSummaryCard) {
+            renderSummary();
+            showedSummaryCard = true;
+          }
           if (followUpMessage) addMessage(followUpMessage, false, true, { fromFollowUpTrigger: true });
           addMessage(followUpQuestion, false, true, { fromFollowUpTrigger: true });
+          if (showedSummaryCard) {
+            appState.postSummaryFollowUpSuppress = true;
+            appState.followUpSummarySuppress = true;
+          }
         };
 
         const timerId0 = setTimeout(() => {
-          renderSummary();
           if (sections[0]) {
             renderSection(sections[0]);
             if (sections.length === 1) {
@@ -1472,13 +1540,22 @@ async function handleUserInput() {
       } else {
         setTimeout(() => {
           // まとめ後のフォロー応答（sections空 or isFollowUpOnlyResponse）ではrenderSummaryを絶対に呼ばない
-          if (triageState.is_final && !isFirstResponse && !aiResponse.isPreSummaryConfirmation && sections.length > 0 && !aiResponse.isFollowUpOnlyResponse) {
+          if (
+            triageState.is_final &&
+            !isFirstResponse &&
+            !aiResponse.isPreSummaryConfirmation &&
+            sections.length > 0 &&
+            !aiResponse.isFollowUpOnlyResponse &&
+            !suppressInlineSummary &&
+            !appState.followUpSummarySuppress &&
+            !appState.postSummaryFollowUpSuppress
+          ) {
             renderSummary();
           }
           const msgToShow = stripFollowUpFromMessage(aiMessage);
           addMessage(msgToShow, false, true, {
             animateFromTop: !!aiResponse.isPreSummaryConfirmation,
-            skipSummaryBlock: !!aiResponse.isFollowUpOnlyResponse,
+            skipSummaryBlock: suppressInlineSummary,
           });
         }, QUESTION_DELAY_MS);
       }
@@ -1495,6 +1572,9 @@ async function handleUserInput() {
         // Show fallback message (no retry prompt)
         setTimeout(() => addMessage(errorMessage), QUESTION_DELAY_MS);
       } finally {
+    if (wasFirstUserTurn) {
+      appState.introSummarySuppress = false;
+    }
     // Re-enable input
     input.disabled = false;
     sendButton.disabled = false;

@@ -6751,6 +6751,124 @@ function formatBulletsFromMeaningJson(meaning, category = "PAIN") {
   return out;
 }
 
+/** 付随症状スロットの生の選択肢（表示専用ポリシー用）。判断ロジック・LLMには渡さない。 */
+function getAssociatedSelectionRaw(state) {
+  return String(
+    state?.slotAnswers?.associated_symptoms ?? getSlotStatusValue(state, "associated", "") ?? ""
+  ).trim();
+}
+
+/** PAIN・スロット4で「これ以外は特にない」を選んだ場合のみ true */
+function isPainCategorySlot4NoneSelected(state) {
+  if (!state) return false;
+  const cat = state.triageCategory || resolveQuestionCategoryFromState(state);
+  if (cat !== "PAIN") return false;
+  return getAssociatedSelectionRaw(state) === "これ以外は特にない";
+}
+
+/** GI・便や吐き気スロットで「特に変化はない」を選んだ場合のみ true */
+function isGiCategorySlot5NoneSelected(state) {
+  if (!state) return false;
+  const cat = state.triageCategory || resolveQuestionCategoryFromState(state);
+  if (cat !== "GI") return false;
+  return getAssociatedSelectionRaw(state) === "特に変化はない";
+}
+
+/** 他の症状なしの表示専用1行を付ける条件（JSON・validate・LLMと切り離す） */
+function isDisplayOnlyNoOtherSymptomsSlotCondition(state) {
+  return isPainCategorySlot4NoneSelected(state) || isGiCategorySlot5NoneSelected(state);
+}
+
+/**
+ * Phase1 JSON から noOtherSymptoms を落とす（この条件では表示は inject のみ）。
+ * MEANING_JSON に「なし」を載せない運用に合わせる。
+ */
+function applyDisplayOnlyNoOtherSymptomsSlotJsonPolicy(parsed, state) {
+  if (!parsed || typeof parsed !== "object" || !state) return;
+  if (!isDisplayOnlyNoOtherSymptomsSlotCondition(state)) return;
+  parsed.noOtherSymptoms = false;
+}
+
+/**
+ * 最終箇条書きにのみ「・他の症状は今のところ見られていない」を挿入（原因行の直前を優先）。
+ * 判断文・要約・LLMの参照対象に混ぜないため、validate 通過後にのみ呼ぶ。
+ */
+function injectDisplayOnlyNoOtherSymptomsBullet(bullets, state) {
+  if (!Array.isArray(bullets) || !state) return bullets;
+  if (!isDisplayOnlyNoOtherSymptomsSlotCondition(state)) return bullets.slice();
+  const line = "・他の症状は今のところ見られていない";
+  const norm = (b) => String(b).replace(/^・/, "").trim();
+  if (bullets.some((b) => norm(b) === "他の症状は今のところ見られていない")) return bullets.slice();
+  const out = bullets.slice();
+  let insertAt = -1;
+  for (let i = 0; i < out.length; i++) {
+    const s = norm(out[i]);
+    if (/可能性$|の可能性$/.test(s)) {
+      insertAt = i;
+      break;
+    }
+  }
+  if (insertAt >= 0) out.splice(insertAt, 0, line);
+  else out.push(line);
+  return out;
+}
+
+function normalizeBulletKeyForDedupe(s) {
+  return String(s || "")
+    .replace(/^・/, "")
+    .replace(/\s+/g, "")
+    .toLowerCase();
+}
+
+function bulletsAreSimilar(a, b) {
+  const na = normalizeBulletKeyForDedupe(a);
+  const nb = normalizeBulletKeyForDedupe(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  if (na.length >= 10 && nb.length >= 10 && (na.includes(nb) || nb.includes(na))) return true;
+  return false;
+}
+
+/** 確認文への返答でユーザーが付け足した自由文を箇条書き1行にする */
+function formatUserExtraFactAsStateBullet(text) {
+  let t = String(text || "").trim().replace(/\s+/g, " ");
+  if (!t) return null;
+  if (t.length > 220) t = `${t.slice(0, 217)}…`;
+  return /^・/.test(t) ? t : `・${t}`;
+}
+
+/**
+ * 確認後の追加情報（confirmationExtraFacts）を必ず stateAboutBulletsCache に反映する。
+ * TwoStage が失敗・部分取りこぼしでも聞き逃さない。
+ */
+function mergeConfirmationExtraFactsIntoStateBulletsCache(state) {
+  const facts = state?.confirmationExtraFacts || [];
+  if (facts.length === 0) return;
+  let base =
+    Array.isArray(state.stateAboutBulletsCache) && state.stateAboutBulletsCache.length > 0
+      ? state.stateAboutBulletsCache.slice()
+      : buildStateFactsBulletsLegacy(state, { forSummary: true });
+  if (!Array.isArray(base)) base = [];
+  const deduped = [];
+  const seenKeys = new Set();
+  for (const line of base) {
+    const k = normalizeBulletKeyForDedupe(line);
+    if (k) seenKeys.add(k);
+    deduped.push(line);
+  }
+  for (const raw of facts) {
+    const line = formatUserExtraFactAsStateBullet(raw);
+    if (!line) continue;
+    const k = normalizeBulletKeyForDedupe(line);
+    if (k && seenKeys.has(k)) continue;
+    if (deduped.some((b) => bulletsAreSimilar(b, line))) continue;
+    if (k) seenKeys.add(k);
+    deduped.push(line);
+  }
+  const sanitized = sanitizeBulletPoints(deduped);
+  state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(sanitized, state);
+}
+
 /** ユーザー回答にきっかけ・原因らしき記述があるか（cause 必須判定用） */
 function hasRawCauseHintForValidation(raw) {
   const t = String(raw || "");
@@ -6813,12 +6931,14 @@ function validateOtherSymptomsJsonEntries(arr) {
 const PAIN_SEVERITY_ENUM = new Set(["軽い", "中程度", "やや強い", "強い", "不明"]);
 const PAIN_TYPE_ENUM = new Set(["ズキズキ", "重い", "締め付け", "その他", "不明"]);
 
-/** Phase1 JSON が採用可能か */
-function validateMeaningJsonPhase1(parsed, category, raw) {
+/** Phase1 JSON が採用可能か（state は付随症状の表示専用ポリシー用・省略可） */
+function validateMeaningJsonPhase1(parsed, category, raw, state = null) {
   if (!parsed || typeof parsed !== "object") return false;
   const others = Array.isArray(parsed.otherSymptoms) ? parsed.otherSymptoms : [];
   const noOther = parsed.noOtherSymptoms === true;
-  if (others.length === 0 && !noOther) return false;
+  const slotAllowsEmptyOthersWithoutNoOtherFlag =
+    state && isDisplayOnlyNoOtherSymptomsSlotCondition(state);
+  if (others.length === 0 && !noOther && !slotAllowsEmptyOthersWithoutNoOtherFlag) return false;
   if (others.length > 0) {
     if (!validateOtherSymptomsJsonEntries(others)) return false;
   }
@@ -7022,7 +7142,9 @@ async function buildStateFactsBulletsTwoStage(state, opts = {}) {
         catHint,
         "【onset・trend】必ず短文（例:症状は数時間前から続いている／症状は回復方向に向かっている／不明）。「さっき」「数時間前」など単語のみ禁止。",
         "【otherSymptoms】各要素は文にする（例:吐き気を伴っている）。名詞単体禁止。付随なしなら otherSymptoms:[] と noOtherSymptoms:true。",
+        "例外（サーバが表示専用で1行付与するため、JSONに含めない）: 主症状カテゴリがPAINかつユーザーが付随スロットで「これ以外は特にない」を選んだ場合、またはGIかつ「特に変化はない」を選んだ場合は、otherSymptoms:[]・noOtherSymptoms:false（「他の症状は今のところ見られていない」はJSONに書かない）。",
         "自由記述は 状態→時間→強さ→原因 の順で解釈し onset / context / cause に反映。PAIN は symptom・severity・type を先に決める。",
+        "ユーザー回答に「追加情報:」で始まる行がある場合は、その内容を必ず otherSymptoms（文）または context に落とし、無視しない。",
         "",
       ].join("\n");
       const completion = await openai.chat.completions.create({
@@ -7038,14 +7160,16 @@ async function buildStateFactsBulletsTwoStage(state, opts = {}) {
       const parsed = parseJsonObjectFromText(rawText);
       if (!parsed || typeof parsed !== "object") continue;
       normalizeMeaningJsonAfterParse(parsed, category);
-      if (!validateMeaningJsonPhase1(parsed, category, raw)) continue;
+      applyDisplayOnlyNoOtherSymptomsSlotJsonPolicy(parsed, state);
+      if (!validateMeaningJsonPhase1(parsed, category, raw, state)) continue;
       const bullets = formatBulletsFromMeaningJson(parsed, category);
       if (bullets.length < 2) continue;
       const sanitized = sanitizeBulletPoints(bullets);
       if (sanitized.length < 2) continue;
       if (!validateStateAboutBulletsQuality(sanitized, raw, parsed, category)) continue;
-      state.stateAboutBulletsCache = sanitized;
-      return sanitized;
+      const finalWithInject = injectDisplayOnlyNoOtherSymptomsBullet(sanitized, state);
+      state.stateAboutBulletsCache = finalWithInject;
+      return finalWithInject;
     } catch (_) {
       /* retry */
     }
@@ -7171,7 +7295,9 @@ function buildStateFactsBulletsLegacy(state, opts = {}) {
   if (!state?.associatedSymptomsFromFirstMessage) {
     const associated = val("associated", answers.associated_symptoms);
     const aNorm = String(associated || "").trim();
-    if (/(特にない|特になし|これ以外は特にない|特にありません|ないです)/.test(aNorm)) {
+    if (isPainCategorySlot4NoneSelected(state) || isGiCategorySlot5NoneSelected(state)) {
+      // 「他の症状は今のところ見られていない」は inject で付与（判定・LLM参照と分離）
+    } else if (/(特にない|特になし|これ以外は特にない|特にありません|ないです)/.test(aNorm)) {
       pushIfValid("・吐き気や発熱などの他の症状は今のところ見られていない");
     } else if (associated && !isUnknownLike(associated)) {
       if (/吐き気|嘔吐/.test(aNorm)) pushIfValid("・吐き気を伴っている");
@@ -7204,7 +7330,8 @@ function buildStateFactsBulletsLegacy(state, opts = {}) {
   // 2段階生成（buildStateFactsBulletsTwoStage）でしか取り込まない。legacy では追加しない。
 
   const rawBullets = lines.slice(0, 6);
-  const bullets = sanitizeBulletPoints(rawBullets);
+  let bullets = sanitizeBulletPoints(rawBullets);
+  bullets = injectDisplayOnlyNoOtherSymptomsBullet(bullets, state);
   if (bullets.length === 0) return [];
   if (opts?.forSummary) return bullets;
   return ["今の情報から見ると、", "", ...bullets, "", "という状況です。"];
@@ -7350,27 +7477,27 @@ function pickSymptomInfoForJudgment(state, level) {
   return null;
 }
 
-/** 🟢①②: ランダムで使用（決断型：休む1つに絞る。「様子を見て」禁止） */
+/** 🟢①②: ランダムで使用（KAIRO_SPEC 🤝判断文・決断型） */
 const STATE_JUDGMENT_GREEN_1 = () =>
-  "今の情報では、危険なサインは見当たりません。\n急な症状だと不安になりますよね。\n\n今は一度休むだけで大丈夫です。\nこのまま落ち着いていれば、自然に楽になっていきます。";
+  "今の情報では危険なサインは見当たりません\n急な症状だと不安になりますよね\n\n今は一度休むだけで大丈夫です\nこのまま落ち着いていれば、自然に楽になっていきます";
 const STATE_JUDGMENT_GREEN_2 = () =>
-  "今の状態は、大きく心配しすぎなくても大丈夫です。\nこのような症状は多くの人にも見られます。\n\n今は無理に何かせず、少し休むだけで十分です。\n体が落ち着いてくると、自然と楽になっていきます。";
+  "今の状態では危険なサインは見当たりません\nこのような症状は多くの人にも見られます\n\n今は無理に何かせず、少し休むだけで十分です\n体が落ち着いてくると、自然と楽になっていきます";
 
 /** 🟢③: 経過が「さっき」のときのみ使用 */
 const STATE_JUDGMENT_GREEN_3 = () =>
-  "今の情報からは、深刻な状態は考えにくいです。\n急に症状が出ると不安になりますよね。\n\n今は体を休めることを優先すれば大丈夫です。\nこのまま無理をしなければ、ゆっくり回復に向かっていきます。";
+  "今の情報では危険なサインは見当たりません\n急に症状が出ると不安になりますよね\n\n今は体を休めることを優先すれば大丈夫です\nこのまま無理をしなければ、ゆっくり回復へ向かっていきます";
 
-/** 🟡①: ランダムで使用（決断型：不安を残さない） */
+/** 🟡①: ランダムで使用 */
 const STATE_JUDGMENT_YELLOW_1 = () =>
-  "今の情報では、危険なサインは見当たりません。\nつらい症状だと不安になりますよね。\n\n今は無理をせず、しっかり体を休めてください。\n体が落ち着いてくると、症状がやわらいでいきます。";
+  "今の情報では危険なサインは見当たりません\nつらい症状だと不安になりますよね\n\n今は無理をせずしっかり体を休めてください\n体が落ち着いてくると、症状がやわらいでいきます";
 
-/** 🟡②: ランダムで使用（フォールバック） */
+/** 🟡②: ランダムで使用 */
 const STATE_JUDGMENT_YELLOW_2 = () =>
   "今の状態は、落ち着いて対処できる範囲にあります。\n急な体調の変化は不安になりますよね。\n\n今は一度休んで体を整えることが大切です。\nそのまま過ごしていれば、自然に楽になっていきます。";
 
 /** 🟡③: 経過が「数時間前・一日以上前」のときのみ使用 */
 const STATE_JUDGMENT_YELLOW_DURATION_SPECIFIC = () =>
-  "今の情報からは、深刻な状態は考えにくいです。\n不安になる状況だと思います。\n\n今は体を休めることに集中してください。\n落ち着いて過ごすことで、回復の流れに入りやすくなります。";
+  "今の情報からは深刻な状態は考えにくいです\n不安になる状況だと思います\n\n今は体を休めることに集中してください\n落ち着いて過ごすことで、回復の流れに入りやすくなります";
 
 /** 経過が「数時間前・一日以上前」のとき true（🟡③テンプレ用） */
 function isDurationHoursOrDay(state) {
@@ -10547,8 +10674,10 @@ app.post("/api/chat", async (req, res) => {
       if (hasAddedInfo) {
         (conversationState[conversationId].confirmationExtraFacts =
           conversationState[conversationId].confirmationExtraFacts || []).push(msg);
+        conversationState[conversationId].stateAboutBulletsCache = null;
       }
       await buildStateFactsBulletsTwoStage(conversationState[conversationId]);
+      mergeConfirmationExtraFactsIntoStateBulletsCache(conversationState[conversationId]);
       let summaryMsg = "";
       let followUpQ = null;
       try {
