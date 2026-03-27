@@ -3134,10 +3134,6 @@ const RED_GP_JUDGMENT_SENTENCES = [
   "現在の症状からは、自己判断で様子を見るよりも、一度医療機関で確認しておく方が安心できそうです。",
 ];
 
-function buildHospitalConcernPoint(historyText) {
-  return RED_GP_JUDGMENT_SENTENCES[Math.floor(Math.random() * RED_GP_JUDGMENT_SENTENCES.length)];
-}
-
 function buildRedCushionLine(historyText) {
   return RED_GP_JUDGMENT_SENTENCES[Math.floor(Math.random() * RED_GP_JUDGMENT_SENTENCES.length)];
 }
@@ -3212,12 +3208,11 @@ function buildRedImmediateActionsBlock(state, historyText, research = null, refi
 
 function ensureHospitalMemoBlock(text, state, historyText = "") {
   if (!text) return text;
-  const judgment = buildHospitalConcernPoint(historyText);
   const memoLines = [
     "📝 今の状態について",
-    ...buildStateFactsBullets(state),
+    ...buildStateFactsBullets(state, { forSummary: true }),
     "",
-    judgment,
+    buildStateAboutConclusionLine("🔴"),
   ];
   const replacedOld = replaceSummaryBlock(
     normalizeHospitalMemoHeaderText(text),
@@ -3392,12 +3387,11 @@ function replaceStateAboutBlockOnly(summaryText, state, historyText = "") {
   if (!summaryText || !state) return summaryText;
   const hasRedStateBlock = summaryText.includes("📝 今の状態について") || summaryText.includes("📝 いまの状態を整理します");
   if (hasRedStateBlock) {
-    const judgment = buildHospitalConcernPoint(historyText);
     const memoLines = [
       "📝 今の状態について",
       ...buildStateFactsBullets(state, { forSummary: true }),
       "",
-      judgment,
+      buildStateAboutConclusionLine("🔴"),
     ].join("\n");
     let result = replaceSummaryBlock(normalizeHospitalMemoHeaderText(summaryText), "📝 いまの状態を整理します", memoLines);
     result = replaceSummaryBlock(result, "📝 今の状態について", memoLines);
@@ -3847,7 +3841,8 @@ function buildDoActionsFromPlan(plan, state, level, options = {}) {
     { skipSupplements }
   ).map((x) => ({ action: toConciseActionTitle(x.title), reason: ensureReliableReason(x.reason, evidence) }));
 
-  if (level === "🟡" && (category === "PAIN" || category === "INFECTION")) {
+  // PAIN/INFECTION+🟡の1件目固定（ベッドで休む）は本文の「✅ 今すぐやること」ブロックのみ。モーダル（forSummary:false）では入れない（KAIRO_SPEC 722-727 vs 1386-1388）
+  if (forSummary && level === "🟡" && (category === "PAIN" || category === "INFECTION")) {
     const fixed = { action: PAIN_INFECTION_YELLOW_FIRST_ACTION.title, reason: PAIN_INFECTION_YELLOW_FIRST_ACTION.reason };
     ensured = [fixed, ...ensured.filter((x) => x.action !== fixed.action)].slice(0, maxCount);
   }
@@ -7358,16 +7353,17 @@ function isRejectionOnlyAnswer(text) {
 }
 
 const PRE_SUMMARY_CONFIRMATION_PHRASES = [
-  "この整理で合っていますか？",
+  "この理解で合っていますか？",
+  "大きくずれていないかだけ確認させてください。",
+  "この内容で問題なさそうでしょうか？",
   "合っていますか？",
   "これでよろしいですか？",
-  "こちらの理解で合っていますか？",
-  "この内容で問題ないでしょうか？",
 ];
 
 const PRE_SUMMARY_ADD_MORE_PHRASES = [
+  "もし補足があれば教えてください。",
+  "抜けていることがあれば遠慮なく教えてください。",
   "もしまだ足りないことがあれば教えてください。",
-  "足りないことがあれば、なんでも教えてください。",
   "他に伝えたいことがあれば教えてください。",
 ];
 
@@ -7397,7 +7393,7 @@ function pickEmpathyForConfirmation(state) {
   return templates[Math.floor(Math.random() * templates.length)];
 }
 
-// まとめ前確認用の判断文（緊急度別テンプレ・ランダム。固定のみ。生成禁止）
+// まとめ前確認用の判断文（緊急度別テンプレ・ランダム。固定のみ。生成禁止。KAIRO_SPEC 8.0：1文のみ・弱い保険語禁止）
 function buildPreSummaryConfirmationJudgment(state, level) {
   const templates = {
     "🟢": [
@@ -7406,11 +7402,11 @@ function buildPreSummaryConfirmationJudgment(state, level) {
       "今の状態からは、急いで何かをしなければならない状況ではなさそうです。",
     ],
     "🟡": [
-      "大きく慌てる状況ではなさそうですが、念のため体調の変化には気をつけておきたい状態です。",
-      "今のところ深刻なサインは見えていませんが、無理をせず経過を見ていくことが大切そうです。",
+      "今のところ深刻なサインは見えていません。",
+      "現時点では落ち着いて様子を見られる状態にあります。",
     ],
     "🔴": [
-      "念のため早めに医療機関で確認しておいた方がよさそうです。落ち着いて行動すれば大丈夫です。",
+      "念のため早めに医療機関で確認しておいた方がよさそうです。",
       "安心のためにも今日中の受診を考えておきたい状態です。",
       "一度専門家に確認してもらう方が安心につながりそうです。",
     ],
@@ -7419,8 +7415,13 @@ function buildPreSummaryConfirmationJudgment(state, level) {
   return list[Math.floor(Math.random() * list.length)];
 }
 
+const PRE_SUMMARY_CONFIRMATION_MAX_BULLETS = 8;
+
 function buildPreSummaryConfirmationMessage(state) {
-  const bullets = buildStateFactsBullets(state);
+  const bulletLines = buildStateFactsBullets(state, { forSummary: true });
+  const bullets = Array.isArray(bulletLines)
+    ? bulletLines.slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS)
+    : [];
   const level = finalizeRiskLevel(state);
   const empathy = pickEmpathyForConfirmation(state);
   const judgmentLine = buildPreSummaryConfirmationJudgment(state, level);
@@ -7434,7 +7435,9 @@ function buildPreSummaryConfirmationMessage(state) {
     Math.floor(Math.random() * PRE_SUMMARY_ADD_MORE_PHRASES.length)
   ];
   const stateBlock =
-    bullets.length > 0 ? bullets : ["今の情報から見ると、", "", "という状況です。"];
+    bullets.length > 0
+      ? ["今のところ整理できているのは、", "", ...bullets]
+      : ["今のところ整理できているのは、"];
   const parts = [
     ...stateBlock,
     "",
@@ -7477,50 +7480,59 @@ function pickSymptomInfoForJudgment(state, level) {
   return null;
 }
 
-/** 🟢①②: ランダムで使用（KAIRO_SPEC 🤝判断文・決断型） */
-const STATE_JUDGMENT_GREEN_1 = () =>
-  "今の情報では危険なサインは見当たりません\n急な症状だと不安になりますよね\n\n今は一度休むだけで大丈夫です\nこのまま落ち着いていれば、自然に楽になっていきます";
-const STATE_JUDGMENT_GREEN_2 = () =>
-  "今の状態では危険なサインは見当たりません\nこのような症状は多くの人にも見られます\n\n今は無理に何かせず、少し休むだけで十分です\n体が落ち着いてくると、自然と楽になっていきます";
+// まとめ「🤝/📝 今の状態について」箇条書きの直後に付ける1行結論（KAIRO_SPEC 8.x）
+// この結論は「ユーザーの迷いを止めるため」に存在する
+// 説明ではなく「判断の確定」を提供する
+const GREEN_CONCLUSIONS = [
+  "今は落ち着いて様子を見て問題ない状態です",
+  "今の状態は無理せず過ごせば大丈夫な範囲です",
+  "今は安心して休むことを優先して問題ない状態です",
+];
 
-/** 🟢③: 経過が「さっき」のときのみ使用 */
-const STATE_JUDGMENT_GREEN_3 = () =>
-  "今の情報では危険なサインは見当たりません\n急に症状が出ると不安になりますよね\n\n今は体を休めることを優先すれば大丈夫です\nこのまま無理をしなければ、ゆっくり回復へ向かっていきます";
+const YELLOW_CONCLUSIONS = [
+  "今は無理をせず様子を見ていく状態です",
+  "今の状態は落ち着いて経過を見ていく段階です",
+  "今は体を休めながら変化を見ていく状態です",
+];
 
-/** 🟡①: ランダムで使用 */
-const STATE_JUDGMENT_YELLOW_1 = () =>
-  "今の情報では危険なサインは見当たりません\nつらい症状だと不安になりますよね\n\n今は無理をせずしっかり体を休めてください\n体が落ち着いてくると、症状がやわらいでいきます";
+const RED_CONCLUSIONS = [
+  "今は医療機関で確認しておく状態です",
+  "今の状態は一度専門家に見てもらう段階です",
+  "今は早めに受診しておく状態です",
+];
 
-/** 🟡②: ランダムで使用 */
-const STATE_JUDGMENT_YELLOW_2 = () =>
-  "今の状態は、落ち着いて対処できる範囲にあります。\n急な体調の変化は不安になりますよね。\n\n今は一度休んで体を整えることが大切です。\nそのまま過ごしていれば、自然に楽になっていきます。";
+function getRandomConclusion(level) {
+  const key =
+    level === "green" || level === "🟢"
+      ? "green"
+      : level === "yellow" || level === "🟡"
+        ? "yellow"
+        : level === "red" || level === "🔴"
+          ? "red"
+          : null;
+  if (key === "green") {
+    return GREEN_CONCLUSIONS[Math.floor(Math.random() * GREEN_CONCLUSIONS.length)];
+  }
+  if (key === "yellow") {
+    return YELLOW_CONCLUSIONS[Math.floor(Math.random() * YELLOW_CONCLUSIONS.length)];
+  }
+  if (key === "red") {
+    return RED_CONCLUSIONS[Math.floor(Math.random() * RED_CONCLUSIONS.length)];
+  }
+  return "";
+}
 
-/** 🟡③: 経過が「数時間前・一日以上前」のときのみ使用 */
-const STATE_JUDGMENT_YELLOW_DURATION_SPECIFIC = () =>
-  "今の情報からは深刻な状態は考えにくいです\n不安になる状況だと思います\n\n今は体を休めることに集中してください\n落ち着いて過ごすことで、回復の流れに入りやすくなります";
-
-/** 経過が「数時間前・一日以上前」のとき true（🟡③テンプレ用） */
-function isDurationHoursOrDay(state) {
-  const durationRaw = String(
-    getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "")
-  ).trim();
-  return /(数時間|一日|昨日|数日|ずっと|一日以上)/.test(durationRaw);
+/** 箇条書きの直後に付ける `→ 結論1行`（validate / sanitize 対象外） */
+function buildStateAboutConclusionLine(level) {
+  const c = getRandomConclusion(level);
+  return c ? `→ ${c}` : "";
 }
 
 function buildStateAboutLine(state, level) {
-  if (level === "🟢") {
-    const candidates = [STATE_JUDGMENT_GREEN_1, STATE_JUDGMENT_GREEN_2];
-    if (isDurationSasakiLike(state)) candidates.push(STATE_JUDGMENT_GREEN_3);
-    const template = candidates[Math.floor(Math.random() * candidates.length)];
-    return template();
+  if (level === "🟢" || level === "🟡" || level === "🔴") {
+    return buildStateAboutConclusionLine(level);
   }
-  if (level === "🟡") {
-    const candidates = [STATE_JUDGMENT_YELLOW_1, STATE_JUDGMENT_YELLOW_2];
-    if (isDurationHoursOrDay(state)) candidates.push(STATE_JUDGMENT_YELLOW_DURATION_SPECIFIC);
-    const template = candidates[Math.floor(Math.random() * candidates.length)];
-    return template();
-  }
-  return "なので、今は様子を見る判断で大丈夫です。";
+  return buildStateAboutConclusionLine("🟡");
 }
 
 function toBulletText(line) {
@@ -9632,11 +9644,8 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
 }
 
 function buildStateDecisionLine(state, level) {
-  // 🟢/🟡：判断文は buildStateAboutLine に含まれるため空
-  if (level === "🟢" || level === "🟡") {
-    return "";
-  }
-  return "なので、今は様子を見る判断で大丈夫です。";
+  // 結論は buildStateAboutConclusionLine（箇条書き直後の → 1行）に集約
+  return "";
 }
 
 function normalizeStateBlockForGreenYellow(text, state) {
@@ -9723,7 +9732,7 @@ async function buildLocalSummaryFallback(level, history, state) {
       "📝 今の状態について",
       buildStateFactsBullets(state, { forSummary: true }).join("\n"),
       "",
-      buildHospitalConcernPoint(historyText),
+      buildStateAboutConclusionLine("🔴"),
     ].join("\n");
     const redActionsBlock = buildRedImmediateActionsBlock(state, historyText);
     const redClosing = await generateLastBlockWithLLM("🔴", state, historyText);
