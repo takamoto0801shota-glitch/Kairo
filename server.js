@@ -841,6 +841,8 @@ function initConversationState(input = {}) {
     summaryShown: false,
     summaryGenerated: false,
     hasSummaryBlockGenerated: false,
+    /** まとめ本文をユーザーに返却した後のみ true。フォロー文・generateFollowResponse はこれが true のときだけ */
+    summaryDeliveredForFollowUp: false,
     phase: "HEARING",
     decisionType: null,
     decisionLevel: null,
@@ -1254,6 +1256,7 @@ function buildPostSummaryFollowUp(state, history) {
 
 function ensureFollowUpAppended(text, state, history) {
   if (!state?.followUpPending) return text;
+  if (!state?.summaryDeliveredForFollowUp) return text;
   const followUp = buildPostSummaryFollowUp(state, history);
   state.followUpPending = false;
   if (!text) return followUp;
@@ -3213,7 +3216,7 @@ function ensureHospitalMemoBlock(text, state, historyText = "") {
     "📝 今の状態について",
     ...buildStateFactsBullets(state, { forSummary: true }),
     "",
-    buildStateAboutConclusionLine("🔴"),
+    buildStateAboutEmpathyAndJudgment(state, "🔴"),
   ];
   const replacedOld = replaceSummaryBlock(
     normalizeHospitalMemoHeaderText(text),
@@ -3392,7 +3395,7 @@ function replaceStateAboutBlockOnly(summaryText, state, historyText = "") {
       "📝 今の状態について",
       ...buildStateFactsBullets(state, { forSummary: true }),
       "",
-      buildStateAboutConclusionLine("🔴"),
+      buildStateAboutEmpathyAndJudgment(state, "🔴"),
     ].join("\n");
     let result = replaceSummaryBlock(normalizeHospitalMemoHeaderText(summaryText), "📝 いまの状態を整理します", memoLines);
     result = replaceSummaryBlock(result, "📝 今の状態について", memoLines);
@@ -4858,43 +4861,6 @@ const RED_FOLLOW_UP_QUESTION =
 const B_MC_FOLLOW_UP_QUESTION =
   "休むためにMC（診断書）が必要な場合、オンライン診療という方法もあります。もしよければ、おすすめの診療先を紹介できますが、見てみますか？";
 
-/** 直近のassistant群にフォロー質問が含まれるか（8.2仕様）。まとめ・補足の後にフォローが来るため、直近4件までをチェック。 */
-function lastAssistantIsFollowUpQuestion(history) {
-  if (!Array.isArray(history) || history.length === 0) return false;
-  const assistants = history.filter((m) => m.role === "assistant");
-  const lastFour = assistants.slice(-4);
-  const hasFollowUp = (text) => {
-    const t = String(text || "");
-    return (
-      t.includes("このまま休みますか？") ||
-      t.includes("もう少し詳しく確認しますか？") ||
-      t.includes("今は少し休むだけでも良さそうです") ||
-      t.includes("診察までの間にできることを整理しますか？") ||
-      t.includes("英語でどう伝えるか一緒に考えますか？") ||
-      t.includes("伝え方を一緒に考えますか？") ||
-      t.includes("ここで整理しますか？") ||
-      t.includes("一緒に考えますか？") ||
-      t.includes("おすすめの診療先を紹介できますが、見てみますか？") ||
-      (t.includes("もしよろしければ、") && t.includes("見てみますか")) ||
-      (t.includes("もしよければ、") && t.includes("見てみますか")) ||
-      (t.includes("オンライン診療") && t.includes("MC（診断書）")) ||
-      (t.includes("念のため病院") && t.includes("確認")) ||
-      t.includes("MC（診断書）") ||
-      t.includes("また不安になったら、いつでもここで確認してください") ||
-      t.includes("大丈夫です、その判断でも問題ありません") ||
-      t.includes("念のため確認しますね") ||
-      t.includes("どれが難しそうですか？") ||
-      t.includes("いいですね、そのまま無理せず過ごしてください") ||
-      t.includes("一気に飲まなくて大丈夫です") ||
-      t.includes("無理に休もうとしなくて大丈夫です") ||
-      t.includes("診察までの間に、できることを簡単にまとめます") ||
-      t.includes("今は、病院に向かう準備を優先してください") ||
-      t.includes("どちらにしますか？「整理」か「英語」か")
-    );
-  };
-  return lastFour.some((m) => hasFollowUp(m?.content || ""));
-}
-
 /**
  * 会話履歴に「初回まとめ」またはそれに準ずる本文が既にあるか。
  * state が未同期・フォールバック体裁・英語ブロック混在でもまとめ後とみなす（入力内容に依存せずフォロー専用へ）。
@@ -4928,26 +4894,46 @@ function historyContainsSummaryBlock(history) {
 }
 
 /**
+ * まとめ本文をユーザーに返却したことの記録（フォロー許可の唯一の論理根拠に揃える）。
+ * 新規で summaryShown 等を立てるときはこの関数を使う（取りこぼし防止）。
+ */
+function markSummaryDeliveredAndFollowUpPhase(state) {
+  if (!state) return;
+  state.summaryShown = true;
+  state.summaryGenerated = true;
+  state.hasSummaryBlockGenerated = true;
+  state.summaryDeliveredForFollowUp = true;
+  state.phase = "FOLLOW_UP";
+}
+
+/**
  * サーバー再起動・状態欠落と履歴／クライアント報告を同期する。
  * summaryShown が false のまま履歴にまとめがある／クライアントが summaryShown を送っている場合に FOLLOW_UP へ揃える。
  */
 function reconcilePostSummaryStateIfNeeded(state, history, clientMeta, forceFreshSession) {
   if (!state || forceFreshSession) return;
   if (clientMeta?.summaryShown === true && !state.summaryShown) {
-    state.summaryShown = true;
-    state.summaryGenerated = true;
-    state.hasSummaryBlockGenerated = true;
-    state.phase = "FOLLOW_UP";
+    markSummaryDeliveredAndFollowUpPhase(state);
   }
-  if (historyContainsSummaryBlock(history) && !state.summaryShown) {
-    state.summaryShown = true;
-    state.summaryGenerated = true;
-    state.hasSummaryBlockGenerated = true;
-    state.phase = "FOLLOW_UP";
+  // まとめ前確認のみ表示中は、確認文がまとめ風にマッチしても「まとめ済み」にしない（確認応答でまとめを返すため）
+  const awaitingConfirmationReply =
+    (state.confirmationShown || state.confirmationPending) && !state.summaryShown;
+  if (historyContainsSummaryBlock(history) && !state.summaryShown && !awaitingConfirmationReply) {
+    markSummaryDeliveredAndFollowUpPhase(state);
+  }
+  if (historyContainsSummaryBlock(history) && state.summaryShown && !state.summaryDeliveredForFollowUp) {
+    state.summaryDeliveredForFollowUp = true;
+  }
+  // 旧 state（フラグ未導入セッション）: まとめ済みならフォロー許可を復元
+  if (state.summaryShown && state.hasSummaryBlockGenerated && !state.summaryDeliveredForFollowUp) {
+    state.summaryDeliveredForFollowUp = true;
   }
 }
 
-/** 【不変条件】まとめ表示後は絶対にまとめを再生成しない。この条件がtrueのときは必ずhandleFollowUpPhaseへ。 */
+/**
+ * 【不変条件】まとめ表示後は絶対にまとめを再生成しない。この条件がtrueのときは必ずhandleFollowUpPhaseへ。
+ * また summaryDeliveredForFollowUp が true のときだけフォロー専用にできる（質問フェーズへの混入防止）。
+ */
 function mustUseFollowUpPhase(state, history, clientMeta, userMessageCountBefore) {
   const isFirstUserMessage = userMessageCountBefore === 0;
   if (isFirstUserMessage) return false;
@@ -4958,6 +4944,8 @@ function mustUseFollowUpPhase(state, history, clientMeta, userMessageCountBefore
     !state?.summaryGenerated &&
     !state?.hasSummaryBlockGenerated;
   if (awaitingConfirmationReply) return false;
+  // まとめ本文を一度も返していない間はフォロー専用にしない（履歴・フラグの誤検知で質問フェーズにフォローが混入するのを防ぐ）
+  if (!state?.summaryDeliveredForFollowUp) return false;
   // 履歴にまとめ本文があれば（「休む」等のフォロー応答含む）必ずフォロー専用へ。state 欠落時の誤ルート防止。
   if (userMessageCountBefore >= 1 && historyContainsSummaryBlock(history || [])) {
     return true;
@@ -4969,12 +4957,7 @@ function mustUseFollowUpPhase(state, history, clientMeta, userMessageCountBefore
     state?.hasSummaryBlockGenerated
   );
   const clientReportedSummaryShown = clientMeta?.summaryShown === true;
-  const lastMsgIsFollowUp = lastAssistantIsFollowUpQuestion(history || []);
-  return (
-    serverSaysPostSummary ||
-    clientReportedSummaryShown ||
-    lastMsgIsFollowUp
-  );
+  return serverSaysPostSummary || clientReportedSummaryShown;
 }
 
 /** B_MC 肯定時の完全固定ブロック（LLM生成禁止） */
@@ -5149,6 +5132,33 @@ function buildFollowUpJudgeMeta(state) {
  * @param {{ skipUserPush?: boolean }} [options] — true のときは user を履歴に追加しない（既に /api/chat 本体で push 済みのとき）
  */
 function handleFollowUpPhase(res, conversationId, message, state, locationPromptMessage, locationRePromptMessage, options = {}) {
+  if (!state?.summaryDeliveredForFollowUp) {
+    console.error("[KAIRO] handleFollowUpPhase blocked: summaryDeliveredForFollowUp is false");
+    return res.status(200).json({
+      conversationId,
+      message: "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。",
+      response: "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね。",
+      judgeMeta: {
+        judgement: state?.decisionLevel || "🟢",
+        confidence: state?.confidence || 0,
+        ratio: state?.decisionRatio ?? null,
+        shouldJudge: false,
+        slotsFilledCount: state ? countFilledSlots(state.slotFilled, state) : 0,
+        decisionAllowed: false,
+        questionCount: state?.questionCount || 0,
+        summaryLine: null,
+        questionType: null,
+        rawScore: state?.lastPainScore ?? null,
+        painScoreRatio: state?.lastPainWeight ?? null,
+      },
+      triage_state: buildTriageState(false, state?.decisionLevel || null, state ? countFilledSlots(state.slotFilled, state) : 0),
+      questionPayload: null,
+      normalizedAnswer: state?.lastNormalizedAnswer || null,
+      locationPromptMessage,
+      locationRePromptMessage,
+      locationSnapshot: state?.locationSnapshot,
+    });
+  }
   if (!options.skipUserPush) {
     conversationHistory[conversationId].push({ role: "user", content: message });
   }
@@ -5211,6 +5221,7 @@ function handleFollowUpPhase(res, conversationId, message, state, locationPrompt
  * summaryGenerated/summaryShown のときのみ呼ぶ。まとめを再生成しない。
  */
 function generateFollowResponse(state, userInput, options = {}) {
+  if (!state?.summaryDeliveredForFollowUp) return null;
   if (!state?.hasSummaryBlockGenerated && !state?.summaryShown && !state?.summaryGenerated) return null;
   // 確認直後でまだまとめがサーバに無い場合のみブロック（まとめ済みなのに null にならないよう緩和）
   if (state.confirmationShown && !state.summaryShown && !state.hasSummaryBlockGenerated && !state.summaryGenerated) {
@@ -5664,8 +5675,11 @@ function extractDurationFromText(text) {
     return { raw_text: raw.trim(), normalized: "day_or_more", selectedIndex: 2 };
   }
   if (/\d+\s*日間(?:も)?(?:続い|経っ)/.test(normalized)) {
+    const mFull =
+      normalized.match(/\d+\s*日間\s*続いている/) ||
+      normalized.match(/\d+\s*日間\s*続いて/);
     const m = rawText.match(/\d+\s*日間/) || normalized.match(/\d+\s*日間/);
-    const raw = m ? m[0] : "数日";
+    const raw = mFull ? mFull[0].trim() : m ? m[0] : "数日";
     return { raw_text: raw, normalized: "day_or_more", selectedIndex: 2 };
   }
   if (/半日(?:も)?(?:続い|経っ)/.test(normalized)) {
@@ -7247,13 +7261,13 @@ function isContextContaminatedWithCause(ctx) {
   return false;
 }
 
-/** onset / trend が単語のみでないか（JSON 段階） */
+/** onset / trend が単語のみでないか（JSON 段階）。短い経過表現（4〜7文字）も許可 */
 function isOnsetTrendJsonValid(val, kind) {
   const v = String(val || "").trim();
   if (!v || v === "不明") return true;
-  if (/^症状は/.test(v) || /^発症時より/.test(v)) return v.length >= 8;
-  if (v.length < 8) return false;
   if (/^(さっき|数時間前|急に|今|昨日|一昨日|改善|悪化|回復)$/.test(v)) return false;
+  if (/^症状は/.test(v) || /^発症時より/.test(v)) return v.length >= 4;
+  if (v.length < 4) return false;
   return true;
 }
 
@@ -7279,6 +7293,44 @@ function isCausePhraseStillColloquiallyBad(cause) {
   if (/かも$/.test(c)) return true;
   if (/だと思う$/.test(c)) return true;
   return false;
+}
+
+/** 箇条書きに載せない「空・ない・わからない」等（付随の表示専用「ない」は別ルート） */
+function isAbsentOrUnknownSlotBulletAnswer(text) {
+  const t = String(text || "").trim();
+  if (!t) return true;
+  return /^(ない|なし|特にない|特になし|これ以外は特にない|わからない|分からない|不明|思い当たらない|特に思い当たらない)$/i.test(
+    t
+  );
+}
+
+function rawHasNonEmptyDurationLine(raw) {
+  const lines = String(raw || "").split("\n");
+  for (const line of lines) {
+    if (/^経過時間/.test(line)) {
+      const m = line.match(/:\s*(.+)$/);
+      if (m && String(m[1]).trim() && !isAbsentOrUnknownSlotBulletAnswer(m[1])) return true;
+    }
+  }
+  return false;
+}
+
+function rawHasNonEmptyWorseningTrendLine(raw) {
+  const lines = String(raw || "").split("\n");
+  for (const line of lines) {
+    if (/^悪化傾向/.test(line)) {
+      const m = line.match(/:\s*(.+)$/);
+      if (m && String(m[1]).trim() && !isAbsentOrUnknownSlotBulletAnswer(m[1])) return true;
+    }
+  }
+  return false;
+}
+
+/** 会話の自由記述に経過らしき表現があるか（Phase1 で onset 必須の補助判定） */
+function rawFreeStoryImpliesDuration(raw) {
+  const m = String(raw || "").match(/会話内自由記述[^:]*:\s*([^\n]+)/);
+  if (!m) return false;
+  return extractDurationFromText(m[1]) != null;
 }
 
 /** Phase1 JSON が採用可能か（state は付随症状の表示専用ポリシー用・省略可） */
@@ -7324,6 +7376,14 @@ function validateMeaningJsonPhase1(parsed, category, raw, state = null) {
   if (cause && isCauseAbstractOnly(cause)) return false;
   if (hasRawCauseHintForValidation(raw) && !cause) return false;
   if (cause && isCausePhraseStillColloquiallyBad(cause)) return false;
+  if (rawHasNonEmptyDurationLine(raw) || rawFreeStoryImpliesDuration(raw)) {
+    const onset = String(parsed.onset || "").trim();
+    if (!onset || onset === "不明") return false;
+  }
+  if (rawHasNonEmptyWorseningTrendLine(raw)) {
+    const trend = String(parsed.trend || "").trim();
+    if (!trend || trend === "不明") return false;
+  }
   return true;
 }
 
@@ -7493,7 +7553,17 @@ function validateOtherSymptomLinesAreSentences(bullets) {
     if (/可能性$|の可能性$/.test(s)) continue;
     if (/状態$|続いている|みられる|乱れている|伴っている|いる状態|ある状態/.test(s)) continue;
     if (/を伴っている|がみられる|がある|を感じている|が出て/.test(s)) continue;
-    if (s.length <= 5) return false;
+    if (s.length <= 5) {
+      if (
+        s.length >= 2 &&
+        /(悪化|改善|回復|横ばい|変わら|続い|発症|やや|強く|弱い|昨日|一昨日|今日|さっき|数時間|時間|分|週|日前|日間|続く)/.test(
+          s
+        )
+      ) {
+        continue;
+      }
+      return false;
+    }
   }
   return true;
 }
@@ -7556,6 +7626,14 @@ function buildPainStrengthBulletLine(state) {
   return null;
 }
 
+/** 会話履歴から historyTextForCare を同期。未設定のままだと自由記述の経過補完・Phase1 の「会話内自由記述」行が効かない（確認文直前の buildStateFactsBulletsTwoStage 等）。 */
+function syncHistoryTextForCareFromConversation(state) {
+  if (!state?.conversationId) return;
+  const hist = conversationHistory[state.conversationId];
+  if (!hist || !Array.isArray(hist)) return;
+  state.historyTextForCare = hist.filter((m) => m.role === "user").map((m) => m.content).join("\n");
+}
+
 /** Phase1 入力：ラベル付きでスロットの生回答を渡す（LLM が JSON に整形）。 */
 function collectRawInputsForMeaningJson(state) {
   const answers = state?.slotAnswers || {};
@@ -7572,14 +7650,224 @@ function collectRawInputsForMeaningJson(state) {
   }
   push("症状の様子・質", val("worsening", answers.worsening));
   push("経過時間", val("duration", answers.duration));
+  const durSlotOnly = String(val("duration", answers.duration) || "").trim();
+  if (isAbsentOrUnknownSlotBulletAnswer(durSlotOnly)) {
+    const storyProbe = String(state?.historyTextForCare || "").trim();
+    const exDur = storyProbe ? extractDurationFromText(storyProbe) : null;
+    if (exDur && exDur.raw_text) push("経過時間（自由記述から補完）", exDur.raw_text);
+  }
   if (isDurationNotJustNow(state)) push("悪化傾向", val("worsening_trend", answers.worsening_trend));
   push("影響・見た目・体温など", val("impact", answers.daily_impact));
   if (!state?.associatedSymptomsFromFirstMessage) push("付随症状など", val("associated", answers.associated_symptoms));
   push("きっかけ・原因", state?.causeDetailText || val("cause_category", answers.cause_category));
+  const storyCtx = String(state?.historyTextForCare || "").trim();
+  if (storyCtx) {
+    const clipped =
+      storyCtx.length > 1500 ? `${storyCtx.slice(0, 1500)}…` : storyCtx;
+    lines.push(`会話内自由記述（スロット質問前の一文も含む）: ${clipped}`);
+  }
   (state?.confirmationExtraFacts || []).filter(Boolean).forEach((f) => {
     if (!isConfirmationOnlyAnswer(f) && !isRejectionOnlyAnswer(f)) lines.push(`追加情報: ${String(f).trim()}`);
   });
   return { category, raw: lines.join("\n") || "ユーザーの回答がまだありません" };
+}
+
+/**
+ * 確認文表示（または確認応答後のまとめ）の直前に、ユーザー発言が state に拾えているか同期・再抽出・検証する。
+ * - historyTextForCare を会話のユーザー発言の結合に一致させる
+ * - 各ターン＋結合全文で applySpontaneousSlotFill を再実行（取りこぼし補完）
+ * - ensureSlotFilledConsistency
+ * - 履歴と raw 入力の簡易検証（不整合時はログ）
+ */
+function ensureUserUtterancesCapturedBeforeConfirmation(conversationId, state) {
+  if (!state || !conversationId) return { ok: false, reason: "missing_state" };
+  const hist = conversationHistory[conversationId];
+  if (!hist || !Array.isArray(hist)) return { ok: false, reason: "missing_history" };
+  const userMsgs = hist.filter((m) => m.role === "user").map((m) => String(m.content ?? ""));
+  const joined = userMsgs.join("\n");
+  const prevHtc = state.historyTextForCare;
+  state.historyTextForCare = joined;
+  const htcChanged = prevHtc !== joined;
+  let spontaneousAdds = 0;
+  let firstNonEmptyUser = true;
+  for (const msg of userMsgs) {
+    if (!String(msg).trim()) continue;
+    spontaneousAdds += applySpontaneousSlotFill(state, msg, { isFirstMessage: firstNonEmptyUser });
+    firstNonEmptyUser = false;
+  }
+  if (joined.trim()) {
+    spontaneousAdds += applySpontaneousSlotFill(state, joined, { isFirstMessage: false });
+  }
+  ensureSlotFilledConsistency(state);
+  if (htcChanged || spontaneousAdds > 0) {
+    state.stateAboutBulletsCache = null;
+  }
+  const missing = [];
+  for (let i = 0; i < userMsgs.length; i++) {
+    const t = userMsgs[i].trim();
+    if (t.length < 2) continue;
+    if (!joined.includes(t)) missing.push(i);
+  }
+  if (missing.length > 0) {
+    console.error("[KAIRO] ensureUserUtterancesCapturedBeforeConfirmation: user turn not contained in joined history", {
+      conversationId,
+      missingIndices: missing,
+    });
+  }
+  const rawProbe = collectRawInputsForMeaningJson(state).raw;
+  if (!rawProbe || rawProbe === "ユーザーの回答がまだありません") {
+    console.warn("[KAIRO] ensureUserUtterancesCapturedBeforeConfirmation: Phase1 raw empty after sync", {
+      conversationId,
+      userTurnCount: userMsgs.length,
+    });
+  }
+  return { ok: missing.length === 0, spontaneousAdds, joinedLength: joined.length, userTurnCount: userMsgs.length };
+}
+
+/** 確認文・まとめ用：箇条書きへ載せる対象のユーザー発言（肯定のみ・短すぎる確認は除外） */
+function collectUserUtterancesForBulletCoverage(state) {
+  if (!state?.conversationId) return [];
+  const hist = conversationHistory[state.conversationId];
+  if (!hist || !Array.isArray(hist)) return [];
+  const out = [];
+  for (const m of hist) {
+    if (m.role !== "user") continue;
+    const t = String(m.content ?? "").trim();
+    if (!t) continue;
+    if (isConfirmationOnlyAnswer(t)) continue;
+    if (isRejectionOnlyAnswer(t)) continue;
+    out.push(t);
+  }
+  return out;
+}
+
+/** LLM: 箇条書きにまだ載っていないユーザー事実のみ。失敗時は null（呼び出し側でヒューリスティックへ）。 */
+async function fetchMissingUserFactsForBulletsViaLlm(bulletText, userUtterances) {
+  if (!userUtterances.length) return [];
+  try {
+    const clipped = userUtterances.map((u) => (u.length > 2000 ? `${u.slice(0, 1997)}…` : u));
+    const prompt = [
+      "あなたは会話の照合のみを行う。出力はJSONのみ。",
+      "【箇条書き（現在のまとめ）】",
+      String(bulletText || "").slice(0, 8000),
+      "",
+      "【ユーザーが会話で述べた発言（複数ターン）】",
+      clipped.join("\n---\n").slice(0, 12000),
+      "",
+      "タスク:",
+      "1) ユーザーが述べた具体的な事実（症状・経過・程度・時期・日常生活への影響・きっかけ・付随・服薬・既往の言及など）のうち、上記箇条書きに**まだ反映されていない**ものだけを列挙する。",
+      "2) 同じ内容の言い換え・要約は「反映済み」とみなす。",
+      "3) 主訴の核心が既に箇条書きにある場合、主訴を別行で繰り返さない（経過・付随などユーザーが別に述べた事実が欠けていれば追加）。",
+      "4) 痛みスコア（例: 5/10）が箇条書きにあれば再掲しない。",
+      "5) ユーザーが述べていない推測・病名の断定は禁止。",
+      '6) 出力形式: {"missing":["短文1行目","短文2行目"]} 。各要素は「・」なし。書き言葉の短文。最大6件。不要なら{"missing":[]}。',
+    ].join("\n");
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.1,
+      max_tokens: 450,
+    });
+    const text = completion?.choices?.[0]?.message?.content || "";
+    const parsed = parseJsonObjectFromText(text);
+    if (!parsed || !Array.isArray(parsed.missing)) return null;
+    return parsed.missing
+      .filter((s) => typeof s === "string" && String(s).trim())
+      .map((s) => String(s).trim())
+      .slice(0, 6);
+  } catch (_) {
+    return null;
+  }
+}
+
+/** LLM 失敗時：ユーザー文を句切りし、箇条書きに無い断片だけ追補候補にする。 */
+function heuristicSupplementBulletsFromUserUtterances(bullets, userLines) {
+  const out = [];
+  const base = Array.isArray(bullets) ? bullets.slice() : [];
+  for (const u of userLines) {
+    const segs = String(u)
+      .split(/[。！？\n]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const rawSeg of segs) {
+      const seg = rawSeg.replace(/[、,]+/g, " ").replace(/\s+/g, " ").trim();
+      if (seg.length < 10) continue;
+      if (/^(はい|うん|ええ|OK|ok|オッケー|おっけー)/i.test(seg)) continue;
+      if (isConfirmationOnlyAnswer(seg)) continue;
+      if (bulletLinesCoverSlotText(base, seg)) continue;
+      if (out.some((o) => bulletLinesCoverSlotText([`・${o}`], seg))) continue;
+      const polished = polishUserSlotForBulletLine(seg);
+      if (!polished || polished.length < 8) continue;
+      out.push(polished);
+      base.push(`・${polished}`);
+      if (out.length >= 5) return out;
+    }
+  }
+  return out;
+}
+
+/** 追補行を箇条書きキャッシュへマージ（重複・同趣旨は弾く）。 */
+function mergeMissingBulletLinesIntoStateAboutCache(state, base, missingLines) {
+  const deduped = sanitizeBulletPoints(Array.isArray(base) ? base.slice() : []);
+  const seenKeys = new Set();
+  for (const line of deduped) {
+    const k = normalizeBulletKeyForDedupe(line);
+    if (k) seenKeys.add(k);
+  }
+  let added = 0;
+  for (const raw of missingLines || []) {
+    const cleaned = String(raw || "").trim();
+    if (!cleaned) continue;
+    const line = /^・/.test(cleaned) ? cleaned : `・${polishUserSlotForBulletLine(cleaned)}`;
+    if (line.length <= 2) continue;
+    const k = normalizeBulletKeyForDedupe(line);
+    if (k && seenKeys.has(k)) continue;
+    if (deduped.some((b) => bulletsAreSimilar(b, line))) continue;
+    const core = line.replace(/^・\s*/, "");
+    if (bulletLinesCoverSlotText(deduped, core)) continue;
+    if (k) seenKeys.add(k);
+    deduped.push(line);
+    added++;
+  }
+  state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(deduped.slice(0, 12), state);
+  return added;
+}
+
+/**
+ * ユーザー発言が箇条書きに落ちているか照合し、抜けがあれば追記する。
+ * LLM で不足行を列挙し、API 失敗時のみヒューリスティック。
+ * 呼び出しは generateSummaryForConfirmation 内（まとめ生成の直前）。確認文本文の表示はブロックしない。
+ */
+async function supplementStateBulletsFromUncoveredUserUtterances(state) {
+  if (!state?.conversationId) return { added: 0 };
+  syncHistoryTextForCareFromConversation(state);
+  let base =
+    Array.isArray(state.stateAboutBulletsCache) && state.stateAboutBulletsCache.length > 0
+      ? state.stateAboutBulletsCache.slice()
+      : buildStateFactsBulletsLegacy(state, { forSummary: true });
+  if (!Array.isArray(base)) base = [];
+  const userLines = collectUserUtterancesForBulletCoverage(state);
+  if (userLines.length === 0) {
+    state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(sanitizeBulletPoints(base), state);
+    return { added: 0 };
+  }
+  const bulletPlain = base.map((b) => b.replace(/^・\s*/, "").trim()).join("\n");
+  let missing = null;
+  if (process.env.OPENAI_API_KEY) {
+    missing = await fetchMissingUserFactsForBulletsViaLlm(bulletPlain, userLines);
+  }
+  if (missing === null) {
+    missing = heuristicSupplementBulletsFromUserUtterances(base, userLines);
+  }
+  const added = mergeMissingBulletLinesIntoStateAboutCache(state, base, missing || []);
+  console.log("[KAIRO] supplementStateBulletsFromUncoveredUserUtterances", {
+    conversationId: state.conversationId,
+    userUtteranceCount: userLines.length,
+    baseBulletCount: base.length,
+    missingCandidates: (missing || []).length,
+    mergedAdded: added,
+  });
+  return { added, missingCount: (missing || []).length };
 }
 
 /** 痛み以外の行だけ（早期リトライ判定用）。 */
@@ -7592,9 +7880,68 @@ function collectRawSlotTextsForSimpleBullets(state) {
     .join("\n");
 }
 
+/** 箇条書き用：口語を軽く整える（意味は維持。大げさな言い換えはしない） */
+function polishUserSlotForBulletLine(raw) {
+  let t = String(raw || "").trim().replace(/です$|ます$/, "");
+  t = t.replace(/かも$|かな$/g, "").trim();
+  t = t.replace(/^ちょっと/, "やや");
+  t = t.replace(/^少し/, "やや");
+  t = polishMeaningJsonColloquialSentence(t);
+  return t.trim();
+}
+
+/** 箇条書きに既に同趣旨の文が入っているか（重複注入防止） */
+function bulletLinesCoverSlotText(bullets, raw) {
+  const core = String(raw || "")
+    .trim()
+    .replace(/です$|ます$|かも$|かな$/g, "")
+    .replace(/\s+/g, "");
+  if (core.length < 3) return false;
+  const joined = bullets.join(" ").replace(/\s+/g, "").replace(/・/g, "");
+  const probe = core.slice(0, Math.min(28, core.length));
+  return joined.includes(probe);
+}
+
+/** 経過：スロットが空なら会話の自由記述から抽出（初回「頭が痛くて、5日間続いている」等） */
+function getDurationTextForBullets(state) {
+  const answers = state?.slotAnswers || {};
+  const val = (statusKey, fallback = "") => getSlotStatusValue(state, statusKey, fallback);
+  const fromSlot = val("duration", answers.duration);
+  if (!isAbsentOrUnknownSlotBulletAnswer(fromSlot)) return fromSlot;
+  const story = String(state?.historyTextForCare || "").trim();
+  const ex = story ? extractDurationFromText(story) : null;
+  return ex && ex.raw_text ? ex.raw_text : "";
+}
+
+/**
+ * Phase1 が経過・悪化傾向を落とした場合の補完。スロットに実回答がある限り箇条書きに載せる。
+ */
+function injectMissingSlotBulletsFromState(bullets, state, category) {
+  if (!state || !Array.isArray(bullets)) return bullets;
+  const answers = state.slotAnswers || {};
+  const val = (statusKey, fallback = "") => getSlotStatusValue(state, statusKey, fallback);
+  const out = [...bullets];
+  const toInsert = [];
+  const duration = getDurationTextForBullets(state);
+  if (!isAbsentOrUnknownSlotBulletAnswer(duration) && !bulletLinesCoverSlotText(out, duration)) {
+    toInsert.push(`・${polishUserSlotForBulletLine(duration)}`);
+  }
+  if (isDurationNotJustNow(state)) {
+    const trend = val("worsening_trend", answers.worsening_trend);
+    if (!isAbsentOrUnknownSlotBulletAnswer(trend) && !bulletLinesCoverSlotText(out, trend)) {
+      toInsert.push(`・${polishUserSlotForBulletLine(trend)}`);
+    }
+  }
+  if (toInsert.length === 0) return out;
+  const insertAt = out.length >= 1 ? 1 : 0;
+  out.splice(insertAt, 0, ...toInsert);
+  return out.slice(0, 8);
+}
+
 /** 箇条書き：Phase1 は統一 JSON のみ。痛みの強さ1行はサーバ固定で先頭に付与。箇条書き本文は formatBulletsFromMeaningJson で整形。 */
 async function buildStateFactsBulletsTwoStage(state, opts = {}) {
   if (!state || !process.env.OPENAI_API_KEY) return null;
+  syncHistoryTextForCareFromConversation(state);
   const painLine = buildPainStrengthBulletLine(state);
   const rawOther = collectRawSlotTextsForSimpleBullets(state);
   if (!rawOther.trim()) {
@@ -7619,9 +7966,12 @@ async function buildStateFactsBulletsTwoStage(state, opts = {}) {
         MEANING_JSON_CONTEXT_RULES,
         catHint,
         "【onset・trend】単語のみ禁止。経過・変化の事実を変えないこと。表現の型は問わない。",
+        "【必須】ユーザー回答に「経過時間:」があり、空・ない・わからない以外であれば onset に必ず書く（JSON で空にしない）。「悪化傾向:」がある場合は trend に必ず書く。",
+        "悪化の表現は緊急度判定用に強い語を使わなくてよい。ユーザーが「ちょっと悪化しているかも」なら、書き言葉で「やや悪化している」「やや発症時より悪くなっている」など短くてよい（事実を変えないこと）。",
         "【otherSymptoms】各要素は完結した文。名詞単体禁止。付随なしなら otherSymptoms:[] と noOtherSymptoms:true。",
         "例外（サーバが表示専用で1行付与）: PAIN で付随「これ以外は特にない」、GI で「特に変化はない」は otherSymptoms:[]・noOtherSymptoms:false。",
         "自由記述は 状態→時間→強さ→原因 の順で解釈。PAIN は symptom・severity・type を先に決める。",
+        "同一文に主症状と経過が混ざる場合（例:頭が痛くて5日続いている）は main_symptom に主症状のみ、onset に経過のみ。format 後の箇条書きで主症状を二重にしない。",
         "「追加情報:」行は otherSymptoms または context に必ず反映。",
         "",
       ].join("\n");
@@ -7642,7 +7992,9 @@ async function buildStateFactsBulletsTwoStage(state, opts = {}) {
       if (!validateMeaningJsonPhase1(parsed, category, raw, state)) continue;
       const bullets = formatBulletsFromMeaningJson(parsed, category);
       if (bullets.length < 2) continue;
-      const sanitized = sanitizeBulletPoints(bullets);
+      let sanitized = sanitizeBulletPoints(bullets);
+      sanitized = injectMissingSlotBulletsFromState(sanitized, state, category);
+      sanitized = sanitizeBulletPoints(sanitized);
       if (sanitized.length < 2) continue;
       if (!validateStateAboutBulletsQuality(sanitized, raw, parsed, category)) continue;
       const combined = painLine ? [painLine, ...sanitized] : sanitized;
@@ -7860,19 +8212,26 @@ function buildPreSummaryConfirmationJudgment(state, level) {
   return list[Math.floor(Math.random() * list.length)];
 }
 
-const PRE_SUMMARY_CONFIRMATION_MAX_BULLETS = 8;
+/** まとめ「🤝/📝 今の状態について」箇条書き直後の共感＋接続語＋判断（固定テンプレのみ・LLM禁止。KAIRO_SPEC 8.x 入替後） */
+function buildStateAboutEmpathyAndJudgment(state, level) {
+  const empathy = pickEmpathyForConfirmation(state);
+  const judgmentLine = buildPreSummaryConfirmationJudgment(state, level);
+  const connector =
+    level === "🔴" ? "なので、" : level === "🟢" || level === "🟡" ? "ただ、" : "";
+  const judgmentWithConnector = connector ? `${connector}${judgmentLine}` : judgmentLine;
+  return [empathy, judgmentWithConnector].filter(Boolean).join("\n");
+}
 
+const PRE_SUMMARY_CONFIRMATION_MAX_BULLETS = 10;
+
+/** まとめ前確認文：①導入 ②箇条書き ③→結論1行 ④確認2行（共感・判断はまとめ側へ移動） */
 function buildPreSummaryConfirmationMessage(state) {
   const bulletLines = buildStateFactsBullets(state, { forSummary: true });
   const bullets = Array.isArray(bulletLines)
     ? bulletLines.slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS)
     : [];
   const level = finalizeRiskLevel(state);
-  const empathy = pickEmpathyForConfirmation(state);
-  const judgmentLine = buildPreSummaryConfirmationJudgment(state, level);
-  const connector =
-    level === "🔴" ? "なので、" : level === "🟢" || level === "🟡" ? "ただ、" : "";
-  const judgmentWithConnector = connector ? `${connector}${judgmentLine}` : judgmentLine;
+  const conclusionLine = buildStateAboutConclusionLine(level);
   const phrase = PRE_SUMMARY_CONFIRMATION_PHRASES[
     Math.floor(Math.random() * PRE_SUMMARY_CONFIRMATION_PHRASES.length)
   ];
@@ -7886,8 +8245,7 @@ function buildPreSummaryConfirmationMessage(state) {
   const parts = [
     ...stateBlock,
     "",
-    empathy,
-    judgmentWithConnector,
+    conclusionLine,
     "",
     phrase,
     addMore,
@@ -7925,9 +8283,7 @@ function pickSymptomInfoForJudgment(state, level) {
   return null;
 }
 
-// まとめ「🤝/📝 今の状態について」箇条書きの直後に付ける1行結論（KAIRO_SPEC 8.x）
-// この結論は「ユーザーの迷いを止めるため」に存在する
-// 説明ではなく「判断の確定」を提供する
+// まとめ前確認の「③ 結論1行（→）」および getRandomConclusion 用（KAIRO_SPEC 8.0 入替後）
 const GREEN_CONCLUSIONS = [
   "今は落ち着いて様子を見て問題ない状態です",
   "今の状態は無理せず過ごせば大丈夫な範囲です",
@@ -7967,17 +8323,19 @@ function getRandomConclusion(level) {
   return "";
 }
 
-/** 箇条書きの直後に付ける `→ 結論1行`（validate / sanitize 対象外） */
+/** まとめ前確認文：箇条書きの直後の `→ 結論1行`（validate / sanitize 対象外） */
 function buildStateAboutConclusionLine(level) {
   const c = getRandomConclusion(level);
   return c ? `→ ${c}` : "";
 }
 
+/** まとめ「🤝/📝 今の状態について」：箇条書き直後は共感＋判断（→結論は確認文側） */
 function buildStateAboutLine(state, level) {
-  if (level === "🟢" || level === "🟡" || level === "🔴") {
-    return buildStateAboutConclusionLine(level);
-  }
-  return buildStateAboutConclusionLine("🟡");
+  const lv =
+    level === "🟢" || level === "🟡" || level === "🔴"
+      ? level
+      : "🟡";
+  return buildStateAboutEmpathyAndJudgment(state, lv);
 }
 
 function toBulletText(line) {
@@ -10166,7 +10524,7 @@ async function buildImmediateActionHypothesisPlan(state, historyText = "", summa
 }
 
 function buildStateDecisionLine(state, level) {
-  // 結論は buildStateAboutConclusionLine（箇条書き直後の → 1行）に集約
+  // まとめ側の判断は buildStateAboutLine（共感＋判断）に集約
   return "";
 }
 
@@ -10254,7 +10612,7 @@ async function buildLocalSummaryFallback(level, history, state) {
       "📝 今の状態について",
       buildStateFactsBullets(state, { forSummary: true }).join("\n"),
       "",
-      buildStateAboutConclusionLine("🔴"),
+      buildStateAboutEmpathyAndJudgment(state, "🔴"),
     ].join("\n");
     const redActionsBlock = buildRedImmediateActionsBlock(state, historyText);
     const redClosing = await generateLastBlockWithLLM("🔴", state, historyText);
@@ -10775,6 +11133,9 @@ async function generateSummaryForConfirmation(conversationId) {
       followUpMessage: null,
     };
   }
+  ensureUserUtterancesCapturedBeforeConfirmation(conversationId, state);
+  // 照合・追補は確認文表示をブロックしないようここ（まとめ生成直前）で実行する
+  await supplementStateBulletsFromUncoveredUserUtterances(state);
   const level = finalizeRiskLevel(state);
   try {
   const historyTextForCare = history.filter((m) => m.role === "user").map((m) => m.content).join("\n");
@@ -10900,7 +11261,6 @@ async function generateSummaryForConfirmation(conversationId) {
     aiResponse = await ensureRedImmediateActionsBlock(aiResponse, state, historyTextForOtc, immediateActionPlan);
     aiResponse = ensureHospitalBlock(aiResponse, state, historyTextForOtc);
   }
-  state.summaryText = aiResponse;
   if (level === "🔴" && state.hospitalRecommendation?.name && (!aiResponse.includes(state.hospitalRecommendation.name) || !aiResponse.includes("タイプ：") || !aiResponse.includes("理由："))) {
     aiResponse = await buildLocalSummaryFallback(level, history, state);
   }
@@ -10925,10 +11285,8 @@ async function generateSummaryForConfirmation(conversationId) {
   aiResponse = stripMcForRed(aiResponse, level);
   aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
   const decisionType = level === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING";
-  state.summaryShown = true;
-  state.summaryGenerated = true;
-  state.hasSummaryBlockGenerated = true;
-  state.phase = "FOLLOW_UP";
+  // まとめ「返却済み」は確認応答で HTTP レスを返すときのみ立てる（markSummaryDeliveredAndFollowUpPhase）。
+  // ここで立てると summaryShown が先に true になり、確認応答分岐（!summaryShown）に入らずまとめが出ない。
   state.decisionType = decisionType;
   state.decisionLevel = level === "🔴" ? "🔴" : level === "🟡" ? "🟡" : "🟢";
   if (!state.judgmentSnapshot) {
@@ -10953,6 +11311,7 @@ async function generateSummaryForConfirmation(conversationId) {
   if (!aiResponse || !hasAllSummaryBlocks(aiResponse)) {
     aiResponse = await buildLocalSummaryFallback(level, history, state);
   }
+  state.summaryText = aiResponse;
   return { message: aiResponse || "", followUpQuestion, followUpMessage: null };
   } catch (err) {
     console.error("[generateSummaryForConfirmation Error]", err?.message || err);
@@ -11225,6 +11584,7 @@ app.post("/api/chat", async (req, res) => {
           conversationState[conversationId].confirmationExtraFacts || []).push(msg);
         conversationState[conversationId].stateAboutBulletsCache = null;
       }
+      ensureUserUtterancesCapturedBeforeConfirmation(conversationId, conversationState[conversationId]);
       await buildStateFactsBulletsTwoStage(conversationState[conversationId]);
       mergeConfirmationExtraFactsIntoStateBulletsCache(conversationState[conversationId]);
       let summaryMsg = "";
@@ -11313,10 +11673,7 @@ app.post("/api/chat", async (req, res) => {
         summaryMsg = `${finalRisk} ここまでの情報を整理します\n${buildSummaryIntroTemplate()}\n\n症状の変化には気をつけて、悪化したら再度ご相談ください。`;
       }
       conversationState[conversationId].summaryText = summaryMsg;
-      conversationState[conversationId].summaryShown = true;
-      conversationState[conversationId].summaryGenerated = true;
-      conversationState[conversationId].hasSummaryBlockGenerated = true;
-      conversationState[conversationId].phase = "FOLLOW_UP";
+      markSummaryDeliveredAndFollowUpPhase(conversationState[conversationId]);
       conversationHistory[conversationId].push({ role: "assistant", content: summaryMsg });
       const sections = extractSectionsBySpecs(summaryMsg, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text);
       const followUpForHistory = shouldSendFollowUpQuestion(sections)
@@ -11366,10 +11723,7 @@ app.post("/api/chat", async (req, res) => {
           fallbackSummary = `${level} ここまでの情報を整理します\n${buildSummaryIntroTemplate()}\n\n症状の変化には気をつけて、悪化したら再度ご相談ください。`;
         }
         conversationState[conversationId].summaryText = fallbackSummary;
-        conversationState[conversationId].summaryShown = true;
-        conversationState[conversationId].summaryGenerated = true;
-        conversationState[conversationId].hasSummaryBlockGenerated = true;
-        conversationState[conversationId].phase = "FOLLOW_UP";
+        markSummaryDeliveredAndFollowUpPhase(conversationState[conversationId]);
         const finalRisk = conversationState[conversationId].decisionLevel || level;
         const sections = extractSectionsBySpecs(fallbackSummary, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text);
         return res.json({
@@ -11392,10 +11746,12 @@ app.post("/api/chat", async (req, res) => {
     }
 
     // confirmationShown && !summaryShown の場合は確認待ち。フォローアップで閉じメッセージを返さない。
-    const followUpResult = generateFollowResponse(state, message, {
-      history: conversationHistory[conversationId] || [],
-    });
-    if (state.summaryShown && !followUpResult) {
+    const followUpResult = state.summaryDeliveredForFollowUp
+      ? generateFollowResponse(state, message, {
+          history: conversationHistory[conversationId] || [],
+        })
+      : null;
+    if (state.summaryShown && state.summaryDeliveredForFollowUp && !followUpResult) {
       // 仕様8.2通り：フォロー質問は固定テンプレ。🔴は質問①、🟢🟡は質問②を返す。
       const specFollowUp = getInitialFollowUpQuestionBySpec(state);
       const outMessage = specFollowUp || buildFollowClosingMessage();
@@ -11843,6 +12199,7 @@ app.post("/api/chat", async (req, res) => {
 
     // 6スロット完了時: 確認文を出すだけ。まとめは確認文と同時に生成開始。表示はユーザー応答時のみ。
     if (shouldJudgeNow && !conversationState[conversationId].confirmationShown && !conversationState[conversationId].summaryShown) {
+      ensureUserUtterancesCapturedBeforeConfirmation(conversationId, conversationState[conversationId]);
       await buildStateFactsBulletsTwoStage(conversationState[conversationId]);
       const confirmMsg = buildPreSummaryConfirmationMessage(
         conversationState[conversationId]
@@ -11918,17 +12275,15 @@ app.post("/api/chat", async (req, res) => {
     const histLate = conversationHistory[conversationId] || [];
     reconcilePostSummaryStateIfNeeded(stLate, histLate, clientMeta, false);
     if (
-      stLate.summaryShown ||
-      stLate.phase === "FOLLOW_UP" ||
-      stLate.summaryGenerated ||
-      stLate.hasSummaryBlockGenerated ||
-      historyContainsSummaryBlock(histLate)
+      stLate.summaryDeliveredForFollowUp &&
+      (stLate.summaryShown ||
+        stLate.phase === "FOLLOW_UP" ||
+        stLate.summaryGenerated ||
+        stLate.hasSummaryBlockGenerated ||
+        historyContainsSummaryBlock(histLate))
     ) {
       if (historyContainsSummaryBlock(histLate) && !stLate.summaryShown) {
-        stLate.summaryShown = true;
-        stLate.summaryGenerated = true;
-        stLate.hasSummaryBlockGenerated = true;
-        stLate.phase = "FOLLOW_UP";
+        markSummaryDeliveredAndFollowUpPhase(stLate);
       }
       if (
         stLate.summaryShown ||
@@ -11967,9 +12322,10 @@ app.post("/api/chat", async (req, res) => {
     if (shouldJudgeNow && !conversationState[conversationId].summaryShown) {
       const stGuard = conversationState[conversationId];
       if (
-        stGuard.phase === "FOLLOW_UP" ||
-        stGuard.summaryGenerated ||
-        stGuard.hasSummaryBlockGenerated
+        stGuard.summaryDeliveredForFollowUp &&
+        (stGuard.phase === "FOLLOW_UP" ||
+          stGuard.summaryGenerated ||
+          stGuard.hasSummaryBlockGenerated)
       ) {
         console.error("🚨 BLOCKED: LLM full-summary path while post-summary flags set (redirect to follow-up)");
         return handleFollowUpPhase(
@@ -12242,10 +12598,7 @@ app.post("/api/chat", async (req, res) => {
       aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
       const decisionType =
         level === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING";
-      conversationState[conversationId].summaryShown = true;
-      conversationState[conversationId].summaryGenerated = true;
-      conversationState[conversationId].hasSummaryBlockGenerated = true;
-      conversationState[conversationId].phase = "FOLLOW_UP";
+      markSummaryDeliveredAndFollowUpPhase(conversationState[conversationId]);
       conversationState[conversationId].decisionType = decisionType;
       conversationState[conversationId].decisionLevel =
         level === "🔴" ? "🔴" : level === "🟡" ? "🟡" : "🟢";
@@ -12602,10 +12955,7 @@ app.post("/api/chat", async (req, res) => {
       ).map((entry) => entry.text);
       if (state) {
         state.decisionLevel = level;
-        state.summaryShown = true;
-        state.summaryGenerated = true;
-        state.hasSummaryBlockGenerated = true;
-        state.phase = "FOLLOW_UP";
+        markSummaryDeliveredAndFollowUpPhase(state);
         state.summaryText = fallbackSummary;
         if (history.length > 0) history.push({ role: "assistant", content: fallbackSummary });
       }
