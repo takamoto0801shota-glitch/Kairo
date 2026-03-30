@@ -8,12 +8,38 @@ const HOSPITAL_DETAILS_URL = "/api/hospital-details";
 // Conversation history keys
 const HISTORY_KEY = "kairo_chat_history";
 const CONVERSATION_ID_KEY = "kairo_conversation_id";
+/** この conversationId でまとめを1回表示済み（リロード後も二重まとめを防ぐ） */
+const SUMMARY_DONE_CONV_KEY = "kairo_summary_done_for_conversation_id";
 const FIRST_QUESTION_KEY = "kairo_first_question";
+
+function isSummaryLockedForConversation() {
+  const cid = localStorage.getItem(CONVERSATION_ID_KEY);
+  const done = localStorage.getItem(SUMMARY_DONE_CONV_KEY);
+  return !!(cid && done === cid);
+}
+
+function isSummaryLocked() {
+  return appState.summaryGenerated || isSummaryLockedForConversation();
+}
+
+function persistSummaryDoneForConversation(conversationId) {
+  const id = conversationId || localStorage.getItem(CONVERSATION_ID_KEY);
+  if (!id) return;
+  localStorage.setItem(SUMMARY_DONE_CONV_KEY, id);
+}
+
+function restoreSummaryFlagsFromStorage() {
+  if (!isSummaryLockedForConversation()) return;
+  appState.summaryGenerated = true;
+  appState.followUpSummarySuppress = true;
+  appState.postSummaryFollowUpSuppress = true;
+}
 
 const SUBJECTIVE_ALERT_WORDS = ["気になります", "引っかかります", "心配です", "注意が必要です"];
 const FEATURE_SHOW_LOCATION_EXPLANATION = false;
 const QUESTION_DELAY_MS = 500;
-const DEFAULT_FOLLOW_UP_QUESTION = "今は少し休むだけでも良さそうです。\nこのまま休みますか？\nそれとも、もう少し詳しく確認しますか？";
+const DEFAULT_FOLLOW_UP_QUESTION =
+  "今は少し休むだけでも良さそうです。このまま休みますか？それとも、もう少し詳しく確認しますか？";
 
 /** フォロー文かどうか判定。未確認経路（履歴復元等）からのフォロー表示をブロックするため */
 function isFollowUpContent(text) {
@@ -34,6 +60,7 @@ function stripFollowUpFromMessage(text) {
   if (!text || typeof text !== "string") return text;
   let t = String(text).normalize("NFC").trim();
   const patterns = [
+    /\n\n今は少し休むだけでも良さそうです。\s*(?:このまま休みますか？\s*)?(?:それとも、もう少し詳しく確認しますか？)\s*$/,
     /\n\n今は少し休むだけでも良さそうです。\s*\nこのまま休みますか？\s*\nそれとも、もう少し詳しく確認しますか？\s*$/,
     /\n\n今の症状から見ると、念のため病院で[\s\S]*?一緒に考えますか？\s*$/,
     /\n\nもしよろしければ、[\s\S]*?一緒に考えましょうか？[\s\S]*$/,
@@ -336,7 +363,7 @@ function loadHistory() {
 
 // kairo 関連の全ストレージキー（リセット時に完全削除するため）
 const KAIRO_STORAGE_KEYS = {
-  localStorage: [HISTORY_KEY, CONVERSATION_ID_KEY, FIRST_QUESTION_KEY],
+  localStorage: [HISTORY_KEY, CONVERSATION_ID_KEY, SUMMARY_DONE_CONV_KEY, FIRST_QUESTION_KEY],
   sessionStorage: [
     "kairo_location",
     LOCATION_PROMPT_KEY,
@@ -344,6 +371,7 @@ const KAIRO_STORAGE_KEYS = {
     LOCATION_RETRY_KEY,
     "kairo_force_location_prompt",
     "kairo_just_cleared",
+    "kairo_intro_banner_displayed",
   ],
 };
 
@@ -1022,7 +1050,7 @@ function addMessage(text, isUser = false, save = true, options = {}) {
     // まとめは初回のみ：summaryGenerated済みの場合やフォロー専用応答では絶対にまとめを追加しない
     const shouldAddSummary =
       decisionCompleted &&
-      !appState.summaryGenerated &&
+      !isSummaryLocked() &&
       !options.skipSummaryBlock &&
       !appState.introSummarySuppress &&
       !appState.followUpSummarySuppress &&
@@ -1032,6 +1060,7 @@ function addMessage(text, isUser = false, save = true, options = {}) {
       isCollecting = false;
       console.log("[Kairo] decision completed, addSummaryBlock", { decisionCompleted });
       addSummaryBlock(messageDiv, text);
+      persistSummaryDoneForConversation(localStorage.getItem(CONVERSATION_ID_KEY));
     }
     
     // 履歴を保存
@@ -1297,6 +1326,9 @@ function renderSummary() {
 // Show initial message
 function showInitialMessage() {
   const initialMessage = `体調の不安、1分で安心に変えます`;
+  sessionStorage.setItem("kairo_intro_banner_displayed", "1");
+  // 再検索・リロード後も古い conv ID でサーバーに溜まった「まとめ済み」状態を引かないよう、初回バナー表示時点で ID を捨てる
+  localStorage.removeItem(CONVERSATION_ID_KEY);
   appState.introSummarySuppress = true;
   setTimeout(
     () => addMessage(initialMessage, false, true, { skipSummaryBlock: true }),
@@ -1338,6 +1370,8 @@ async function callOpenAI(message, resetSession = false) {
             locationPromptShown: sessionStorage.getItem(LOCATION_PROMPT_KEY) === "true",
             locationSnapshot: getLocationSnapshot(),
             summaryShown: appState.summaryGenerated,
+            /** 初回画面の1行目「体調の不安…」を出したセッション。true の間サーバーは初回送信で必ず状態リセットし、まとめへ飛ばさない */
+            hasIntroBannerMessage: sessionStorage.getItem("kairo_intro_banner_displayed") === "1",
           },
         }),
       });
@@ -1417,8 +1451,12 @@ async function handleUserInput() {
 
   if (!userText) return;
   appState.userHasSubmitted = true;
-  // 既存の会話IDがある場合はリセットしない（リフレッシュ後も確認応答→まとめが途切れないように）
-  const resetSession = !appState.hasUserSentMessageThisSession && !getConversationId();
+  // getConversationId() は未設定時に即生成するため、ここでは raw の localStorage のみ見る
+  const introBannerDisplayed = sessionStorage.getItem("kairo_intro_banner_displayed") === "1";
+  const hadStoredConversationId = !!localStorage.getItem(CONVERSATION_ID_KEY);
+  const resetSession =
+    (!appState.hasUserSentMessageThisSession && !hadStoredConversationId) ||
+    (introBannerDisplayed && !appState.hasUserSentMessageThisSession);
   appState.hasUserSentMessageThisSession = true;
 
   // Disable input
@@ -1452,9 +1490,14 @@ async function handleUserInput() {
         appState.followUpSummarySuppress = true;
         appState.postSummaryFollowUpSuppress = true;
       } else {
-        appState.followUpSummarySuppress = false;
+        // まとめ済み（永続フラグ含む）では suppress を戻さない。サーバーが isFollowUpOnly を付け忘れても二重まとめを防ぐ
+        if (!isSummaryLocked()) {
+          appState.followUpSummarySuppress = false;
+        }
         if (!shouldShowSections) {
-          appState.postSummaryFollowUpSuppress = false;
+          if (!isSummaryLocked()) {
+            appState.postSummaryFollowUpSuppress = false;
+          }
         }
       }
 
@@ -1487,6 +1530,7 @@ async function handleUserInput() {
         !appState.postSummaryFollowUpSuppress
       ) {
         appState.summaryGenerated = true;
+        persistSummaryDoneForConversation(aiResponse.conversationId);
       }
 
       if (shouldShowSections) {
@@ -1506,6 +1550,7 @@ async function handleUserInput() {
           if (canShowSummaryCard) {
             renderSummary();
             showedSummaryCard = true;
+            persistSummaryDoneForConversation(aiResponse.conversationId);
           }
           if (followUpMessage) addMessage(followUpMessage, false, true, { fromFollowUpTrigger: true });
           addMessage(followUpQuestion, false, true, { fromFollowUpTrigger: true });
@@ -1585,6 +1630,7 @@ async function handleUserInput() {
 // Initialize
 function init() {
   resetConversation();
+  restoreSummaryFlagsFromStorage();
   clearSectionTimers();
   appState.riskLevel = null;
   appState.userHasSubmitted = false;
