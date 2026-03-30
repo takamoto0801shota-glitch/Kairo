@@ -3210,13 +3210,13 @@ function buildRedImmediateActionsBlock(state, historyText, research = null, refi
   ].join("\n");
 }
 
-function ensureHospitalMemoBlock(text, state, historyText = "") {
+async function ensureHospitalMemoBlock(text, state, historyText = "") {
   if (!text) return text;
   const memoLines = [
     "📝 今の状態について",
     ...buildStateFactsBullets(state, { forSummary: true }),
     "",
-    buildStateAboutEmpathyAndJudgment(state, "🔴"),
+    await buildStateAboutEmpathyAndJudgmentAsync(state, "🔴"),
   ];
   const replacedOld = replaceSummaryBlock(
     normalizeHospitalMemoHeaderText(text),
@@ -3387,7 +3387,7 @@ function replaceSummaryBlock(text, header, block) {
 }
 
 /** 追加情報・違う等のとき、「今の状態について」ブロックのみ差し替え（他ブロックはそのまま） */
-function replaceStateAboutBlockOnly(summaryText, state, historyText = "") {
+async function replaceStateAboutBlockOnly(summaryText, state, historyText = "") {
   if (!summaryText || !state) return summaryText;
   const hasRedStateBlock = summaryText.includes("📝 今の状態について") || summaryText.includes("📝 いまの状態を整理します");
   if (hasRedStateBlock) {
@@ -3395,7 +3395,7 @@ function replaceStateAboutBlockOnly(summaryText, state, historyText = "") {
       "📝 今の状態について",
       ...buildStateFactsBullets(state, { forSummary: true }),
       "",
-      buildStateAboutEmpathyAndJudgment(state, "🔴"),
+      await buildStateAboutEmpathyAndJudgmentAsync(state, "🔴"),
     ].join("\n");
     let result = replaceSummaryBlock(normalizeHospitalMemoHeaderText(summaryText), "📝 いまの状態を整理します", memoLines);
     result = replaceSummaryBlock(result, "📝 今の状態について", memoLines);
@@ -5474,6 +5474,10 @@ const RISK_LEVELS = {
   HIGH: "HIGH",
 };
 
+/**
+ * selectedIndex とリスクの対応（集計・正規化で共通）。
+ * UI は options を上から順に表示するため、必ず index 0=最も軽い・低リスク、1=中、2=高。
+ */
 const SLOT_RISK_BY_INDEX = {
   worsening: [RISK_LEVELS.LOW, RISK_LEVELS.MEDIUM, RISK_LEVELS.HIGH],
   duration: [RISK_LEVELS.LOW, RISK_LEVELS.MEDIUM, RISK_LEVELS.HIGH],
@@ -6320,17 +6324,18 @@ function buildAssociatedSymptomsOptions(category) {
   return base.concat(["少し違和感がある", "強いだるさや発熱がある"]);
 }
 
+/** 痛み方・質（worsening）：上=軽めの印象・一般的、下=強い・注意が必要になりやすい、の順（SLOT_RISK_BY_INDEX と一致） */
 function buildPainQualityOptions(category) {
   if (category === "stomach") {
-    return ["キリキリする", "張る感じ", "締め付けられる感じ"];
+    return ["張る感じ", "締め付けられる感じ", "キリキリする"];
   }
   if (category === "head") {
-    return ["ズキズキする", "重い感じ", "締め付けられる感じ"];
+    return ["締め付けられる感じ", "重い感じ", "ズキズキする"];
   }
   if (category === "throat") {
     return ["ヒリヒリする", "ズキッとする", "しみる感じ"];
   }
-  return ["ズキズキする", "チクチクする", "重だるい感じ"];
+  return ["チクチクする", "ズキズキする", "重だるい感じ"];
 }
 
 /** 喉・のどが主症状かどうか（喉が痛い、のどの違和感など） */
@@ -6391,7 +6396,7 @@ function getCategoryQuestionOverride(category, slotKey) {
     if (slotKey === "daily_impact") {
       return {
         question: "見た目の変化はありますか？",
-        options: ["赤みや乾燥だけ", "見た目はほとんど変わらない", "水ぶくれ・ただれ・できもの"],
+        options: ["見た目はほとんど変わらない", "赤みや乾燥だけ", "水ぶくれ・ただれ・できもの"],
       };
     }
     if (slotKey === "associated_symptoms") {
@@ -6414,7 +6419,7 @@ function getCategoryQuestionOverride(category, slotKey) {
     if (slotKey === "cause_category") {
       return {
         question: "何かきっかけで思い当たることはありますか？",
-        options: ["思い当たらない", "周りが咳をしていた", "ストレスや疲労"],
+        options: ["思い当たらない", "ストレスや疲労", "周りが咳をしていた"],
       };
     }
   }
@@ -6831,7 +6836,12 @@ function formatRawBulletToType(text) {
   if (/(変わらない|横ばい|同じ)/.test(t)) return "・症状は大きく変化していない";
   if (/(吐き気|嘔吐)/.test(t)) return "・吐き気を伴っている";
   if (/(咳や発熱|咳.*発熱)/.test(t)) return "・咳や発熱の症状がある";
-  if (/(だる|発熱|熱)/.test(t)) return "・だるさや発熱の症状がある";
+  // 「熱」単独は「発熱」に含まれるためマッチさせない（「発熱がある」→だるさまで膨らむのを防ぐ）
+  const hasDaru = /(だるさ|だるい|だる)/.test(t);
+  const hasFever = /(発熱|熱がある|熱っぽい|熱が出|ねつがある|高熱|微熱|熱い|熱だけ)/.test(t);
+  if (hasDaru && hasFever) return "・だるさや発熱の症状がある";
+  if (hasDaru && !hasFever) return "・だるさの症状がある";
+  if (!hasDaru && hasFever) return "・発熱がある";
   if (/(ストレス|緊張)/.test(t)) return "・ストレスや緊張が影響している可能性";
   if (/(寝不足|疲れ|睡眠)/.test(t)) return "・寝不足や疲れの影響の可能性";
   if (/(スマホ|長時間|見た)/.test(t)) return "・スマホの長時間使用がきっかけの可能性";
@@ -7657,8 +7667,15 @@ function collectRawInputsForMeaningJson(state) {
     if (exDur && exDur.raw_text) push("経過時間（自由記述から補完）", exDur.raw_text);
   }
   if (isDurationNotJustNow(state)) push("悪化傾向", val("worsening_trend", answers.worsening_trend));
-  push("影響・見た目・体温など", val("impact", answers.daily_impact));
-  if (!state?.associatedSymptomsFromFirstMessage) push("付随症状など", val("associated", answers.associated_symptoms));
+  const rawImpact = val("impact", answers.daily_impact);
+  push(
+    "影響・見た目・体温など",
+    pickUserPreferredPhraseOverSlotLabel(state, rawImpact) || rawImpact
+  );
+  if (!state?.associatedSymptomsFromFirstMessage) {
+    const rawAssoc = val("associated", answers.associated_symptoms);
+    push("付随症状など", pickUserPreferredPhraseOverSlotLabel(state, rawAssoc) || rawAssoc);
+  }
   push("きっかけ・原因", state?.causeDetailText || val("cause_category", answers.cause_category));
   const storyCtx = String(state?.historyTextForCare || "").trim();
   if (storyCtx) {
@@ -7739,6 +7756,28 @@ function collectUserUtterancesForBulletCoverage(state) {
     out.push(t);
   }
   return out;
+}
+
+/**
+ * ユーザーが選択肢より後に述べた内容が、選択肢ラベルを「絞った」とみなせるときはその文を優先する。
+ * 例: 選択「だるさや発熱がある」→ 後から「発熱がある」のみ → 「発熱がある」を返す（だるさを残さない）。
+ */
+function pickUserPreferredPhraseOverSlotLabel(state, slotLabel) {
+  const s = String(slotLabel || "").trim();
+  if (!s || s.length < 4) return null;
+  const users = collectUserUtterancesForBulletCoverage(state);
+  for (let i = users.length - 1; i >= 0; i--) {
+    const u = String(users[i] || "").trim();
+    if (u.length < 3) continue;
+    if (u.length >= s.length) continue;
+    const compactS = s.replace(/\s+/g, "");
+    const compactU = u.replace(/\s+/g, "");
+    if (compactS.includes(compactU)) return u;
+    if (/だるさ|だるい/.test(s) && !/だる/.test(u) && /(発熱|熱がある|熱っぽい|熱が出|ねつ|高熱|微熱)/.test(u) && /(発熱|熱)/.test(s)) {
+      return u;
+    }
+  }
+  return null;
 }
 
 /** LLM: 箇条書きにまだ載っていないユーザー事実のみ。失敗時は null（呼び出し側でヒューリスティックへ）。 */
@@ -7958,6 +7997,7 @@ async function buildStateFactsBulletsTwoStage(state, opts = {}) {
         "Phase1のみ：JSONのみ出力。箇条書き・解説文は禁止。",
         "【文体・絶対】ユーザー発言のコピペ・丸写しは禁止。すべてのフィールドで、意味を変えずに読みやすい書き言葉の一文に整える（口語語尾のそのまま・曖昧語だけの列挙は禁止）。",
         "【バランス】無理な定型統一はしないが、「意味の通る綺麗な日本語」は必須。例 cause: ユーザー「運動をしすぎたからかも」→ cause は「運動のしすぎがきっかけの可能性」（NG: 運動をしすぎたからかもがきっかけの可能性）。",
+        "【ユーザー優先】選択肢の固定ラベル（例: だるさや発熱がある）をそのまま otherSymptoms に載せない。ユーザーが後から述べた具体語だけに絞った場合は、その内容のみを反映し、選んだ選択肢より広い語を足さない。",
         "主訴の組み立て（PAIN の symptom・severity・type→main_symptom）と cause の「〜の可能性」語尾ルールは従う。",
         "例: 「ズキズキする」→ type は「ズキズキ」、symptom は部位名とし、main_symptom は「やや強いズキズキする頭痛」のように組み立て可能な名詞句にする。",
         "絶対禁止：病名の推定、抽象的すぎる主訴（例:不調がある）、details に本文を書く（details は必ず []）。",
@@ -8074,7 +8114,9 @@ function buildStateFactsBulletsLegacy(state, opts = {}) {
   }
 
   // 4) 日常生活・体温など
-  const impact = val("impact", answers.daily_impact);
+  const impactSlot = val("impact", answers.daily_impact);
+  const impact =
+    pickUserPreferredPhraseOverSlotLabel(state, impactSlot) || impactSlot;
   if (impact && !isUnknownLike(impact) && !shouldHide(impact)) {
     const category = state?.triageCategory || "PAIN";
     const rawImpact = polishMeaningJsonColloquialSentence(
@@ -8099,7 +8141,8 @@ function buildStateFactsBulletsLegacy(state, opts = {}) {
 
   // 5) 付随症状
   if (!state?.associatedSymptomsFromFirstMessage) {
-    const associated = val("associated", answers.associated_symptoms);
+    const assocSlot = val("associated", answers.associated_symptoms);
+    const associated = pickUserPreferredPhraseOverSlotLabel(state, assocSlot) || assocSlot;
     const aNorm = String(associated || "").trim();
     if (isPainCategorySlot4NoneSelected(state) || isGiCategorySlot5NoneSelected(state)) {
       // 「吐き気や発熱などの他の症状は…」は inject で付与（判定・LLM参照と分離）
@@ -8202,36 +8245,237 @@ function buildPreSummaryConfirmationJudgment(state, level) {
   const templates = {
     "🟢": PRE_SUMMARY_GREEN_YELLOW_JUDGMENT_TEMPLATES,
     "🟡": PRE_SUMMARY_GREEN_YELLOW_JUDGMENT_TEMPLATES,
-    "🔴": [
-      "念のため早めに医療機関で確認しておいた方がよさそうです。",
-      "安心のためにも今日中の受診を考えておきたい状態です。",
-      "一度専門家に確認してもらう方が安心につながりそうです。",
-    ],
   };
   const list = templates[level] || templates["🟢"];
   return list[Math.floor(Math.random() * list.length)];
 }
 
-/** まとめ「🤝/📝 今の状態について」箇条書き直後の共感＋接続語＋判断（固定テンプレのみ・LLM禁止。KAIRO_SPEC 8.x 入替後） */
+/** 🔴「📝 今の状態について」：slotNormalized の HIGH のみを短語にし、＋でつなぐ（KAIRO_SPEC・LLM禁止） */
+function labelsFromAssociatedHighRaw(raw) {
+  const t = String(raw || "");
+  const out = [];
+  if (/(発熱|熱がある|熱っぽい|高温|ねつ|38|39|40)/.test(t)) out.push("発熱");
+  if (/(だるさ|だるい|倦怠|ぐったり)/.test(t)) out.push("だるさ");
+  if (/(吐き気|嘔吐|むかむか)/.test(t)) out.push("吐き気");
+  if (/(咳|せき)/.test(t)) out.push("咳");
+  if (/(息苦し|呼吸困難|胸が苦)/.test(t)) out.push("息苦しさ");
+  return out;
+}
+
+function compactMainSymptomNounForRed(state) {
+  const raw = String(state?.primarySymptom || "").trim();
+  if (raw) {
+    let s = raw.replace(/[。．\s]+$/g, "").trim();
+    s = s.replace(/がある$|が出ている$|です$|ます$/g, "").trim();
+    if (s.length > 14) s = s.slice(0, 14);
+    return s || "症状";
+  }
+  const firstLine = String(state?.historyTextForCare || "")
+    .split("\n")
+    .find((l) => String(l).trim()) || "";
+  return toMainSymptomLabelForSafety(firstLine);
+}
+
+function collectRedHighRiskCombinationLabels(state) {
+  const norm = state?.slotNormalized || {};
+  const labels = [];
+  const seen = new Set();
+  const main = compactMainSymptomNounForRed(state);
+  const isMainLabel = (t) => main && main !== "症状" && String(t || "").trim() === main;
+  const push = (s) => {
+    const t = String(s || "").trim();
+    if (!t || seen.has(t)) return;
+    if (isMainLabel(t)) return;
+    seen.add(t);
+    labels.push(t);
+  };
+
+  if (norm?.associated_symptoms?.riskLevel === RISK_LEVELS.HIGH) {
+    for (const x of labelsFromAssociatedHighRaw(state?.slotAnswers?.associated_symptoms || "")) push(x);
+  }
+
+  const dailyRaw = String(
+    state?.slotAnswers?.daily_impact || getSlotStatusValue(state, "impact", state?.slotAnswers?.daily_impact || "") || ""
+  );
+  if (norm?.daily_impact?.riskLevel === RISK_LEVELS.HIGH) {
+    if (/38|高熱|39|40/.test(dailyRaw)) push("発熱");
+    else if (/37|微熱/.test(dailyRaw)) push("微熱");
+    else if (/動けない|寝込|起き上がれない|強いつらさ/.test(dailyRaw)) push("つらさが強い");
+    else push("日常生活への影響が大きい");
+  }
+
+  if (norm?.pain_score?.riskLevel === RISK_LEVELS.HIGH) {
+    const m = String(main || "");
+    if (!/(痛|頭痛|腹痛|歯痛|腰痛|喉|のど)/.test(m)) push("強い痛み");
+  }
+  if (norm?.worsening_trend?.riskLevel === RISK_LEVELS.HIGH) push("悪化傾向");
+  if (norm?.duration?.riskLevel === RISK_LEVELS.HIGH) push("長く続いている");
+  if (norm?.worsening?.riskLevel === RISK_LEVELS.HIGH) push("痛み方が強い側");
+
+  if (labels.length < 2) {
+    const combinedText = [
+      state?.historyTextForCare || "",
+      state?.slotAnswers?.associated_symptoms || "",
+      dailyRaw,
+      (buildStateFactsBullets(state, { forSummary: true }) || []).join(" "),
+    ].join(" ");
+    try {
+      const feats = extractFeatures(combinedText);
+      for (const a of feats.associatedSymptoms || []) push(a);
+      if (labels.length < 2 && feats.bodyPart && feats.severityHint === "high") {
+        push(`${feats.bodyPart}の症状`);
+      }
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  if (labels.length < 2) {
+    push("つらさが強い");
+    if (labels.length < 2) push("複数のサイン");
+  }
+  return labels.slice(0, 8);
+}
+
+const RED_STATE_ABOUT_MEANING_TEMPLATES = [
+  "単なる疲れだけでなく、体の中で何かしらの反応が起きている可能性があります。",
+  "いくつかのサインが重なり、見過ごしにくい状態です。",
+  "複数の兆候が同時に出ているため、状況を整理しておくと安心です。",
+];
+
+const RED_STATE_ABOUT_ACTION_TEMPLATES = [
+  "一度医療機関で確認しておくと安心できる状態です。",
+  "受診を検討しておくと安心につながりやすい状態です。",
+  "早めに医療機関で確認しておくと安心しやすい状態です。",
+];
+
+/** 🔴「意味」1行：組み合わせに応じて LLM 生成。失敗時は RED_STATE_ABOUT_MEANING_TEMPLATES にフォールバック */
+async function generateRedStateAboutMeaningLineViaLlm(state, riskFactorLabels) {
+  const joined = (riskFactorLabels || []).filter(Boolean).join("＋");
+  const mainSymptom = String(compactMainSymptomNounForRed(state) || "症状").trim();
+  const pickFallback = () =>
+    RED_STATE_ABOUT_MEANING_TEMPLATES[Math.floor(Math.random() * RED_STATE_ABOUT_MEANING_TEMPLATES.length)];
+  if (!process.env.OPENAI_API_KEY || !joined) {
+    return pickFallback();
+  }
+  const systemPrompt = `あなたは医療判断を補助する説明生成AIです。
+
+以下の「症状の組み合わせ」から、
+ユーザーが納得できるように、1文で自然な説明を作ってください。
+
+【症状の組み合わせ】
+${joined}
+【主症状】
+${mainSymptom}
+ちゃんと主症状と合わせて場合に適する文にすること
+【ルール】
+・必ず1文（改行なし）
+・「〜可能性があります」で終わる
+・断定しない
+・専門用語を使いすぎない
+・ユーザーにわかりやすい自然な日本語
+・抽象表現（「状態」「出方」など）は使わない
+・「疲れ」「一時的」など軽くしすぎない
+・必ず「組み合わせとしての意味」を説明する（単体説明は禁止）
+
+【NG例】
+・体調が悪い状態です
+・様子を見る必要があります
+・単なる疲れの可能性があります
+
+【OK例】
+・体の中で炎症や感染などの反応が起きている可能性があります
+・複数の症状が重なって出ているため、体に負担がかかっている可能性があります
+
+説明や見出しは出さず、本文の1文のみを出力してください。`;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: "上記に従い、ルール通りの1文だけを出力してください。" },
+        ],
+        temperature: 0.35 + attempt * 0.08,
+        max_tokens: 220,
+      });
+      let text = (completion?.choices?.[0]?.message?.content || "").trim();
+      text = text.replace(/^[\s・\-*]+/g, "").replace(/\n+/g, "");
+      const seg = text.match(/[^。]+可能性があります/);
+      if (seg) {
+        return seg[0].trim();
+      }
+    } catch (_) {
+      /* fallback below */
+    }
+  }
+  return pickFallback();
+}
+
+/** 🔴専用：箇条書きの直後。意味行は同期フォールバック（APIキーなし・非async経路用） */
+function buildRedStateAboutEmpathyBlock(state) {
+  const parts = collectRedHighRiskCombinationLabels(state);
+  const comboLine = `「${parts.join("＋")}」が同時に出ている状態です。`;
+  const meaning =
+    RED_STATE_ABOUT_MEANING_TEMPLATES[Math.floor(Math.random() * RED_STATE_ABOUT_MEANING_TEMPLATES.length)];
+  const action =
+    RED_STATE_ABOUT_ACTION_TEMPLATES[Math.floor(Math.random() * RED_STATE_ABOUT_ACTION_TEMPLATES.length)];
+  return [
+    "これらの情報から、",
+    comboLine,
+    "",
+    meaning,
+    "",
+    "そのため、",
+    action,
+  ].join("\n");
+}
+
+/** 🔴専用：意味行を LLM で生成した版（まとめ生成の本線） */
+async function buildRedStateAboutEmpathyBlockAsync(state) {
+  const parts = collectRedHighRiskCombinationLabels(state);
+  const comboLine = `「${parts.join("＋")}」が同時に出ている状態です。`;
+  const meaning = await generateRedStateAboutMeaningLineViaLlm(state, parts);
+  const action =
+    RED_STATE_ABOUT_ACTION_TEMPLATES[Math.floor(Math.random() * RED_STATE_ABOUT_ACTION_TEMPLATES.length)];
+  return [
+    "これらの情報から、",
+    comboLine,
+    "",
+    meaning,
+    "",
+    "そのため、",
+    action,
+  ].join("\n");
+}
+
+/** まとめ「🤝/📝 今の状態について」箇条書き直後の共感＋接続語＋判断（🟢🟡は固定テンプレ・🔴の意味行は async 版を使用） */
 function buildStateAboutEmpathyAndJudgment(state, level) {
+  if (level === "🔴") {
+    return buildRedStateAboutEmpathyBlock(state);
+  }
   const empathy = pickEmpathyForConfirmation(state);
   const judgmentLine = buildPreSummaryConfirmationJudgment(state, level);
-  const connector =
-    level === "🔴" ? "なので、" : level === "🟢" || level === "🟡" ? "ただ、" : "";
+  const connector = level === "🟢" || level === "🟡" ? "ただ、" : "";
   const judgmentWithConnector = connector ? `${connector}${judgmentLine}` : judgmentLine;
   return [empathy, judgmentWithConnector].filter(Boolean).join("\n");
 }
 
+async function buildStateAboutEmpathyAndJudgmentAsync(state, level) {
+  if (level === "🔴") {
+    return buildRedStateAboutEmpathyBlockAsync(state);
+  }
+  return buildStateAboutEmpathyAndJudgment(state, level);
+}
+
 const PRE_SUMMARY_CONFIRMATION_MAX_BULLETS = 10;
 
-/** まとめ前確認文：①導入 ②箇条書き ③→結論1行 ④確認2行（共感・判断はまとめ側へ移動） */
+/** まとめ前確認文：①導入 ②箇条書き ③確認2行（共感・判断はまとめ側へ移動） */
 function buildPreSummaryConfirmationMessage(state) {
   const bulletLines = buildStateFactsBullets(state, { forSummary: true });
   const bullets = Array.isArray(bulletLines)
     ? bulletLines.slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS)
     : [];
-  const level = finalizeRiskLevel(state);
-  const conclusionLine = buildStateAboutConclusionLine(level);
   const phrase = PRE_SUMMARY_CONFIRMATION_PHRASES[
     Math.floor(Math.random() * PRE_SUMMARY_CONFIRMATION_PHRASES.length)
   ];
@@ -8242,14 +8486,7 @@ function buildPreSummaryConfirmationMessage(state) {
     bullets.length > 0
       ? ["今のところ整理できているのは、", "", ...bullets]
       : ["今のところ整理できているのは、"];
-  const parts = [
-    ...stateBlock,
-    "",
-    conclusionLine,
-    "",
-    phrase,
-    addMore,
-  ];
+  const parts = [...stateBlock, "", phrase, addMore];
   return parts.join("\n");
 }
 
@@ -8283,53 +8520,7 @@ function pickSymptomInfoForJudgment(state, level) {
   return null;
 }
 
-// まとめ前確認の「③ 結論1行（→）」および getRandomConclusion 用（KAIRO_SPEC 8.0 入替後）
-const GREEN_CONCLUSIONS = [
-  "今は落ち着いて様子を見て問題ない状態です",
-  "今の状態は無理せず過ごせば大丈夫な範囲です",
-  "今は安心して休むことを優先して問題ない状態です",
-];
-
-const YELLOW_CONCLUSIONS = [
-  "今は無理をせず様子を見ていく状態です",
-  "今の状態は落ち着いて経過を見ていく段階です",
-  "今は体を休めながら変化を見ていく状態です",
-];
-
-const RED_CONCLUSIONS = [
-  "今は医療機関で確認しておく状態です",
-  "今の状態は一度専門家に見てもらう段階です",
-  "今は早めに受診しておく状態です",
-];
-
-function getRandomConclusion(level) {
-  const key =
-    level === "green" || level === "🟢"
-      ? "green"
-      : level === "yellow" || level === "🟡"
-        ? "yellow"
-        : level === "red" || level === "🔴"
-          ? "red"
-          : null;
-  if (key === "green") {
-    return GREEN_CONCLUSIONS[Math.floor(Math.random() * GREEN_CONCLUSIONS.length)];
-  }
-  if (key === "yellow") {
-    return YELLOW_CONCLUSIONS[Math.floor(Math.random() * YELLOW_CONCLUSIONS.length)];
-  }
-  if (key === "red") {
-    return RED_CONCLUSIONS[Math.floor(Math.random() * RED_CONCLUSIONS.length)];
-  }
-  return "";
-}
-
-/** まとめ前確認文：箇条書きの直後の `→ 結論1行`（validate / sanitize 対象外） */
-function buildStateAboutConclusionLine(level) {
-  const c = getRandomConclusion(level);
-  return c ? `→ ${c}` : "";
-}
-
-/** まとめ「🤝/📝 今の状態について」：箇条書き直後は共感＋判断（→結論は確認文側） */
+/** まとめ「🤝/📝 今の状態について」：箇条書き直後は共感＋判断 */
 function buildStateAboutLine(state, level) {
   const lv =
     level === "🟢" || level === "🟡" || level === "🔴"
@@ -8933,6 +9124,142 @@ function dedupeModalCommonAndConditional(commonIn, conditionalIn) {
   return { common, conditional };
 }
 
+/** モーダル「🟢 よくある原因」に含めない。感染症系は「🟡 状況によっては確認が必要」へ移す（KAIRO_SPEC 🤝/📝） */
+function isInfectionRelatedModalCauseLine(line) {
+  const raw = String(line || "").trim();
+  if (!raw) return false;
+  const body = raw.replace(/^・\s*/, "");
+  const arrowIdx = body.indexOf(" → ");
+  const head = (arrowIdx >= 0 ? body.slice(0, arrowIdx) : body).trim().replace(/（[^）]*）/g, "");
+  const tail = arrowIdx >= 0 ? body.slice(arrowIdx + 3).trim() : "";
+  const text = `${head}\n${tail}`;
+  if (
+    /ウイルス感染|細菌感染|感染症|ウイルスや細菌|ウイルス性|ウイルスによる|細菌による|インフルエンザウイルス|RSウイルス|ヘルペスウイルス|感染により/.test(
+      text
+    )
+  ) {
+    return true;
+  }
+  const infectionNames = [
+    "感冒",
+    "インフルエンザ",
+    "急性咽頭炎",
+    "急性扁桃炎",
+    "急性胃腸炎",
+    "急性上気道炎",
+    "肺炎",
+    "尿路感染症",
+    "敗血症",
+    "伝染性単核球症",
+    "口唇ヘルペス",
+    "咽頭炎",
+    "扁桃炎",
+    "ウイルス性胃腸炎",
+    "副鼻腔炎",
+    "中耳炎",
+    "膀胱炎",
+    "腎盂腎炎",
+  ];
+  if (infectionNames.some((n) => head === n || head.startsWith(`${n}（`))) return true;
+  return false;
+}
+
+function moveInfectionCausesFromCommonToConditional(commonIn, conditionalIn) {
+  const common = Array.isArray(commonIn) ? commonIn.slice() : [];
+  let conditional = Array.isArray(conditionalIn) ? conditionalIn.slice() : [];
+  const toMove = common.filter(isInfectionRelatedModalCauseLine);
+  const stay = common.filter((x) => !isInfectionRelatedModalCauseLine(x));
+  const headKey = (line) => {
+    const s = String(line || "").replace(/^・\s*/, "").split(" → ")[0]?.trim() || "";
+    return s.toLowerCase().replace(/\s+/g, "");
+  };
+  const condHeads = new Set(conditional.map(headKey).filter(Boolean));
+  for (const line of toMove) {
+    const k = headKey(line);
+    if (k && condHeads.has(k)) continue;
+    if (k) condHeads.add(k);
+    conditional.unshift(line);
+  }
+  return { common: stay, conditional };
+}
+
+/** モーダル「🟢」補完用：感染症系を含まない代表ペア（getDiseaseFallbackPair が感染のみのとき） */
+function getModalCommonNonInfectionFallbackPair(mainSymptom) {
+  const fallbacks = {
+    頭痛: [
+      {
+        name: "緊張型頭痛",
+        desc: "筋肉の緊張やストレスが関係するとされる状態です。頭の周囲が締め付けられるような痛みが特徴です。",
+      },
+      {
+        name: "片頭痛",
+        desc: "血管の拡張や神経の過敏化が関与するとされる状態です。ズキズキとした痛みが片側に出ることが多いとされています。",
+      },
+    ],
+    腹痛: [
+      {
+        name: "過敏性腸症候群",
+        desc: "ストレスや生活習慣が関与するとされる状態です。腹痛と便通の変化が主な特徴とされています。",
+      },
+      {
+        name: "便秘",
+        desc: "腸の動きが遅くなるとされる状態です。腹部の張りや違和感を伴うことがあります。",
+      },
+    ],
+    唇の痛み: [
+      {
+        name: "口角炎",
+        desc: "口角の炎症や亀裂が生じるとされる状態です。乾燥やビタミン不足が関与することがあります。",
+      },
+      {
+        name: "乾燥性唇炎",
+        desc: "口唇の乾燥や刺激で炎症が生じるとされる状態です。",
+      },
+    ],
+    喉の痛み: [
+      {
+        name: "発声過多",
+        desc: "声の使い過ぎで喉の粘膜が刺激されるとされる状態です。",
+      },
+      {
+        name: "逆流性食道炎",
+        desc: "胃酸の逆流が関与するとされる状態です。のどの違和感や胸やけを伴うことがあります。",
+      },
+    ],
+    発熱: [
+      {
+        name: "脱水に伴う体温の変化",
+        desc: "水分不足で体調の波が出やすくなるとされることがあります。",
+      },
+      {
+        name: "疲労・睡眠不足",
+        desc: "休息不足が重なると、体調変化に影響しやすいとされています。",
+      },
+    ],
+    皮膚症状: [
+      {
+        name: "接触皮膚炎",
+        desc: "刺激物への接触により皮膚に炎症が生じるとされる状態です。赤みやかゆみが主な症状です。",
+      },
+      {
+        name: "乾燥性皮膚炎",
+        desc: "皮膚のバリア機能低下により乾燥やヒリつきが出るとされる状態です。",
+      },
+    ],
+    体調不良: [
+      {
+        name: "自律神経の乱れ",
+        desc: "ストレスや生活習慣の影響で自律神経のバランスが崩れるとされる状態です。だるさや不調の原因になることがあります。",
+      },
+      {
+        name: "睡眠不足",
+        desc: "休息が不足すると、体調の波が出やすくなるとされています。",
+      },
+    ],
+  };
+  return fallbacks[mainSymptom] || fallbacks.頭痛;
+}
+
 /** 🤝/📝モーダル：LLM安全フィルタ＋頻度順再構成（SEO順・生検索結果の表示は廃止） */
 async function buildDiseaseSafetyFilteredMessage(
   searchResults = [],
@@ -8973,8 +9300,9 @@ async function buildDiseaseSafetyFilteredMessage(
       "厳守：",
       "- 出力は必ずJSONのみ：{\"common\":[],\"conditional\":[],\"rare_emergency\":[]}",
       "- common = 一般的に頻度が高い原因（2〜4件）。各項目は「・<原因名> → <短い理由>」形式。原因名は病名でもユーザー言動の要約でもよい。**主症状と無関係な病名・症状名は絶対に含めない**。無理に病名を挿入しない。",
+      "- **common に「ウイルス感染」という文言を含めない。ウイルス・細菌感染・感染症として位置づける原因（感冒・咽頭炎・胃腸炎・口唇ヘルペス・インフルエンザ等）は必ず conditional のみ**に書く。",
       "- 「→」の理由は**ユーザーの言動を要約**して記載。ユーザーが言っていないことは書かない。固定文（例：肩こりやストレスで）は使わず、ユーザーが実際に言った内容に合わせる。",
-      "- conditional = 条件付きで考慮すべき状況（2〜4件）。各項目は「・<病名> → <関連した理由>」形式。**主症状に関連する病名のみ**使用。主症状と無関係な病名は絶対に含めない。理由はユーザー症状と関連付ける。検索結果＋ユーザー症状から要約。煽らない表現。固定テンプレート禁止。",
+      "- conditional = 条件付きで考慮すべき状況（2〜4件）。各項目は「・<病名> → <関連した理由>」形式。**主症状に関連する病名のみ**使用。主症状と無関係な病名は絶対に含めない。理由はユーザー症状と関連付ける。検索結果＋ユーザー症状から要約。煽らない表現。固定テンプレート禁止。**感染症系（ウイルス・細菌・上気道炎・胃腸炎など）はここに分類する**（common に出さない）。",
       "- **common と conditional は重複禁止**：同じ疾患名・同義の原因名を両方に書かない。conditional は「追加で鑑別や受診判断が必要になりうるもの」に限定し、common に既に出した病名・ほぼ同じ内容は conditional に繰り返さない。",
       "- 禁止：理由に痛みの強さ（3/10、〇/10など）を絶対に使わない。",
       "- rare_emergency = 稀だが緊急性あり。**2件のみ**（強制）。検索結果＋ユーザー症状から要約。腫瘍・出血・致死・がん・破裂などの重篤疾患はここにのみ入れる。固定テンプレート禁止。",
@@ -9031,6 +9359,10 @@ async function buildDiseaseSafetyFilteredMessage(
     .slice(0, 4);
   let rare_emergency = sanitize(parsed?.rare_emergency, true).slice(0, 2);
 
+  const infectionMoved = moveInfectionCausesFromCommonToConditional(common, conditional);
+  common = infectionMoved.common;
+  conditional = infectionMoved.conditional;
+
   const userWords = rawFacts;
   const stripPainScoreFromReason = (text) =>
     String(text || "")
@@ -9048,17 +9380,26 @@ async function buildDiseaseSafetyFilteredMessage(
     return `${item.slice(0, arrowIdx + 3)}${fixed}`;
   });
 
-  // common が2件未満のときのみ、主症状に紐づいた fallbackPair から補う。病名の強制はしない。
+  // common が2件未満のときのみ、主症状に紐づいた fallback から補う（感染症系は入れない）
   if (common.length < 2) {
-    const fallbackItems = fallbackPair.map((d) => {
+    const buildFallbackLine = (d) => {
       const reason = d.desc.replace(/とされる状態です。?$/, "").trim();
       const fixed = replaceUnsaidPhrasesInReason(reason, userWords);
       return `・${d.name} → ${fixed}`;
-    });
-    for (const item of fallbackItems) {
+    };
+    let pool = fallbackPair.map(buildFallbackLine).filter((line) => !isInfectionRelatedModalCauseLine(line));
+    if (pool.length < 2) {
+      pool = [...pool, ...getModalCommonNonInfectionFallbackPair(mainSymptom).map(buildFallbackLine)].filter(
+        (line) => !isInfectionRelatedModalCauseLine(line)
+      );
+    }
+    const seen = new Set();
+    for (const item of pool) {
       if (common.length >= 4) break;
       const name = (item.match(/^・([^→]+)/) || [])[1]?.trim?.() || "";
-      if (!name || !common.some((c) => c.includes(name))) common.push(item);
+      if (!name || seen.has(name) || common.some((c) => c.includes(name))) continue;
+      seen.add(name);
+      common.push(item);
     }
   }
   common = common.slice(0, 4);
@@ -9123,7 +9464,6 @@ async function buildDiseaseSafetyFilteredMessage(
     const fixed = stripPainScoreFromReason(reason) || reason;
     return `${item.slice(0, arrowIdx + 3)}${fixed}`;
   });
-  conditional = conditional.slice(0, 4);
 
   const deduped = dedupeModalCommonAndConditional(common, conditional);
   common = deduped.common;
@@ -9286,27 +9626,27 @@ function getDiseaseFallbackPair(mainSymptom) {
       { name: "片頭痛", desc: "血管の拡張や神経の過敏化が関与するとされる状態です。ズキズキとした痛みが片側に出ることが多いとされています。" },
     ],
     腹痛: [
-      { name: "急性胃腸炎", desc: "ウイルスや細菌による消化管の炎症とされる状態です。腹痛や下痢、吐き気などを伴うことがあります。" },
+      { name: "急性胃腸炎", desc: "消化管の炎症とされる状態です。感染や刺激が関与することがあり、腹痛や下痢、吐き気などを伴うことがあります。" },
       { name: "過敏性腸症候群", desc: "ストレスや生活習慣が関与するとされる状態です。腹痛と便通の変化が主な特徴とされています。" },
     ],
     唇の痛み: [
-      { name: "口唇ヘルペス", desc: "ウイルス感染により唇に水ぶくれやヒリヒリ感が出るとされる状態です。" },
+      { name: "口唇ヘルペス", desc: "ヘルペスウイルスが関与する場合があり、唇に水ぶくれやヒリヒリ感が出るとされる状態です。" },
       { name: "口角炎", desc: "口角の炎症や亀裂が生じるとされる状態です。乾燥やビタミン不足が関与することがあります。" },
     ],
     喉の痛み: [
-      { name: "急性咽頭炎", desc: "ウイルスや細菌による咽頭の炎症とされる状態です。のどの痛みや違和感が主な症状です。" },
+      { name: "急性咽頭炎", desc: "咽頭の炎症とされる状態です。のどの痛みや違和感が主な症状です。" },
       { name: "急性扁桃炎", desc: "扁桃の炎症とされる状態です。発熱やのどの痛みを伴うことがあります。" },
     ],
     発熱: [
-      { name: "感冒", desc: "ウイルス感染による上気道の炎症とされる状態です。発熱、咳、鼻水などを伴うことがあります。" },
-      { name: "インフルエンザ", desc: "インフルエンザウイルスによる感染症とされる状態です。高熱や全身倦怠感が特徴です。" },
+      { name: "感冒", desc: "上気道の炎症とされる状態です。発熱、咳、鼻水などを伴うことがあります。" },
+      { name: "インフルエンザ", desc: "季節性の感染症とされる状態です。高熱や全身倦怠感が特徴です。" },
     ],
     皮膚症状: [
       { name: "接触皮膚炎", desc: "刺激物への接触により皮膚に炎症が生じるとされる状態です。赤みやかゆみが主な症状です。" },
       { name: "乾燥性皮膚炎", desc: "皮膚のバリア機能低下により乾燥やヒリつきが出るとされる状態です。" },
     ],
     体調不良: [
-      { name: "感冒", desc: "ウイルス感染による上気道の炎症とされる状態です。発熱、咳、鼻水、倦怠感などを伴うことがあります。" },
+      { name: "感冒", desc: "上気道の炎症とされる状態です。発熱、咳、鼻水、倦怠感などを伴うことがあります。" },
       { name: "自律神経の乱れ", desc: "ストレスや生活習慣の影響で自律神経のバランスが崩れるとされる状態です。だるさや不調の原因になることがあります。" },
     ],
   };
@@ -10580,6 +10920,36 @@ async function buildLocalSummaryFallback(level, history, state) {
   };
 
   const immediateBlock = await buildImmediateActionsBlock(level, state, historyText, null);
+
+  if (level === "🔴") {
+    state.decisionLevel = "🔴";
+    const hospitalRec = buildHospitalRecommendationDetail(
+      state,
+      locationContext,
+      state?.clinicCandidates || [],
+      state?.hospitalCandidates || []
+    );
+    const hospitalBlock = buildHospitalBlock(state, historyText, hospitalRec);
+    const memoWithJudgment = [
+      "📝 今の状態について",
+      buildStateFactsBullets(state, { forSummary: true }).join("\n"),
+      "",
+      await buildStateAboutEmpathyAndJudgmentAsync(state, "🔴"),
+    ].join("\n");
+    const redActionsBlock = buildRedImmediateActionsBlock(state, historyText);
+    const redClosing = await generateLastBlockWithLLM("🔴", state, historyText);
+    return sanitizeSummaryBullets(
+      [
+        memoWithJudgment,
+        redActionsBlock,
+        "🏥 受診先の候補",
+        hospitalBlock.replace(/^🏥 受診先の候補\n/, ""),
+        redClosing,
+      ].join("\n"),
+      state
+    );
+  }
+
   const baseBlocks = [
     `${level} ここまでの情報を整理します\n${buildSummaryIntroTemplate()}`,
     `🤝 今の状態について\n${buildStateFactsBullets(state, { forSummary: true }).join("\n")}\n\n${buildStateAboutLine(state, level)}\n${buildStateDecisionLine(state, level)}`,
@@ -10598,31 +10968,6 @@ async function buildLocalSummaryFallback(level, history, state) {
     ].join("\n");
     fallbackText = ensurePainInfectionYellowFirstAction(fallbackText, level, state);
     return sanitizeSummaryBullets(fallbackText, state);
-  }
-  if (level === "🔴") {
-    state.decisionLevel = "🔴";
-    const hospitalRec = buildHospitalRecommendationDetail(
-      state,
-      locationContext,
-      state?.clinicCandidates || [],
-      state?.hospitalCandidates || []
-    );
-    const hospitalBlock = buildHospitalBlock(state, historyText, hospitalRec);
-    const memoWithJudgment = [
-      "📝 今の状態について",
-      buildStateFactsBullets(state, { forSummary: true }).join("\n"),
-      "",
-      buildStateAboutEmpathyAndJudgment(state, "🔴"),
-    ].join("\n");
-    const redActionsBlock = buildRedImmediateActionsBlock(state, historyText);
-    const redClosing = await generateLastBlockWithLLM("🔴", state, historyText);
-    return sanitizeSummaryBullets([
-      memoWithJudgment,
-      redActionsBlock,
-      "🏥 受診先の候補",
-      hospitalBlock.replace(/^🏥 受診先の候補\n/, ""),
-      redClosing,
-    ].join("\n"), state);
   }
 
   return sanitizeSummaryBullets(
@@ -10755,8 +11100,8 @@ function mapFreeTextToOptionIndex(answer, options, type) {
     // SKIN: 見た目
     if (indexOf("水ぶくれ・ただれ・できもの") >= 0) {
       if (/水ぶくれ|ただれ|できもの/.test(text)) return 2;
-      if (/赤み|乾燥/.test(text)) return 0;
-      if (/変わらない|ほとんど変わらない/.test(text)) return 1;
+      if (/変わらない|ほとんど変わらない/.test(text)) return 0;
+      if (/赤み|乾燥/.test(text)) return 1;
     }
     // SKIN: きっかけ
     if (indexOf("紫外線や乾燥が強かった") >= 0) {
@@ -10785,8 +11130,8 @@ function mapFreeTextToOptionIndex(answer, options, type) {
     // INFECTION: きっかけ
     if (indexOf("周りが咳をしていた") >= 0) {
       if (/思い当たらない|特にない|不明|わからない/.test(text)) return 0;
-      if (/周り|咳をしていた|感染/.test(text)) return 1;
-      if (/ストレス|疲労|寝不足|過労/.test(text)) return 2;
+      if (/ストレス|疲労|寝不足|過労/.test(text)) return 1;
+      if (/周り|咳をしていた|感染/.test(text)) return 2;
     }
     // GI: 部位
     if (indexOf("みぞおち付近") >= 0) {
@@ -11257,7 +11602,7 @@ async function generateSummaryForConfirmation(conversationId) {
   aiResponse = await ensureLastBlock(aiResponse, level, state, historyTextForOtc || aiResponse);
   aiResponse = enforceYellowOtcPositionStrict(aiResponse, level);
   if (level === "🔴") {
-    aiResponse = ensureHospitalMemoBlock(aiResponse, state, historyTextForOtc);
+    aiResponse = await ensureHospitalMemoBlock(aiResponse, state, historyTextForOtc);
     aiResponse = await ensureRedImmediateActionsBlock(aiResponse, state, historyTextForOtc, immediateActionPlan);
     aiResponse = ensureHospitalBlock(aiResponse, state, historyTextForOtc);
   }
@@ -11665,7 +12010,7 @@ app.post("/api/chat", async (req, res) => {
           .filter((m) => m.role === "user")
           .map((m) => m.content)
           .join("\n");
-        summaryMsg = replaceStateAboutBlockOnly(summaryMsg, state, historyTextForBlock);
+        summaryMsg = await replaceStateAboutBlockOnly(summaryMsg, state, historyTextForBlock);
       }
       const finalRisk = conversationState[conversationId].decisionLevel || finalizeRiskLevel(conversationState[conversationId]);
       if (!summaryMsg || summaryMsg.trim().length === 0) {
@@ -12534,7 +12879,7 @@ app.post("/api/chat", async (req, res) => {
       aiResponse = await ensureLastBlock(aiResponse, level, conversationState[conversationId], historyTextForOtc || aiResponse);
       aiResponse = enforceYellowOtcPositionStrict(aiResponse, level);
       if (level === "🔴") {
-        aiResponse = ensureHospitalMemoBlock(aiResponse, conversationState[conversationId], historyTextForOtc);
+        aiResponse = await ensureHospitalMemoBlock(aiResponse, conversationState[conversationId], historyTextForOtc);
         aiResponse = await ensureRedImmediateActionsBlock(aiResponse, conversationState[conversationId], historyTextForOtc, immediateActionPlan);
         aiResponse = ensureHospitalBlock(
           aiResponse,
