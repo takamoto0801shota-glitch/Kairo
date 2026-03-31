@@ -875,6 +875,8 @@ function initConversationState(input = {}) {
     expectsCorrectionReason: false,
     confirmationExtraFacts: [],
     confirmationShown: false,
+    /** 先行まとめ生成と追加情報後の再生成を区別。不一致なら generateSummaryForConfirmation は state.summaryText を上書きしない */
+    summaryGenerationEpoch: 0,
     summaryGenerationPromise: null,
     /** クライアントが初回バナー「体調の不安…」を表示したセッション。true の間はまとめ・確認文へ進む前に十分なユーザーターンを要する */
     hasIntroBannerSession: false,
@@ -6873,7 +6875,7 @@ function isRawFreeText(text) {
   const s = String(text || "").replace(/^・/, "").trim();
   if (!s || s.length > 80) return false;
   const hasTypeTemplate =
-    /に症状が始まった|症状は急に始まった|程度である|を伴っている|がきっかけの可能性|ような痛みが出ている|タイプの痛みが出ている|症状は.*に向かっている|症状は大きく変化していない|発症時より症状が強くなっている|症状は.*に変わっている|体温は.*度である|見られていない|^痛みは/i.test(s);
+    /に症状が始まった|症状は急に始まった|程度である|を伴っている|がきっかけの可能性|のような痛み|ような痛みが出ている|タイプの痛みが出ている|症状は.*に向かっている|症状は大きく変化していない|発症時より症状が強くなっている|症状は.*に変わっている|体温は.*度である|見られていない|^痛みは/i.test(s);
   if (hasTypeTemplate) return false;
   return true;
 }
@@ -6912,8 +6914,8 @@ function formatRawBulletToType(text) {
   if (/(スマホ|長時間|見た)/.test(t)) return "・スマホの長時間使用がきっかけの可能性";
   if (/(食|食事|あたり)/.test(t)) return "・食事が影響している可能性";
   if (/(ズキズキ|キリキリ|ヒリヒリ|チクチク|重い|締め付け)/.test(t)) {
-    const w = t.replace(/する$/, "");
-    return `・${w}ような痛みが出ている`;
+    const w = t.replace(/する$/, "").trim();
+    return `・${w}のような痛み`;
   }
   return null;
 }
@@ -6941,6 +6943,15 @@ function sanitizeBulletPoints(bullets) {
       s = s.replace(/ような痛みが出ているような痛みが出ている/g, "ような痛みが出ている");
       s = s.replace(/ような痛みが出ているような/g, "ような痛みが出ている");
       s = s.replace(/痛みが出ているような痛みが出ている/g, "痛みが出ている");
+      // 痛み方の定型：「ズキズキような」→「ズキズキのような」。「する」は除く（LLM／旧整形の両方）
+      s = s.replace(
+        /・(ズキズキ|キリキリ|ヒリヒリ|チクチク|ジンジン|ドクドク|重い|締め付け|鈍い)するような痛みが出ている/g,
+        "・$1のような痛み"
+      );
+      s = s.replace(
+        /・(ズキズキ|キリキリ|ヒリヒリ|チクチク|ジンジン|ドクドク|重い|締め付け|鈍い)ような痛みが出ている/g,
+        "・$1のような痛み"
+      );
       s = s.replace(/痛みが出ている痛み/g, "痛み");
       s = s.replace(/ようなような/g, "ような");
       // ・の連続や空行
@@ -8297,74 +8308,207 @@ function stripBulletLead(line) {
   return String(line || "").replace(/^・\s*/, "").trim();
 }
 
-/**
- * まとめ箇条書き（stateAboutBulletsCache）から ①「〇〇＋〇〇」用の短語を組む。スロット再走査より速い（KAIRO_SPEC）。
- */
-function tryGreenYellowComboPartsFromBulletCache(state) {
-  const raw = state?.stateAboutBulletsCache;
-  if (!Array.isArray(raw) || raw.length < 2) return null;
-  const main = compactMainSymptomNounForRed(state);
-  const parts = [];
-  for (const line of raw) {
-    const s = stripBulletLead(line);
-    if (!s) continue;
-    if (main && main !== "症状" && s === main) continue;
-    const short = s.length > 36 ? `${s.slice(0, 34)}…` : s;
-    parts.push(short);
-    if (parts.length >= 3) break;
+/** 組み合わせ行用：箇条書き1行を短いラベルへ（例: ズキズキする痛み→ズキズキ、やや強いズキズキする頭痛→やや強い頭痛） */
+function shortenComboLabelFromBulletText(raw) {
+  let s = stripBulletLead(String(raw || "")).replace(/\s+/g, " ").trim();
+  if (!s) return "";
+  if (/^痛みは/.test(s)) {
+    const m = s.match(/(\d+)\s*\/\s*10/);
+    const n = m ? Number(m[1]) : 0;
+    if (n >= 8) return "強い痛み";
+    if (n >= 5) return "やや強い痛み";
+    return "痛みの強さ";
   }
-  return parts.length >= 2 ? parts.slice(0, 3) : null;
+  const ono =
+    "ズキズキ|キリキリ|ヒリヒリ|チクチク|ジンジン|ドクドク|鈍い|刺す|締め付け|重い感じの|締め付けられるような";
+  const reOnlyQuality = new RegExp(`^(${ono})(?:する)?(?:痛み)?$`);
+  const reNoYona = new RegExp(`^(${ono})のような痛み$`);
+  if (reNoYona.test(s)) s = s.replace(reNoYona, "$1");
+  else if (reOnlyQuality.test(s)) s = s.replace(reOnlyQuality, "$1");
+  s = s.replace(
+    new RegExp(`^(軽い|中程度|やや強い|強い)(?:の)?(?:${ono})(?:する)?(?=頭痛|腹痛|歯痛|腰痛|のど|喉|痛み)`),
+    "$1"
+  );
+  if (s.length > 36) s = `${s.slice(0, 34)}…`;
+  return s.trim();
+}
+
+/** 組み合わせ行の逆優先度：きっかけ・痛み方はなるべく出さない（数値が高いほど先に採用） */
+const COMBO_INV_PRI_CAUSE = 8;
+const COMBO_INV_PRI_PAIN_TYPE = 10;
+const COMBO_INV_PRI_NORMAL = 88;
+
+function inferComboBulletInverseKind(s) {
+  const t = String(s || "");
+  if (/^痛みは\s*\d+\s*\/\s*10/.test(t)) return "pain_score";
+  if (
+    /可能性|きっかけ|負担の可能性|影響している|ストレス|睡眠不足|寝不足|スマホ|画面|食事|運動|きっかけは|思い当たる/.test(
+      t
+    )
+  ) {
+    return "cause";
+  }
+  if (
+    /のような痛み|する痛み|タイプの痛み|痛み方|締め付けられる|ズキズキ|キリキリ|ヒリヒリ|チクチク|ジンジン|ドクドク/.test(
+      t
+    )
+  ) {
+    return "pain_type";
+  }
+  return "other";
+}
+
+function inversePriorityForComboKind(kind) {
+  if (kind === "cause") return COMBO_INV_PRI_CAUSE;
+  if (kind === "pain_type") return COMBO_INV_PRI_PAIN_TYPE;
+  if (kind === "pain_score") return 83;
+  return COMBO_INV_PRI_NORMAL;
+}
+
+/** 候補 {label, inv} を逆優先度で並べ、2〜3 個を選ぶ（不足時は低優先も使用） */
+function pickComboPartsByInversePriority(candidates, min = 2, max = 3) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return [];
+  const seen = new Set();
+  const norm = (c) => {
+    const lab = String(c.label || "").trim();
+    if (!lab || seen.has(lab)) return null;
+    seen.add(lab);
+    return { label: lab, inv: Number.isFinite(c.inv) ? c.inv : COMBO_INV_PRI_NORMAL };
+  };
+  const list = candidates.map(norm).filter(Boolean);
+  if (list.length === 0) return [];
+  const high = [...list].sort((a, b) => b.inv - a.inv);
+  const out = [];
+  for (const x of high) {
+    if (out.length >= max) break;
+    out.push(x.label);
+  }
+  if (out.length >= min) return out.slice(0, max);
+  const low = [...list].sort((a, b) => a.inv - b.inv);
+  for (const x of low) {
+    if (out.length >= min) break;
+    if (!out.includes(x.label)) out.push(x.label);
+  }
+  return out.slice(0, max);
 }
 
 /**
- * 箇条書きキャッシュから 🔴 組み合わせ行用ラベルを組む（HIGH スロット列挙と整合しやすく・高速化）。
+ * まとめ箇条書きから 🟢🟡 組み合わせ用候補 {label, inv}。主症状行（通常は先頭 or 痛み行の次）は除外。
  */
-function tryRedHighRiskLabelsFromBulletCache(state) {
+function gatherGreenYellowComboCandidatesFromBullets(state) {
   const raw = state?.stateAboutBulletsCache;
-  if (!Array.isArray(raw) || raw.length < 2) return null;
+  const norm = state?.slotNormalized || {};
+  if (!Array.isArray(raw) || raw.length < 1) return [];
   const main = compactMainSymptomNounForRed(state);
-  const labels = [];
-  const seen = new Set();
-  const push = (t) => {
-    const x = String(t || "").trim();
-    if (!x || seen.has(x)) return;
-    if (main && main !== "症状" && x === main) return;
-    seen.add(x);
-    labels.push(x);
-  };
-  for (const line of raw) {
-    const s = stripBulletLead(line);
-    if (!s) continue;
-    if (/^痛みは/.test(s)) {
-      const m = s.match(/(\d+)\s*\/\s*10/);
-      const n = m ? Number(m[1]) : 0;
-      if (n >= 8) push("強い痛み");
-      else if (n >= 5) push("やや強い痛み");
-      else push("痛み");
+  const hasPainHead = raw[0] && /^痛みは\s*\d+\s*\/\s*10/.test(stripBulletLead(raw[0]));
+  const mainSymptomLineIdx = hasPainHead ? 1 : 0;
+  const candidates = [];
+  for (let i = 0; i < raw.length; i++) {
+    if (i === mainSymptomLineIdx) continue;
+    const rawLine = stripBulletLead(raw[i]);
+    if (!rawLine) continue;
+    if (main && main !== "症状" && rawLine === main) continue;
+    if (/^痛みは\s*\d+\s*\/\s*10/.test(rawLine)) {
+      if (norm.pain_score?.riskLevel === RISK_LEVELS.HIGH) continue;
+      const short = shortenComboLabelFromBulletText(rawLine);
+      if (short) candidates.push({ label: short, inv: inversePriorityForComboKind("pain_score") });
       continue;
     }
-    const short = s.length > 22 ? `${s.slice(0, 20)}…` : s;
-    push(short);
-    if (labels.length >= 8) break;
+    const kind = inferComboBulletInverseKind(rawLine);
+    if (kind === "cause") {
+      if (norm.cause_category?.riskLevel === RISK_LEVELS.HIGH) continue;
+      if (
+        norm.cause_category?.riskLevel !== RISK_LEVELS.LOW &&
+        norm.cause_category?.riskLevel !== RISK_LEVELS.MEDIUM
+      ) {
+        continue;
+      }
+    }
+    if (kind === "pain_type") {
+      if (norm.worsening?.riskLevel === RISK_LEVELS.HIGH) continue;
+      if (
+        norm.worsening?.riskLevel !== RISK_LEVELS.LOW &&
+        norm.worsening?.riskLevel !== RISK_LEVELS.MEDIUM
+      ) {
+        continue;
+      }
+    }
+    const short = shortenComboLabelFromBulletText(rawLine);
+    if (!short) continue;
+    let inv = inversePriorityForComboKind(kind);
+    if (kind === "other" && /悪化|回復|続い|経過|さっき|時間|微熱|平熱|体温|付随|症状/.test(short)) {
+      inv = Math.max(inv, 86);
+    }
+    candidates.push({ label: short, inv });
   }
-  return labels.length >= 2 ? labels.slice(0, 8) : null;
+  return candidates;
 }
 
 /**
- * 🟢🟡「① 状態の定義」：slotNormalized が LOW〜MEDIUM の要素だけを短語化（HIGH は含めない。主症状ラベルも除外）
+ * 箇条書きから 🔴 組み合わせ用候補。**HIGH スロットに対応する行だけ**（主症状行は除外）。
+ */
+function gatherRedHighComboCandidatesFromBullets(state) {
+  const raw = state?.stateAboutBulletsCache;
+  const norm = state?.slotNormalized || {};
+  if (!Array.isArray(raw) || raw.length < 1) return [];
+  const main = compactMainSymptomNounForRed(state);
+  const hasPainHead = raw[0] && /^痛みは\s*\d+\s*\/\s*10/.test(stripBulletLead(raw[0]));
+  const mainSymptomLineIdx = hasPainHead ? 1 : 0;
+  const candidates = [];
+  for (let i = 0; i < raw.length; i++) {
+    if (i === mainSymptomLineIdx) continue;
+    const rawLine = stripBulletLead(raw[i]);
+    if (!rawLine) continue;
+    if (main && main !== "症状" && rawLine === main) continue;
+    if (/^痛みは\s*\d+\s*\/\s*10/.test(rawLine)) {
+      if (norm.pain_score?.riskLevel !== RISK_LEVELS.HIGH) continue;
+      const short = shortenComboLabelFromBulletText(rawLine);
+      if (short) candidates.push({ label: short, inv: inversePriorityForComboKind("pain_score") });
+      continue;
+    }
+    const kind = inferComboBulletInverseKind(rawLine);
+    if (kind === "cause") {
+      if (norm.cause_category?.riskLevel !== RISK_LEVELS.HIGH) continue;
+      candidates.push({
+        label: shortenComboLabelFromBulletText(rawLine),
+        inv: COMBO_INV_PRI_CAUSE,
+      });
+      continue;
+    }
+    if (kind === "pain_type") {
+      if (norm.worsening?.riskLevel !== RISK_LEVELS.HIGH) continue;
+      candidates.push({
+        label: shortenComboLabelFromBulletText(rawLine),
+        inv: COMBO_INV_PRI_PAIN_TYPE,
+      });
+      continue;
+    }
+    let inv = COMBO_INV_PRI_NORMAL;
+    if (/(発熱|熱|微熱|高熱|体温|平熱)/.test(rawLine)) {
+      if (norm.daily_impact?.riskLevel !== RISK_LEVELS.HIGH) continue;
+      inv = 92;
+    } else if (/(だるさ|倦怠|吐き気|咳|息苦し|悪化傾向|悪化|付随|日常生活)/.test(rawLine)) {
+      if (norm.associated_symptoms?.riskLevel === RISK_LEVELS.HIGH) inv = 94;
+      else if (norm.worsening_trend?.riskLevel === RISK_LEVELS.HIGH && /悪化/.test(rawLine)) inv = 90;
+      else if (norm.duration?.riskLevel === RISK_LEVELS.HIGH && /続|長く|日|週/.test(rawLine)) inv = 88;
+      else continue;
+    } else {
+      continue;
+    }
+    const short = shortenComboLabelFromBulletText(rawLine);
+    if (short) candidates.push({ label: short, inv });
+  }
+  return candidates;
+}
+
+/**
+ * 🟢🟡「① 状態の定義」：LOW〜MEDIUM のみ。箇条書き候補＋スロット候補をマージし、きっかけ・痛み方は逆優先度で後回し（KAIRO_SPEC）。
  */
 function collectGreenYellowLowMediumCombinationParts(state) {
-  const fromBullets = tryGreenYellowComboPartsFromBulletCache(state);
-  if (fromBullets) return fromBullets;
   const norm = state?.slotNormalized || {};
-  const parts = [];
-  const seen = new Set();
-  const push = (s) => {
-    const t = String(s || "").trim();
-    if (!t || seen.has(t)) return;
-    seen.add(t);
-    parts.push(t);
-  };
+  const candidates = [];
+  const bulletCands = gatherGreenYellowComboCandidatesFromBullets(state);
+  if (bulletCands.length) candidates.push(...bulletCands);
 
   const main = compactMainSymptomNounForRed(state);
   const isMainLabel = (t) => main && main !== "症状" && String(t || "").trim() === main;
@@ -8377,7 +8521,7 @@ function collectGreenYellowLowMediumCombinationParts(state) {
     else if (pain <= 6) p1 = `中程度の${main}`;
     else if (pain <= 8) p1 = `やや強い${main}`;
     else p1 = `強い${main}`;
-    push(p1);
+    candidates.push({ label: p1, inv: 84 });
   }
 
   const dailyRaw = String(
@@ -8385,12 +8529,12 @@ function collectGreenYellowLowMediumCombinationParts(state) {
   ).trim();
   const diRisk = norm?.daily_impact?.riskLevel;
   if (diRisk === RISK_LEVELS.LOW || diRisk === RISK_LEVELS.MEDIUM) {
-    if (/38|高熱|39|40/.test(dailyRaw)) push("高めの体温");
-    else if (/37|微熱/.test(dailyRaw)) push("微熱");
-    else if (/平熱|36/.test(dailyRaw)) push("平熱に近い体温");
+    if (/38|高熱|39|40/.test(dailyRaw)) candidates.push({ label: "高めの体温", inv: 87 });
+    else if (/37|微熱/.test(dailyRaw)) candidates.push({ label: "微熱", inv: 87 });
+    else if (/平熱|36/.test(dailyRaw)) candidates.push({ label: "平熱に近い体温", inv: 86 });
     else if (dailyRaw && !/^(ない|なし|特に)/.test(dailyRaw)) {
       const polished = polishMeaningJsonColloquialSentence(dailyRaw.replace(/です$|ます$/, ""));
-      if (polished && polished.length < 28) push(polished);
+      if (polished && polished.length < 28) candidates.push({ label: polished, inv: 86 });
     }
   }
 
@@ -8399,57 +8543,79 @@ function collectGreenYellowLowMediumCombinationParts(state) {
   ).trim();
   const trRisk = norm?.worsening_trend?.riskLevel;
   if (trRisk === RISK_LEVELS.LOW || trRisk === RISK_LEVELS.MEDIUM) {
-    if (/回復|改善|まし|楽にな/.test(trendRaw)) push("回復に向かっている");
-    else if (/変わらない|横ばい|同じ/.test(trendRaw)) push("悪化していない");
-    else if (/悪化|発症時より/.test(trendRaw) && !/ない/.test(trendRaw)) push("悪化傾向");
+    if (/回復|改善|まし|楽にな/.test(trendRaw)) candidates.push({ label: "回復に向かっている", inv: 87 });
+    else if (/変わらない|横ばい|同じ/.test(trendRaw)) candidates.push({ label: "悪化していない", inv: 87 });
+    else if (/悪化|発症時より/.test(trendRaw) && !/ない/.test(trendRaw)) candidates.push({ label: "悪化傾向", inv: 86 });
     else if (trendRaw) {
       const p = polishMeaningJsonColloquialSentence(trendRaw.replace(/です$|ます$/, ""));
-      if (p) push(p);
+      if (p) candidates.push({ label: p, inv: 86 });
     }
   }
 
   const woRisk = norm?.worsening?.riskLevel;
-  if (parts.length < 3 && (woRisk === RISK_LEVELS.LOW || woRisk === RISK_LEVELS.MEDIUM)) {
+  if (woRisk === RISK_LEVELS.LOW || woRisk === RISK_LEVELS.MEDIUM) {
     const wRaw = String(getSlotStatusValue(state, "worsening", state?.slotAnswers?.worsening || "") || "").trim();
     if (wRaw) {
       const p = polishMeaningJsonColloquialSentence(wRaw.replace(/です$|ます$/, "").slice(0, 24));
-      if (p) push(p);
+      if (p) candidates.push({ label: p, inv: COMBO_INV_PRI_PAIN_TYPE });
     }
   }
 
   const durRisk = norm?.duration?.riskLevel;
-  if (parts.length < 3 && (durRisk === RISK_LEVELS.LOW || durRisk === RISK_LEVELS.MEDIUM)) {
+  if (durRisk === RISK_LEVELS.LOW || durRisk === RISK_LEVELS.MEDIUM) {
     const dur = String(getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "") || "").trim();
-    if (dur && /(さっき|数時間前|数十分|今さっき)/.test(dur)) push("発症から時間が短い");
-    else if (dur && /(日|週|昨日|一昨日|一日以上)/.test(dur)) push("症状が続いている");
+    if (dur && /(さっき|数時間前|数十分|今さっき)/.test(dur)) candidates.push({ label: "発症から時間が短い", inv: 85 });
+    else if (dur && /(日|週|昨日|一昨日|一日以上)/.test(dur)) candidates.push({ label: "症状が続いている", inv: 85 });
   }
 
-  if (parts.length < 2) {
-    const combinedText = [
-      state?.historyTextForCare || "",
-      state?.slotAnswers?.associated_symptoms || "",
-      (buildStateFactsBullets(state, { forSummary: true }) || []).join(" "),
-    ].join(" ");
-    try {
-      const feats = extractFeatures(combinedText);
-      for (const a of feats.associatedSymptoms || []) {
-        if (!isMainLabel(a)) push(a);
-        if (parts.length >= 3) break;
-      }
-    } catch (_) {
-      /* ignore */
+  const ccRisk = norm?.cause_category?.riskLevel;
+  if (ccRisk === RISK_LEVELS.LOW || ccRisk === RISK_LEVELS.MEDIUM) {
+    const cr = String(state?.slotAnswers?.cause_category || "").trim();
+    if (cr && !/^(ない|なし|思い当たらない|わからない|不明)/.test(cr)) {
+      const p = polishMeaningJsonColloquialSentence(cr.replace(/です$|ます$/, "").slice(0, 22));
+      if (p) candidates.push({ label: p, inv: COMBO_INV_PRI_CAUSE });
     }
   }
-  if (parts.length < 2) {
-    const mainSafe = main && main !== "症状" ? main : "症状の出方";
-    push(`${mainSafe}に関する所見は限定的`);
-    push("急いで受診が必要な所見は見えにくい");
-  }
-  if (parts.length === 1) {
-    push("付随の所見は限定的");
-  }
 
-  return parts.slice(0, 3);
+  let picked = pickComboPartsByInversePriority(candidates, 2, 3);
+  if (picked.length >= 2) return picked;
+
+  const parts = [];
+  const seen = new Set();
+  const push = (s) => {
+    const t = String(s || "").trim();
+    if (!t || seen.has(t)) return;
+    seen.add(t);
+    parts.push(t);
+  };
+  const combinedText = [
+    state?.historyTextForCare || "",
+    state?.slotAnswers?.associated_symptoms || "",
+    (buildStateFactsBullets(state, { forSummary: true }) || []).join(" "),
+  ].join(" ");
+  try {
+    const feats = extractFeatures(combinedText);
+    for (const a of feats.associatedSymptoms || []) {
+      if (!isMainLabel(a)) push(a);
+      if (parts.length >= 3) break;
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  if (parts.length) {
+    const extra = parts.map((p) => ({ label: shortenComboLabelFromBulletText(p) || p, inv: 72 }));
+    candidates.push(...extra);
+  }
+  picked = pickComboPartsByInversePriority(candidates, 2, 3);
+  if (picked.length >= 2) return picked;
+
+  const mainSafe = main && main !== "症状" ? main : "症状の出方";
+  candidates.push(
+    { label: `${mainSafe}に関する所見は限定的`, inv: 55 },
+    { label: "急いで受診が必要な所見は見えにくい", inv: 54 },
+    { label: "付随の所見は限定的", inv: 53 }
+  );
+  return pickComboPartsByInversePriority(candidates, 2, 3);
 }
 
 /**
@@ -8536,65 +8702,76 @@ function compactMainSymptomNounForRed(state) {
 }
 
 function collectRedHighRiskCombinationLabels(state) {
-  const fromBullets = tryRedHighRiskLabelsFromBulletCache(state);
-  if (fromBullets) return fromBullets;
   const norm = state?.slotNormalized || {};
-  const labels = [];
-  const seen = new Set();
+  const candidates = [];
+  const bulletCands = gatherRedHighComboCandidatesFromBullets(state);
+  if (bulletCands.length) candidates.push(...bulletCands);
+
   const main = compactMainSymptomNounForRed(state);
   const isMainLabel = (t) => main && main !== "症状" && String(t || "").trim() === main;
-  const push = (s) => {
-    const t = String(s || "").trim();
-    if (!t || seen.has(t)) return;
-    if (isMainLabel(t)) return;
-    seen.add(t);
-    labels.push(t);
-  };
 
   if (norm?.associated_symptoms?.riskLevel === RISK_LEVELS.HIGH) {
-    for (const x of labelsFromAssociatedHighRaw(state?.slotAnswers?.associated_symptoms || "")) push(x);
+    for (const x of labelsFromAssociatedHighRaw(state?.slotAnswers?.associated_symptoms || "")) {
+      if (!isMainLabel(x)) candidates.push({ label: x, inv: 95 });
+    }
   }
 
   const dailyRaw = String(
     state?.slotAnswers?.daily_impact || getSlotStatusValue(state, "impact", state?.slotAnswers?.daily_impact || "") || ""
   );
   if (norm?.daily_impact?.riskLevel === RISK_LEVELS.HIGH) {
-    if (/38|高熱|39|40/.test(dailyRaw)) push("発熱");
-    else if (/37|微熱/.test(dailyRaw)) push("微熱");
-    else if (/動けない|寝込|起き上がれない|強いつらさ/.test(dailyRaw)) push("つらさが強い");
-    else push("日常生活への影響が大きい");
+    if (/38|高熱|39|40/.test(dailyRaw)) candidates.push({ label: "発熱", inv: 93 });
+    else if (/37|微熱/.test(dailyRaw)) candidates.push({ label: "微熱", inv: 93 });
+    else if (/動けない|寝込|起き上がれない|強いつらさ/.test(dailyRaw)) candidates.push({ label: "つらさが強い", inv: 91 });
+    else candidates.push({ label: "日常生活への影響が大きい", inv: 90 });
   }
 
   if (norm?.pain_score?.riskLevel === RISK_LEVELS.HIGH) {
     const m = String(main || "");
-    if (!/(痛|頭痛|腹痛|歯痛|腰痛|喉|のど)/.test(m)) push("強い痛み");
+    if (!/(痛|頭痛|腹痛|歯痛|腰痛|喉|のど)/.test(m)) candidates.push({ label: "強い痛み", inv: 85 });
   }
-  if (norm?.worsening_trend?.riskLevel === RISK_LEVELS.HIGH) push("悪化傾向");
-  if (norm?.duration?.riskLevel === RISK_LEVELS.HIGH) push("長く続いている");
-  if (norm?.worsening?.riskLevel === RISK_LEVELS.HIGH) push("痛み方が強い側");
-
-  if (labels.length < 2) {
-    const combinedText = [
-      state?.historyTextForCare || "",
-      state?.slotAnswers?.associated_symptoms || "",
-      dailyRaw,
-      (buildStateFactsBullets(state, { forSummary: true }) || []).join(" "),
-    ].join(" ");
-    try {
-      const feats = extractFeatures(combinedText);
-      for (const a of feats.associatedSymptoms || []) push(a);
-      if (labels.length < 2 && feats.bodyPart && feats.severityHint === "high") {
-        push(`${feats.bodyPart}の症状`);
-      }
-    } catch (_) {
-      /* ignore */
+  if (norm?.worsening_trend?.riskLevel === RISK_LEVELS.HIGH) candidates.push({ label: "悪化傾向", inv: 91 });
+  if (norm?.duration?.riskLevel === RISK_LEVELS.HIGH) candidates.push({ label: "長く続いている", inv: 89 });
+  if (norm?.worsening?.riskLevel === RISK_LEVELS.HIGH) {
+    candidates.push({ label: "痛み方が強い側", inv: COMBO_INV_PRI_PAIN_TYPE });
+  }
+  if (norm?.cause_category?.riskLevel === RISK_LEVELS.HIGH) {
+    const cr = String(state?.slotAnswers?.cause_category || "").trim();
+    if (cr && !/^(ない|なし|思い当たらない|わからない|不明)/.test(cr)) {
+      const p = polishMeaningJsonColloquialSentence(cr.replace(/です$|ます$/, "").slice(0, 22));
+      if (p) candidates.push({ label: p, inv: COMBO_INV_PRI_CAUSE });
     }
   }
-  if (labels.length < 2) {
-    push("つらさが強い");
-    if (labels.length < 2) push("複数のサイン");
+
+  let picked = pickComboPartsByInversePriority(candidates, 2, 3);
+  if (picked.length >= 2) return picked;
+
+  const combinedText = [
+    state?.historyTextForCare || "",
+    state?.slotAnswers?.associated_symptoms || "",
+    dailyRaw,
+    (buildStateFactsBullets(state, { forSummary: true }) || []).join(" "),
+  ].join(" ");
+  try {
+    const feats = extractFeatures(combinedText);
+    for (const a of feats.associatedSymptoms || []) {
+      if (!isMainLabel(a)) {
+        const lab = shortenComboLabelFromBulletText(a) || a;
+        candidates.push({ label: lab, inv: 78 });
+      }
+    }
+    if (feats.bodyPart && feats.severityHint === "high") {
+      candidates.push({ label: `${feats.bodyPart}の症状`, inv: 76 });
+    }
+  } catch (_) {
+    /* ignore */
   }
-  return labels.slice(0, 8);
+
+  picked = pickComboPartsByInversePriority(candidates, 2, 3);
+  if (picked.length >= 2) return picked;
+
+  candidates.push({ label: "つらさが強い", inv: 58 }, { label: "複数のサイン", inv: 57 });
+  return pickComboPartsByInversePriority(candidates, 2, 3);
 }
 
 const RED_STATE_ABOUT_MEANING_TEMPLATES = [
@@ -11768,9 +11945,13 @@ async function generateSummaryForConfirmation(conversationId) {
       followUpMessage: null,
     };
   }
+  const epochAtStart = state.summaryGenerationEpoch;
   ensureUserUtterancesCapturedBeforeConfirmation(conversationId, state);
   // 照合・追補は確認文表示をブロックしないようここ（まとめ生成直前）で実行する
   await supplementStateBulletsFromUncoveredUserUtterances(state);
+  if (state.summaryGenerationEpoch !== epochAtStart) {
+    return { message: state.summaryText || "", followUpQuestion: null, followUpMessage: null };
+  }
   const level = finalizeRiskLevel(state);
   try {
   const historyTextForCare = history.filter((m) => m.role === "user").map((m) => m.content).join("\n");
@@ -11946,14 +12127,23 @@ async function generateSummaryForConfirmation(conversationId) {
   if (!aiResponse || !hasAllSummaryBlocks(aiResponse)) {
     aiResponse = await buildLocalSummaryFallback(level, history, state);
   }
+  if (state.summaryGenerationEpoch !== epochAtStart) {
+    return { message: state.summaryText || "", followUpQuestion: null, followUpMessage: null };
+  }
   state.summaryText = aiResponse;
   return { message: aiResponse || "", followUpQuestion, followUpMessage: null };
   } catch (err) {
     console.error("[generateSummaryForConfirmation Error]", err?.message || err);
+    if (state.summaryGenerationEpoch !== epochAtStart) {
+      return { message: state.summaryText || "", followUpQuestion: null, followUpMessage: null };
+    }
     for (let i = 0; i < LLM_RETRY_COUNT; i++) {
       try {
         const recovered = await buildLocalSummaryFallback(level, history, state);
         if (recovered && hasAllSummaryBlocks(recovered)) {
+          if (state.summaryGenerationEpoch !== epochAtStart) {
+            return { message: state.summaryText || "", followUpQuestion: null, followUpMessage: null };
+          }
           return { message: recovered, followUpQuestion: null, followUpMessage: null };
         }
       } catch (retryErr) {
@@ -11981,6 +12171,9 @@ async function generateSummaryForConfirmation(conversationId) {
       const supplemented = ensureActionCount([], 2, ctx, {});
       return supplemented.map((a) => `・${toConciseActionTitle(a.title)}\n→ ${ensureReliableReason(a.reason, {})}`).join("\n\n");
     })();
+    if (state.summaryGenerationEpoch !== epochAtStart) {
+      return { message: state.summaryText || "", followUpQuestion: null, followUpMessage: null };
+    }
     const minimal = [
       `${level} ここまでの情報を整理します`,
       buildSummaryIntroTemplate(),
@@ -12214,7 +12407,14 @@ app.post("/api/chat", async (req, res) => {
       const isConfirmationOnly = isConfirmationOnlyAnswer(msg);
       const isRejectionOnly = isRejectionOnlyAnswer(msg);
       const hasAddedInfo = !isConfirmationOnly && !isRejectionOnly;
+      const historyTextForBlock = (conversationHistory[conversationId] || [])
+        .filter((m) => m.role === "user")
+        .map((m) => m.content)
+        .join("\n");
       if (hasAddedInfo) {
+        conversationState[conversationId].summaryGenerationEpoch =
+          (conversationState[conversationId].summaryGenerationEpoch || 0) + 1;
+        conversationState[conversationId].summaryGenerationPromise = null;
         (conversationState[conversationId].confirmationExtraFacts =
           conversationState[conversationId].confirmationExtraFacts || []).push(msg);
         conversationState[conversationId].stateAboutBulletsCache = null;
@@ -12222,24 +12422,38 @@ app.post("/api/chat", async (req, res) => {
       ensureUserUtterancesCapturedBeforeConfirmation(conversationId, conversationState[conversationId]);
       await buildStateFactsBulletsTwoStage(conversationState[conversationId]);
       mergeConfirmationExtraFactsIntoStateBulletsCache(conversationState[conversationId]);
+      await supplementStateBulletsFromUncoveredUserUtterances(conversationState[conversationId]);
       let summaryMsg = "";
       let followUpQ = null;
+      let stateAboutReplacedInTry = false;
       try {
-        let result;
-        if (hasAddedInfo) {
-          conversationState[conversationId].summaryGenerationPromise = null;
-          result = await generateSummaryForConfirmation(conversationId);
+        if (
+          hasAddedInfo &&
+          state.summaryText &&
+          hasAllSummaryBlocks(state.summaryText)
+        ) {
+          summaryMsg = await replaceStateAboutBlockOnly(state.summaryText, state, historyTextForBlock);
+          stateAboutReplacedInTry = true;
         } else {
-          const promise = conversationState[conversationId].summaryGenerationPromise;
-          result = promise ? await promise : await generateSummaryForConfirmation(conversationId);
-          conversationState[conversationId].summaryGenerationPromise = null;
-        }
-        summaryMsg = result?.message || "";
-        followUpQ = result?.followUpQuestion || null;
-        if (!summaryMsg || !hasAllSummaryBlocks(summaryMsg)) {
-          const level = finalizeRiskLevel(state);
-          const history = conversationHistory[conversationId] || [];
-          summaryMsg = await buildLocalSummaryFallback(level, history, state);
+          let result;
+          if (hasAddedInfo) {
+            result = await generateSummaryForConfirmation(conversationId);
+          } else {
+            const promise = conversationState[conversationId].summaryGenerationPromise;
+            result = promise ? await promise : await generateSummaryForConfirmation(conversationId);
+            conversationState[conversationId].summaryGenerationPromise = null;
+          }
+          summaryMsg = result?.message || "";
+          followUpQ = result?.followUpQuestion || null;
+          if (!summaryMsg || !hasAllSummaryBlocks(summaryMsg)) {
+            const level = finalizeRiskLevel(state);
+            const history = conversationHistory[conversationId] || [];
+            summaryMsg = await buildLocalSummaryFallback(level, history, state);
+          }
+          if (hasAddedInfo && summaryMsg) {
+            summaryMsg = await replaceStateAboutBlockOnly(summaryMsg, state, historyTextForBlock);
+            stateAboutReplacedInTry = true;
+          }
         }
         summaryMsg = stripEmergencyBlock(summaryMsg);
         summaryMsg = enforceSummaryIntroTemplate(summaryMsg);
@@ -12295,11 +12509,7 @@ app.post("/api/chat", async (req, res) => {
         ].join("\n");
       }
       summaryMsg = ensureGreenHeaderForYellow(summaryMsg, finalizeRiskLevel(state));
-      if (hasAddedInfo && summaryMsg) {
-        const historyTextForBlock = (conversationHistory[conversationId] || [])
-          .filter((m) => m.role === "user")
-          .map((m) => m.content)
-          .join("\n");
+      if (hasAddedInfo && summaryMsg && !stateAboutReplacedInTry) {
         summaryMsg = await replaceStateAboutBlockOnly(summaryMsg, state, historyTextForBlock);
       }
       const finalRisk = conversationState[conversationId].decisionLevel || finalizeRiskLevel(conversationState[conversationId]);
@@ -12833,11 +13043,9 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    // 6スロット完了時: 確認文を出すだけ。まとめは確認文と同時に生成開始。表示はユーザー応答時のみ。
+    // 6スロット完了時: 確認文を即返却（TwoStage は待たない）。返却直後にバックグラウンドで箇条書き整形→まとめ生成を開始。表示はユーザー応答時のみ。
     if (shouldJudgeNow && !conversationState[conversationId].confirmationShown && !conversationState[conversationId].summaryShown) {
       ensureUserUtterancesCapturedBeforeConfirmation(conversationId, conversationState[conversationId]);
-      await buildStateFactsBulletsTwoStage(conversationState[conversationId]);
-      await supplementStateBulletsFromUncoveredUserUtterances(conversationState[conversationId]);
       const confirmMsg = buildPreSummaryConfirmationMessage(
         conversationState[conversationId]
       );
@@ -12846,10 +13054,19 @@ app.post("/api/chat", async (req, res) => {
       conversationState[conversationId].confirmationShown = true;
       conversationState[conversationId].lastOptions = [];
       conversationState[conversationId].lastQuestionType = null;
-      // 確認文と同時にまとめ生成を開始。早く終わっても待機。ユーザーが応答した場合のみ画面に表示する。
-      if (!conversationState[conversationId].summaryGenerationPromise) {
-        conversationState[conversationId].summaryGenerationPromise = generateSummaryForConfirmation(conversationId);
-      }
+      void (async () => {
+        const st = conversationState[conversationId];
+        if (!st) return;
+        try {
+          await buildStateFactsBulletsTwoStage(st);
+          await supplementStateBulletsFromUncoveredUserUtterances(st);
+          if (!st.summaryGenerationPromise) {
+            st.summaryGenerationPromise = generateSummaryForConfirmation(conversationId);
+          }
+        } catch (e) {
+          console.error("[Background pre-summary]", e?.message || e);
+        }
+      })();
       const finalLevel = finalizeRiskLevel(conversationState[conversationId]);
       return res.json({
         message: confirmMsg,
