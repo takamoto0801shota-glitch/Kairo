@@ -1329,6 +1329,10 @@ function showInitialMessage() {
   sessionStorage.setItem("kairo_intro_banner_displayed", "1");
   // 再検索・リロード後も古い conv ID でサーバーに溜まった「まとめ済み」状態を引かないよう、初回バナー表示時点で ID を捨てる
   localStorage.removeItem(CONVERSATION_ID_KEY);
+  // init 直後の restore で summaryGenerated が true のまま残ると、新会話でも clientMeta.summaryShown がサーバーに誤伝搬しフォロー専用ルートに入る
+  appState.summaryGenerated = false;
+  appState.followUpSummarySuppress = false;
+  appState.postSummaryFollowUpSuppress = false;
   appState.introSummarySuppress = true;
   setTimeout(
     () => addMessage(initialMessage, false, true, { skipSummaryBlock: true }),
@@ -1369,7 +1373,8 @@ async function callOpenAI(message, resetSession = false) {
             tz: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
             locationPromptShown: sessionStorage.getItem(LOCATION_PROMPT_KEY) === "true",
             locationSnapshot: getLocationSnapshot(),
-            summaryShown: appState.summaryGenerated,
+            // まとめカード表示済みの conversationId と SUMMARY_DONE の一致のみ信頼（summaryGenerated 単体は誤って true のままになり得る）
+            summaryShown: isSummaryLockedForConversation(),
             /** 初回画面の1行目「体調の不安…」を出したセッション。true の間サーバーは初回送信で必ず状態リセットし、まとめへ飛ばさない */
             hasIntroBannerMessage: sessionStorage.getItem("kairo_intro_banner_displayed") === "1",
           },

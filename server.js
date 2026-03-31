@@ -4912,7 +4912,8 @@ function markSummaryDeliveredAndFollowUpPhase(state) {
  */
 function reconcilePostSummaryStateIfNeeded(state, history, clientMeta, forceFreshSession) {
   if (!state || forceFreshSession) return;
-  if (clientMeta?.summaryShown === true && !state.summaryShown) {
+  // クライアントのみ summaryShown を送ると、質問フェーズでまとめ済み扱いになりフォロー固定文が混入する。履歴にまとめブロックの実体があるときだけ同期する。
+  if (clientMeta?.summaryShown === true && !state.summaryShown && historyContainsSummaryBlock(history)) {
     markSummaryDeliveredAndFollowUpPhase(state);
   }
   // まとめ前確認のみ表示中は、確認文がまとめ風にマッチしても「まとめ済み」にしない（確認応答でまとめを返すため）
@@ -7875,7 +7876,7 @@ function mergeMissingBulletLinesIntoStateAboutCache(state, base, missingLines) {
 /**
  * ユーザー発言が箇条書きに落ちているか照合し、抜けがあれば追記する。
  * LLM で不足行を列挙し、API 失敗時のみヒューリスティック。
- * 呼び出しは generateSummaryForConfirmation 内（まとめ生成の直前）。確認文本文の表示はブロックしない。
+ * 確認文とまとめの箇条書きを一致させるため、確認文表示直前とまとめ生成直前の両方で呼ぶ（二重呼びはマージで冪等）。
  */
 async function supplementStateBulletsFromUncoveredUserUtterances(state) {
   if (!state?.conversationId) return { added: 0 };
@@ -8207,47 +8208,125 @@ const PRE_SUMMARY_ADD_MORE_PHRASES = [
   "他に伝えたいことがあれば教えてください。",
 ];
 
-// 共感テンプレ（経過時間で選択）。判断文の前に必ず挿入。固定のみ。生成禁止。
-const EMPATHY_SASAKI_TEMPLATES = [
-  "急に症状が出ると、「何か大きなことかも」と不安になりますよね。",
-  "突然の変化だと、悪い方向を想像してしまいますよね。",
-];
-const EMPATHY_LONGER_TEMPLATES = [
-  "なかなか良くならないと、「何か隠れているのでは」と心配になりますよね。",
-  "なかなか良くならないと、何か深刻なのではと心配になりますよね。",
-  "ずっと続いていると、だんだん不安が大きくなりますよね。",
-];
-
-function isDurationSasakiLike(state) {
-  const durationRaw = String(
-    getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "")
-  ).trim();
-  if (!durationRaw) return true;
-  return /(さっき|今さっき|たった今|数分|数十分)/.test(durationRaw);
+/** ② 一時的な〇〇：初回安全文と同じ主症状短縮（KAIRO_SPEC 🤝 🟢🟡） */
+function greenYellowPatternNounForTemporary(state) {
+  const m = compactMainSymptomNounForRed(state);
+  if (m && m !== "症状") return m;
+  return "体調不良";
 }
 
-function pickEmpathyForConfirmation(state) {
-  const templates = isDurationSasakiLike(state)
-    ? EMPATHY_SASAKI_TEMPLATES
-    : EMPATHY_LONGER_TEMPLATES;
-  return templates[Math.floor(Math.random() * templates.length)];
-}
-
-// まとめ前確認用の判断文（緊急度別テンプレ・ランダム。固定のみ。生成禁止。KAIRO_SPEC 8.0：1文のみ・弱い保険語禁止）
-// 🟢/🟡の判断文プールは同一（仕様上「ここだけ」揃える）
-const PRE_SUMMARY_GREEN_YELLOW_JUDGMENT_TEMPLATES = [
-  "今の症状の出方からは、ひとまず大きな心配をしなくてもよさそうです。",
-  "今お聞きしている範囲では、過度に不安になる必要はなさそうに見えます。",
-  "今の状態からは、急いで何かをしなければならない状況ではなさそうです。",
-];
-
-function buildPreSummaryConfirmationJudgment(state, level) {
-  const templates = {
-    "🟢": PRE_SUMMARY_GREEN_YELLOW_JUDGMENT_TEMPLATES,
-    "🟡": PRE_SUMMARY_GREEN_YELLOW_JUDGMENT_TEMPLATES,
+/**
+ * 🟢🟡「① 状態の定義」：slotNormalized が LOW〜MEDIUM の要素だけを短語化（HIGH は含めない。主症状ラベルも除外）
+ */
+function collectGreenYellowLowMediumCombinationParts(state) {
+  const norm = state?.slotNormalized || {};
+  const parts = [];
+  const seen = new Set();
+  const push = (s) => {
+    const t = String(s || "").trim();
+    if (!t || seen.has(t)) return;
+    seen.add(t);
+    parts.push(t);
   };
-  const list = templates[level] || templates["🟢"];
-  return list[Math.floor(Math.random() * list.length)];
+
+  const main = compactMainSymptomNounForRed(state);
+  const isMainLabel = (t) => main && main !== "症状" && String(t || "").trim() === main;
+
+  const painRisk = norm?.pain_score?.riskLevel;
+  const pain = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
+  if (painRisk !== RISK_LEVELS.HIGH && pain !== null && main && main !== "症状") {
+    let p1;
+    if (pain <= 3) p1 = `軽い${main}`;
+    else if (pain <= 6) p1 = `中程度の${main}`;
+    else if (pain <= 8) p1 = `やや強い${main}`;
+    else p1 = `強い${main}`;
+    push(p1);
+  }
+
+  const dailyRaw = String(
+    state?.slotAnswers?.daily_impact || getSlotStatusValue(state, "impact", state?.slotAnswers?.daily_impact || "") || ""
+  ).trim();
+  const diRisk = norm?.daily_impact?.riskLevel;
+  if (diRisk === RISK_LEVELS.LOW || diRisk === RISK_LEVELS.MEDIUM) {
+    if (/38|高熱|39|40/.test(dailyRaw)) push("高めの体温");
+    else if (/37|微熱/.test(dailyRaw)) push("微熱");
+    else if (/平熱|36/.test(dailyRaw)) push("平熱に近い体温");
+    else if (dailyRaw && !/^(ない|なし|特に)/.test(dailyRaw)) {
+      const polished = polishMeaningJsonColloquialSentence(dailyRaw.replace(/です$|ます$/, ""));
+      if (polished && polished.length < 28) push(polished);
+    }
+  }
+
+  const trendRaw = String(
+    getSlotStatusValue(state, "worsening_trend", state?.slotAnswers?.worsening_trend || "") || ""
+  ).trim();
+  const trRisk = norm?.worsening_trend?.riskLevel;
+  if (trRisk === RISK_LEVELS.LOW || trRisk === RISK_LEVELS.MEDIUM) {
+    if (/回復|改善|まし|楽にな/.test(trendRaw)) push("回復に向かっている");
+    else if (/変わらない|横ばい|同じ/.test(trendRaw)) push("悪化していない");
+    else if (/悪化|発症時より/.test(trendRaw) && !/ない/.test(trendRaw)) push("悪化傾向");
+    else if (trendRaw) {
+      const p = polishMeaningJsonColloquialSentence(trendRaw.replace(/です$|ます$/, ""));
+      if (p) push(p);
+    }
+  }
+
+  const woRisk = norm?.worsening?.riskLevel;
+  if (parts.length < 3 && (woRisk === RISK_LEVELS.LOW || woRisk === RISK_LEVELS.MEDIUM)) {
+    const wRaw = String(getSlotStatusValue(state, "worsening", state?.slotAnswers?.worsening || "") || "").trim();
+    if (wRaw) {
+      const p = polishMeaningJsonColloquialSentence(wRaw.replace(/です$|ます$/, "").slice(0, 24));
+      if (p) push(p);
+    }
+  }
+
+  const durRisk = norm?.duration?.riskLevel;
+  if (parts.length < 3 && (durRisk === RISK_LEVELS.LOW || durRisk === RISK_LEVELS.MEDIUM)) {
+    const dur = String(getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "") || "").trim();
+    if (dur && /(さっき|数時間前|数十分|今さっき)/.test(dur)) push("発症から時間が短い");
+    else if (dur && /(日|週|昨日|一昨日|一日以上)/.test(dur)) push("症状が続いている");
+  }
+
+  if (parts.length < 2) {
+    const combinedText = [
+      state?.historyTextForCare || "",
+      state?.slotAnswers?.associated_symptoms || "",
+      (buildStateFactsBullets(state, { forSummary: true }) || []).join(" "),
+    ].join(" ");
+    try {
+      const feats = extractFeatures(combinedText);
+      for (const a of feats.associatedSymptoms || []) {
+        if (!isMainLabel(a)) push(a);
+        if (parts.length >= 3) break;
+      }
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  if (parts.length < 2) {
+    const mainSafe = main && main !== "症状" ? main : "症状の出方";
+    push(`${mainSafe}に関する所見は限定的`);
+    push("急いで受診が必要な所見は見えにくい");
+  }
+  if (parts.length === 1) {
+    push("付随の所見は限定的");
+  }
+
+  return parts.slice(0, 3);
+}
+
+/** 🤝🟢🟡 専用：共感廃止・3 ブロック固定（KAIRO_SPEC） */
+function buildGreenYellowStateAboutBlock(state) {
+  const parts = collectGreenYellowLowMediumCombinationParts(state);
+  const comboInner = parts.map((p) => `「${p}」`).join("＋");
+  const noun = greenYellowPatternNounForTemporary(state);
+  return [
+    `${comboInner}状態です。`,
+    "この組み合わせは、",
+    `一時的な${noun}としてよく見られるパターンです。`,
+    "👉 今すぐ受診が必要な状態ではありません。",
+    "👉 まずは休んで様子を見る判断で問題ありません。",
+  ].join("\n");
 }
 
 /** 🔴「📝 今の状態について」：slotNormalized の HIGH のみを短語にし、＋でつなぐ（KAIRO_SPEC・LLM禁止） */
@@ -8449,16 +8528,12 @@ async function buildRedStateAboutEmpathyBlockAsync(state) {
   ].join("\n");
 }
 
-/** まとめ「🤝/📝 今の状態について」箇条書き直後の共感＋接続語＋判断（🟢🟡は固定テンプレ・🔴の意味行は async 版を使用） */
+/** まとめ「🤝/📝 今の状態について」箇条書き直後（🟢🟡は KAIRO_SPEC 3 ブロック固定・🔴は別構成・🔴意味行は async 版を使用） */
 function buildStateAboutEmpathyAndJudgment(state, level) {
   if (level === "🔴") {
     return buildRedStateAboutEmpathyBlock(state);
   }
-  const empathy = pickEmpathyForConfirmation(state);
-  const judgmentLine = buildPreSummaryConfirmationJudgment(state, level);
-  const connector = level === "🟢" || level === "🟡" ? "ただ、" : "";
-  const judgmentWithConnector = connector ? `${connector}${judgmentLine}` : judgmentLine;
-  return [empathy, judgmentWithConnector].filter(Boolean).join("\n");
+  return buildGreenYellowStateAboutBlock(state);
 }
 
 async function buildStateAboutEmpathyAndJudgmentAsync(state, level) {
@@ -11285,9 +11360,22 @@ function getPainSeverityScore(state) {
   return mapRiskLevelToSeverityScore(state?.slotNormalized?.pain_score?.riskLevel);
 }
 
-function shouldBlockRedByPainRecentDuration(state) {
+/**
+ * RED抑制：経過が「さっき」「数時間前」相当のときは 🔴 を禁止（PAIN / INFECTION）。
+ * INFECTION かつ痛みスコアが 8 以上のときだけガード解除（KAIRO_SPEC RED抑制ガード）。
+ */
+function shouldBlockRedByRecentShortDuration(state) {
   const category = state?.triageCategory || resolveQuestionCategoryFromState(state);
-  if (category !== "PAIN") return false;
+  if (category !== "PAIN" && category !== "INFECTION") return false;
+  if (category === "INFECTION") {
+    if (
+      state?.slotFilled?.pain_score === true &&
+      Number.isFinite(state?.lastPainScore) &&
+      state.lastPainScore >= 8
+    ) {
+      return false;
+    }
+  }
   const durationRaw = String(
     getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "")
   ).trim();
@@ -11309,6 +11397,10 @@ function calculateRiskFromState(state) {
         ? state.lastPainScore
         : Number(String(state?.slotAnswers?.pain_score || "").match(/\d+/)?.[0]) || 0;
     if (painScoreRaw >= 5) {
+      const blockRedByRecentShortDuration = shouldBlockRedByRecentShortDuration(state);
+      if (blockRedByRecentShortDuration) {
+        return { ratio: 0.64, level: "🟡", urgency: "yellow" };
+      }
       console.log("---- KAIRO URGENCY DEBUG (worsening_trend=発症時より悪化 かつ pain>=5 → RED) ----");
       return { ratio: 1, level: "🔴", urgency: "red" };
     }
@@ -11332,11 +11424,11 @@ function calculateRiskFromState(state) {
     scores.cause,
   ];
   const highSlotCount = slotScoreList.filter((v) => v === 3).length;
-  const blockRedByRecentPainDuration = shouldBlockRedByPainRecentDuration(state);
+  const blockRedByRecentShortDuration = shouldBlockRedByRecentShortDuration(state);
 
   // Phase1: 判断6スロットのうち「高」が2つ以上 → 比率計算なしで即時🔴
   if (highSlotCount >= 2) {
-    if (blockRedByRecentPainDuration) {
+    if (blockRedByRecentShortDuration) {
       return { ratio: 0.64, level: "🟡", urgency: "yellow" };
     }
     console.log("---- KAIRO URGENCY DEBUG (Phase1: 高2つ以上 → RED) ----");
@@ -11364,7 +11456,7 @@ function calculateRiskFromState(state) {
   } else if (severityIndex >= 0.4) {
     urgency = "yellow";
   }
-  if (urgency === "red" && blockRedByRecentPainDuration) {
+  if (urgency === "red" && blockRedByRecentShortDuration) {
     urgency = "yellow";
   }
   let level = urgency === "red" ? "🔴" : urgency === "yellow" ? "🟡" : "🟢";
@@ -12546,6 +12638,7 @@ app.post("/api/chat", async (req, res) => {
     if (shouldJudgeNow && !conversationState[conversationId].confirmationShown && !conversationState[conversationId].summaryShown) {
       ensureUserUtterancesCapturedBeforeConfirmation(conversationId, conversationState[conversationId]);
       await buildStateFactsBulletsTwoStage(conversationState[conversationId]);
+      await supplementStateBulletsFromUncoveredUserUtterances(conversationState[conversationId]);
       const confirmMsg = buildPreSummaryConfirmationMessage(
         conversationState[conversationId]
       );
