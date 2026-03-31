@@ -35,6 +35,9 @@ function restoreSummaryFlagsFromStorage() {
   appState.postSummaryFollowUpSuppress = true;
 }
 
+/** 確認文表示後〜まとめ受信まで。リロード後もプレースホルダを出すため sessionStorage と併用 */
+const AWAITING_SUMMARY_SESSION_KEY = "kairo_awaiting_summary";
+
 const SUBJECTIVE_ALERT_WORDS = ["気になります", "引っかかります", "心配です", "注意が必要です"];
 const FEATURE_SHOW_LOCATION_EXPLANATION = false;
 const QUESTION_DELAY_MS = 500;
@@ -94,6 +97,8 @@ const appState = {
   followUpSummarySuppress: false,
   /** まとめカード表示の直後にフォロー文を出したあと〜フォロー終了まで true。まとめを絶対に再出さない */
   postSummaryFollowUpSuppress: false,
+  /** 直前の応答がまとめ前確認文のとき true。次の送信でプレースホルダを先に出す */
+  awaitingSummaryReply: false,
 };
 
 function resetConversation() {
@@ -114,6 +119,7 @@ function resetConversation() {
   appState.introSummarySuppress = false;
   appState.followUpSummarySuppress = false;
   appState.postSummaryFollowUpSuppress = false;
+  appState.awaitingSummaryReply = false;
 }
 
 const INTRO_TEMPLATE_TEXTS = {
@@ -372,6 +378,7 @@ const KAIRO_STORAGE_KEYS = {
     "kairo_force_location_prompt",
     "kairo_just_cleared",
     "kairo_intro_banner_displayed",
+    AWAITING_SUMMARY_SESSION_KEY,
   ],
 };
 
@@ -1448,6 +1455,23 @@ function renderSection(sectionText) {
   addMessage(sectionText);
 }
 
+function addPendingSummaryPlaceholder() {
+  const messagesContainer = document.getElementById("chatMessages");
+  if (!messagesContainer) return null;
+  const messageDiv = document.createElement("div");
+  messageDiv.className = "message ai summary-pending";
+  messageDiv.setAttribute("role", "status");
+  messageDiv.setAttribute("aria-live", "polite");
+  messageDiv.textContent = "まとめを準備中です…\n少しお待ちください。";
+  messagesContainer.appendChild(messageDiv);
+  messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  return messageDiv;
+}
+
+function removePendingSummaryPlaceholder(el) {
+  if (el && el.parentNode) el.parentNode.removeChild(el);
+}
+
 // Handle user input
 async function handleUserInput() {
   const input = document.getElementById("userInput");
@@ -1474,11 +1498,24 @@ async function handleUserInput() {
   clearSectionTimers();
 
   const wasFirstUserTurn = appState.conversationStep === 0;
+  const expectingSummary =
+    appState.awaitingSummaryReply ||
+    sessionStorage.getItem(AWAITING_SUMMARY_SESSION_KEY) === "1";
+  let summaryPlaceholderEl = null;
+  if (expectingSummary) {
+    summaryPlaceholderEl = addPendingSummaryPlaceholder();
+  }
     try {
       // 質問フェーズは従来どおり通常APIで即時応答
       const data = await callOpenAI(userText, resetSession);
       console.log("[DEBUG] full aiResponse", data);
       const aiResponse = data;
+      if (summaryPlaceholderEl) {
+        removePendingSummaryPlaceholder(summaryPlaceholderEl);
+        summaryPlaceholderEl = null;
+      }
+      sessionStorage.removeItem(AWAITING_SUMMARY_SESSION_KEY);
+      appState.awaitingSummaryReply = false;
       if (aiResponse.conversationId) {
         localStorage.setItem(CONVERSATION_ID_KEY, aiResponse.conversationId);
       }
@@ -1536,6 +1573,11 @@ async function handleUserInput() {
       ) {
         appState.summaryGenerated = true;
         persistSummaryDoneForConversation(aiResponse.conversationId);
+      }
+
+      if (aiResponse.isPreSummaryConfirmation) {
+        appState.awaitingSummaryReply = true;
+        sessionStorage.setItem(AWAITING_SUMMARY_SESSION_KEY, "1");
       }
 
       if (shouldShowSections) {
@@ -1610,6 +1652,11 @@ async function handleUserInput() {
         }, QUESTION_DELAY_MS);
       }
     } catch (error) {
+        if (summaryPlaceholderEl) {
+          removePendingSummaryPlaceholder(summaryPlaceholderEl);
+        }
+        sessionStorage.removeItem(AWAITING_SUMMARY_SESSION_KEY);
+        appState.awaitingSummaryReply = false;
         // Show fallback message and keep conversation moving
         const errorMessage = "少し情報が足りないかもしれませんが、今わかる範囲で一緒に整理しますね";
         
@@ -1636,6 +1683,9 @@ async function handleUserInput() {
 function init() {
   resetConversation();
   restoreSummaryFlagsFromStorage();
+  if (sessionStorage.getItem(AWAITING_SUMMARY_SESSION_KEY) === "1") {
+    appState.awaitingSummaryReply = true;
+  }
   clearSectionTimers();
   appState.riskLevel = null;
   appState.userHasSubmitted = false;

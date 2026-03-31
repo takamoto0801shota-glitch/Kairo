@@ -878,6 +878,8 @@ function initConversationState(input = {}) {
     /** 先行まとめ生成と追加情報後の再生成を区別。不一致なら generateSummaryForConfirmation は state.summaryText を上書きしない */
     summaryGenerationEpoch: 0,
     summaryGenerationPromise: null,
+    /** 確認文直前に supplement 済みのとき true。まとめ生成内の追補を省略可能（キャッシュが消えた場合は再実行） */
+    skipSupplementBeforeSummary: false,
     /** クライアントが初回バナー「体調の不安…」を表示したセッション。true の間はまとめ・確認文へ進む前に十分なユーザーターンを要する */
     hasIntroBannerSession: false,
   };
@@ -6007,11 +6009,17 @@ function applySpontaneousSlotFill(state, message, opts = {}) {
     } else if (!state.primarySymptom && symptomType && symptomType !== "other") {
       state.primarySymptom = symptomType;
     }
-    if (setSlotFromSpontaneous(state, "associated_symptoms", {
-      rawAnswer: associated.raw,
-      selectedIndex: associated.selectedIndex,
-      allowOverwrite: correction,
-    })) {
+    // PAIN/INFECTION は4問目（付随症状）を必ず出す。主症状語（喉・熱など）が extract に誤マッチしてスロットが埋まると質問が出ない（KAIRO_SPEC 7.1.1）。
+    const skipAssocSpontaneous =
+      (state.triageCategory === "PAIN" || state.triageCategory === "INFECTION") && !correction;
+    if (
+      !skipAssocSpontaneous &&
+      setSlotFromSpontaneous(state, "associated_symptoms", {
+        rawAnswer: associated.raw,
+        selectedIndex: associated.selectedIndex,
+        allowOverwrite: correction,
+      })
+    ) {
       state.associatedSymptoms = associated.associated || [];
       if (isFirstMessage) {
         state.associatedSymptomsFromFirstMessage = true;
@@ -6346,8 +6354,21 @@ function isThroatMainSymptom(text) {
   const n = String(text).replace(/\s+/g, "");
   return (
     /(喉|のど)(が|の)?(痛|違和|いたい|痛い|痛む|炎症|腫れ|腫れた|赤い|乾燥|カラカラ|イガイガ)/.test(n) ||
-    /(咽頭痛|のどの痛み|喉の痛み|のどの違和感|喉の違和感)/.test(n)
+    /(咽頭痛|咽頭|扁桃|のどの痛み|喉の痛み|のどの違和感|喉の違和感|喉がひりひり|のどがひりひり|喉がゴロゴロ|のどがゴロゴロ)/.test(n)
   );
+}
+
+/** triage が INFECTION かつ主訴・履歴・スロットから喉主症状と判定できるとき */
+function isThroatInfectionSession(state) {
+  if (!state || state.triageCategory !== "INFECTION") return false;
+  const t = [
+    state.primarySymptom || "",
+    state.historyTextForCare || "",
+    state.slotAnswers?.pain_score || "",
+    state.slotAnswers?.worsening || "",
+    state.slotAnswers?.duration || "",
+  ].join(" ");
+  return isThroatMainSymptom(t);
 }
 
 function detectQuestionCategory4(text) {
@@ -6504,11 +6525,26 @@ function textImpliesFeverForInfectionTriage(text) {
   return false;
 }
 
-/** PAIN/INFECTION 共通・付随症状の3択。既に INFECTION 系のときは「発熱がある」を出さず先頭を「これ以外は特にない」とする */
+/**
+ * PAIN/INFECTION 共通・付随症状の3択。
+ * 元から INFECTION 系（triage・喉主症状・主訴／スロット回答に喉の主訴が含まれる）のときは「発熱がある」を出さず先頭を「これ以外は特にない」とする（KAIRO_SPEC 7.1.1）。
+ */
 function isAlreadyInfectionPathForAssociatedOptions(historyText, state, category) {
   if (category === "INFECTION") return true;
   if (state?.triageCategory === "INFECTION") return true;
-  return isThroatMainSymptom(String(historyText || ""));
+  const h = String(historyText || "");
+  const combined = [
+    h,
+    state?.primarySymptom || "",
+    state?.slotAnswers?.pain_score || "",
+    state?.slotAnswers?.worsening || "",
+    state?.slotAnswers?.duration || "",
+    state?.historyTextForCare || "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  if (isThroatMainSymptom(h) || isThroatMainSymptom(combined)) return true;
+  return false;
 }
 
 function buildPainInfectionAssociatedOptions(historyText, state = null, category = null) {
@@ -6870,57 +6906,17 @@ function validateSummaryAgainstNormalized(text, state) {
   return true;
 }
 
-/** 自由記述をそのまま出していないか検出。型テンプレート構造を含む場合は false（整形済み） */
-function isRawFreeText(text) {
-  const s = String(text || "").replace(/^・/, "").trim();
-  if (!s || s.length > 80) return false;
-  const hasTypeTemplate =
-    /に症状が始まった|症状は急に始まった|程度である|を伴っている|がきっかけの可能性|のような痛み|ような痛みが出ている|タイプの痛みが出ている|症状は.*に向かっている|症状は大きく変化していない|発症時より症状が強くなっている|症状は.*に変わっている|体温は.*度である|見られていない|^痛みは/i.test(s);
-  if (hasTypeTemplate) return false;
-  return true;
+/** 箇条書き：ユーザーに近い文言のまま、語尾だけ軽く整える（定型への置換・言い換えはしない） */
+function lightBulletCleanupForUserWords(raw) {
+  let t = String(raw || "").trim();
+  if (!t) return t;
+  t = t.replace(/です$|ます$/, "");
+  t = t.replace(/かも$|かな$/g, "").trim();
+  t = polishMeaningJsonColloquialSentence(t);
+  return t.trim();
 }
 
-/** 自由記述を型に合わせて整形。整形できない場合は null を返す（フィルタで除外） */
-function formatRawBulletToType(text) {
-  const s = String(text || "").replace(/^・/, "").trim();
-  if (!s || s.length > 60) return null;
-  if (!isRawFreeText(`・${s}`)) return null;
-  const t = s.replace(/です$|ます$|から$|だっ?た$/, "").trim();
-  if (/(さっき|今さっき|たった今|数分)/.test(t)) return "・症状は急に始まった";
-  if (/(三日前|二日前|一昨日|数日前|\d+日前|昨日|一日前|数時間前|数時間|今朝|昨夜)/.test(t)) {
-    const m = t.match(/(三日前|二日前|一昨日|数日前|\d+日前|昨日|一日前|数時間前|数時間|今朝|昨夜)/);
-    return m ? `・${m[1]}に症状が始まった` : `・${t}に症状が始まった`;
-  }
-  if (/(動けない|寝込|仕事できない|学校休んだ)/.test(t)) return "・日常生活は動けないほどつらい程度である";
-  if (/(少しつらい|つらいが動ける|無理すれば)/.test(t)) return "・日常生活は少しつらいが動ける程度である";
-  if (/(普通に動ける|問題なく|大丈夫)/.test(t)) return "・日常生活は普通に動ける程度である";
-  if (/(平熱|37度未満)/.test(t)) return "・体温は平熱に近い";
-  if (/(37|微熱)/.test(t)) return "・微熱（37度台）がある";
-  if (/(38|高熱)/.test(t)) return "・38度以上の発熱がある";
-  if (/(悪化|ひどく|強くなって)/.test(t)) return "・発症時より症状が強くなっている";
-  if (/(回復|良くなって|ましに|改善)/.test(t)) return "・症状は回復方向に向かっている";
-  if (/(変わらない|横ばい|同じ)/.test(t)) return "・症状は大きく変化していない";
-  if (/(吐き気|嘔吐)/.test(t)) return "・吐き気を伴っている";
-  if (/(咳や鼻詰まり|鼻づまり|鼻詰まり)/.test(t)) return "・咳や鼻詰まりの症状がある";
-  if (/(咳や発熱|咳.*発熱)/.test(t)) return "・咳や発熱の症状がある";
-  // 「熱」単独は「発熱」に含まれるためマッチさせない（「発熱がある」→だるさまで膨らむのを防ぐ）
-  const hasDaru = /(だるさ|だるい|だる)/.test(t);
-  const hasFever = /(発熱|熱がある|熱っぽい|熱が出|ねつがある|高熱|微熱|熱い|熱だけ)/.test(t);
-  if (hasDaru && hasFever) return "・だるさや発熱の症状がある";
-  if (hasDaru && !hasFever) return "・だるさの症状がある";
-  if (!hasDaru && hasFever) return "・発熱がある";
-  if (/(ストレス|緊張)/.test(t)) return "・ストレスや緊張が影響している可能性";
-  if (/(寝不足|疲れ|睡眠)/.test(t)) return "・寝不足や疲れの影響の可能性";
-  if (/(スマホ|長時間|見た)/.test(t)) return "・スマホの長時間使用がきっかけの可能性";
-  if (/(食|食事|あたり)/.test(t)) return "・食事が影響している可能性";
-  if (/(ズキズキ|キリキリ|ヒリヒリ|チクチク|重い|締め付け)/.test(t)) {
-    const w = t.replace(/する$/, "").trim();
-    return `・${w}のような痛み`;
-  }
-  return null;
-}
-
-/** 箇条書きフィルタ：誤りや日本語として不自然な箇条を検出し、修正する。自由記述をそのまま出していないかもチェック。 */
+/** 箇条書きフィルタ：誤りや日本語として不自然な箇条を検出し、修正する（テンプレへの丸ごと置換はしない）。 */
 function sanitizeBulletPoints(bullets) {
   if (!Array.isArray(bullets)) return [];
   return bullets
@@ -6929,11 +6925,10 @@ function sanitizeBulletPoints(bullets) {
       if (!s) return null;
       if (!/^・/.test(s)) s = `・${s}`;
       if (s.length <= 2) return null;
-      if (isRawFreeText(s)) {
-        const formatted = formatRawBulletToType(s);
-        if (formatted) s = formatted;
-        else return null;
-      }
+      const inner = s.replace(/^・\s*/, "").trim();
+      const cleaned = lightBulletCleanupForUserWords(inner);
+      if (!cleaned) return null;
+      s = `・${cleaned}`;
       // 重複助詞の修正
       s = s.replace(/([はがをにでの])\1+/g, "$1");
       s = s.replace(/のの/g, "の").replace(/がが/g, "が").replace(/はは/g, "は").replace(/をを/g, "を").replace(/にに/g, "に").replace(/でで/g, "で");
@@ -7225,7 +7220,6 @@ function formatUserExtraFactAsStateBullet(text) {
 
 /**
  * 確認文への追加・深掘り文を箇条書き用に整形（sanitizeBulletPoints に通さない）。
- * isRawFreeText→formatRawBulletToType が null で落ちるケース（例:特に目が痛いです）を防ぐ。
  * 「問題ない」単独などは null（誤って肯定とみなさない）。
  */
 function formatConfirmationExtraFactSegment(seg) {
@@ -7957,7 +7951,7 @@ function mergeMissingBulletLinesIntoStateAboutCache(state, base, missingLines) {
     deduped.push(line);
     added++;
   }
-  state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(deduped.slice(0, 12), state);
+  state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(deduped.slice(0, 14), state);
   return added;
 }
 
@@ -8008,14 +8002,9 @@ function collectRawSlotTextsForSimpleBullets(state) {
     .join("\n");
 }
 
-/** 箇条書き用：口語を軽く整える（意味は維持。大げさな言い換えはしない） */
+/** 箇条書き用：ユーザー表現を変えず語尾等のみ軽く整える（sanitizeBulletPoints と同方針） */
 function polishUserSlotForBulletLine(raw) {
-  let t = String(raw || "").trim().replace(/です$|ます$/, "");
-  t = t.replace(/かも$|かな$/g, "").trim();
-  t = t.replace(/^ちょっと/, "やや");
-  t = t.replace(/^少し/, "やや");
-  t = polishMeaningJsonColloquialSentence(t);
-  return t.trim();
+  return lightBulletCleanupForUserWords(raw);
 }
 
 /** 箇条書きに既に同趣旨の文が入っているか（重複注入防止） */
@@ -8043,9 +8032,11 @@ function getDurationTextForBullets(state) {
 
 /**
  * Phase1 が経過・悪化傾向を落とした場合の補完。スロットに実回答がある限り箇条書きに載せる。
+ * @param {{ maxOut?: number }} [opts] maxOut 省略時は 8（確認文まわりでは 14 などに拡げる）
  */
-function injectMissingSlotBulletsFromState(bullets, state, category) {
+function injectMissingSlotBulletsFromState(bullets, state, category, opts = {}) {
   if (!state || !Array.isArray(bullets)) return bullets;
+  const maxOut = typeof opts.maxOut === "number" ? opts.maxOut : 8;
   const answers = state.slotAnswers || {};
   const val = (statusKey, fallback = "") => getSlotStatusValue(state, statusKey, fallback);
   const out = [...bullets];
@@ -8063,7 +8054,143 @@ function injectMissingSlotBulletsFromState(bullets, state, category) {
   if (toInsert.length === 0) return out;
   const insertAt = out.length >= 1 ? 1 : 0;
   out.splice(insertAt, 0, ...toInsert);
-  return out.slice(0, 8);
+  return out.slice(0, maxOut);
+}
+
+/** 確認文カバレッジ：付随の「ないです」等は表示専用行で代替するため raw 値の網羅を求めない */
+function isRawSlotValueExcludedFromBulletCoverage(label, value) {
+  const v = String(value || "").trim();
+  const l = String(label || "").trim();
+  if (!v) return true;
+  if (isAbsentOrUnknownSlotBulletAnswer(v)) return true;
+  if (/付随症状/.test(l) && /^(ない|なし|特にない|ないです|特にないです|これ以外は特にない|他はない)/i.test(v)) {
+    return true;
+  }
+  if (
+    /影響・見た目・体温/.test(l) &&
+    /^(ない|なし|わからない|分からない|不明|ないです|特にないです)$/i.test(v)
+  ) {
+    return true;
+  }
+  if (/きっかけ・原因/.test(l) && /^(ない|なし|わからない|分からない|不明)$/i.test(v)) {
+    return true;
+  }
+  return false;
+}
+
+/** collectRawInputsForMeaningJson の raw と照合し、箇条書きに未反映のスロット値を追記する */
+function mergeRawSlotInputsIntoBullets(state, bullets) {
+  const { raw } = collectRawInputsForMeaningJson(state);
+  if (!raw || raw === "ユーザーの回答がまだありません") return bullets;
+  const out = Array.isArray(bullets) ? [...bullets] : [];
+  for (const line of raw.split("\n")) {
+    const m = line.match(/^([^:]+):\s*(.+)$/);
+    if (!m) continue;
+    const label = m[1].trim();
+    const value = m[2].trim();
+    if (/^会話内自由記述/.test(label)) continue;
+    if (isRawSlotValueExcludedFromBulletCoverage(label, value)) continue;
+    if (!bulletLinesCoverSlotText(out, value)) {
+      out.push(`・${polishUserSlotForBulletLine(value)}`);
+    }
+  }
+  return out;
+}
+
+/** 上記 raw 由来で「載せるべき値」が箇条書きに含まれるか検証。不足時は値文字列の配列を返す */
+function validateBulletCoverageFromRaw(state, bullets) {
+  const { raw } = collectRawInputsForMeaningJson(state);
+  if (!raw || raw === "ユーザーの回答がまだありません") return { ok: true, missing: [] };
+  const missing = [];
+  for (const line of raw.split("\n")) {
+    const m = line.match(/^([^:]+):\s*(.+)$/);
+    if (!m) continue;
+    const label = m[1].trim();
+    const value = m[2].trim();
+    if (/^会話内自由記述/.test(label)) continue;
+    if (isRawSlotValueExcludedFromBulletCoverage(label, value)) continue;
+    if (!bulletLinesCoverSlotText(bullets, value)) missing.push(value);
+  }
+  const unique = [...new Set(missing)];
+  return { ok: unique.length === 0, missing: unique };
+}
+
+function appendMissingRawValuesAsBullets(bullets, missingValues) {
+  const out = Array.isArray(bullets) ? bullets.slice() : [];
+  for (const v of missingValues || []) {
+    const val = String(v || "").trim();
+    if (!val) continue;
+    if (bulletLinesCoverSlotText(out, val)) continue;
+    out.push(`・${polishUserSlotForBulletLine(val)}`);
+  }
+  return out;
+}
+
+/**
+ * まとめ前確認文用：TwoStage/レガシー後に raw 網羅を必ず満たす（validate → 不足追記を繰り返す）。
+ * state.stateAboutBulletsCache を最終形で上書きする。
+ */
+function enforceConfirmationBulletsCompleteness(state) {
+  if (!state) return [];
+  syncHistoryTextForCareFromConversation(state);
+  const cat = state.triageCategory || resolveQuestionCategoryFromState(state) || "PAIN";
+  let base =
+    Array.isArray(state.stateAboutBulletsCache) && state.stateAboutBulletsCache.length > 0
+      ? state.stateAboutBulletsCache.slice()
+      : buildStateFactsBulletsLegacy(state, { forSummary: true });
+  if (!Array.isArray(base)) base = [];
+  base = sanitizeBulletPoints(base);
+  base = injectMissingSlotBulletsFromState(base, state, cat, { maxOut: 14 }) || base;
+  base = sanitizeBulletPoints(base);
+  base = mergeRawSlotInputsIntoBullets(state, base);
+  base = sanitizeBulletPoints(base);
+
+  let check = validateBulletCoverageFromRaw(state, base);
+  if (!check.ok) {
+    base = appendMissingRawValuesAsBullets(base, check.missing);
+    base = sanitizeBulletPoints(base);
+  }
+  check = validateBulletCoverageFromRaw(state, base);
+  if (!check.ok) {
+    const userLines = collectUserUtterancesForBulletCoverage(state);
+    const heur = heuristicSupplementBulletsFromUserUtterances(base, userLines);
+    if (heur && heur.length) {
+      mergeMissingBulletLinesIntoStateAboutCache(state, base, heur);
+      base = state.stateAboutBulletsCache.slice();
+    }
+    base = mergeRawSlotInputsIntoBullets(state, base);
+    base = sanitizeBulletPoints(base);
+    check = validateBulletCoverageFromRaw(state, base);
+    if (!check.ok) {
+      base = appendMissingRawValuesAsBullets(base, check.missing);
+      base = sanitizeBulletPoints(base);
+    }
+  }
+
+  state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
+    sanitizeBulletPoints(base).slice(0, 18),
+    state
+  );
+  let finalCheck = validateBulletCoverageFromRaw(state, state.stateAboutBulletsCache);
+  if (!finalCheck.ok) {
+    console.warn("[KAIRO] confirmation bullets coverage incomplete after enforce; appending", {
+      conversationId: state.conversationId,
+      missingCount: finalCheck.missing.length,
+    });
+    const patched = appendMissingRawValuesAsBullets(state.stateAboutBulletsCache.slice(), finalCheck.missing);
+    state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
+      sanitizeBulletPoints(patched).slice(0, 18),
+      state
+    );
+    finalCheck = validateBulletCoverageFromRaw(state, state.stateAboutBulletsCache);
+    if (!finalCheck.ok) {
+      console.warn("[KAIRO] confirmation bullets coverage still incomplete after append", {
+        conversationId: state.conversationId,
+        missing: finalCheck.missing.slice(0, 10),
+      });
+    }
+  }
+  return state.stateAboutBulletsCache.slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS);
 }
 
 /** 箇条書き：Phase1 は統一 JSON のみ。痛みの強さ1行はサーバ固定で先頭に付与。箇条書き本文は formatBulletsFromMeaningJson で整形。 */
@@ -8095,8 +8222,9 @@ async function buildStateFactsBulletsTwoStage(state, opts = {}) {
         MEANING_JSON_CONTEXT_RULES,
         catHint,
         "【onset・trend】単語のみ禁止。経過・変化の事実を変えないこと。表現の型は問わない。",
+        "【必須・漏れ禁止】ラベル付きのユーザー回答（痛みの強さ・症状の様子・経過・悪化傾向・影響・付随・きっかけ等）に具体値がある項目は、JSON と format 後の箇条書きの双方に必ず反映する（省略・丸ごと落としは禁止。不明のみ「不明」と明示）。",
         "【必須】ユーザー回答に「経過時間:」があり、空・ない・わからない以外であれば onset に必ず書く（JSON で空にしない）。「悪化傾向:」がある場合は trend に必ず書く。",
-        "悪化の表現は緊急度判定用に強い語を使わなくてよい。ユーザーが「ちょっと悪化しているかも」なら、書き言葉で「やや悪化している」「やや発症時より悪くなっている」など短くてよい（事実を変えないこと）。",
+        "悪化の表現は緊急度判定用に強い語を使わなくてよい。ユーザーが述べた内容・語彙をそのまま活かし、語尾だけを整える程度に（「発症時より〜」などの定型への言い換えはしない。事実を変えないこと）。",
         "【otherSymptoms】各要素は完結した文。名詞単体禁止。付随なしなら otherSymptoms:[] と noOtherSymptoms:true。",
         "【箇条書き・複数事実（全スロット共通）】ユーザーが1つの回答欄で複数の独立した症状・事実を並べた場合（例: 鼻詰まりと発熱、咳と微熱（37.1）、頭痛と吐き気）は、otherSymptoms を複数要素に分割する。context に複数の独立した背景事実がある場合も、意味単位で分けて書く（長い1文に詰めない）。format 後の箇条書きでは、・鼻詰まりがある／・微熱（37.1）がある のように症状・測定値ごとに1行。1行に「・AとBがある」だけを詰めない。",
         "例外（サーバが表示専用で1行付与）: PAIN で付随「これ以外は特にない」、GI で「特に変化はない」は otherSymptoms:[]・noOtherSymptoms:false。",
@@ -8123,7 +8251,7 @@ async function buildStateFactsBulletsTwoStage(state, opts = {}) {
       const bullets = formatBulletsFromMeaningJson(parsed, category);
       if (bullets.length < 2) continue;
       let sanitized = sanitizeBulletPoints(bullets);
-      sanitized = injectMissingSlotBulletsFromState(sanitized, state, category);
+      sanitized = injectMissingSlotBulletsFromState(sanitized, state, category, { maxOut: 14 });
       sanitized = sanitizeBulletPoints(sanitized);
       if (sanitized.length < 2) continue;
       if (!validateStateAboutBulletsQuality(sanitized, raw, parsed, category)) continue;
@@ -8902,11 +9030,11 @@ async function buildStateAboutEmpathyAndJudgmentAsync(state, level) {
   return buildStateAboutEmpathyAndJudgment(state, level);
 }
 
-const PRE_SUMMARY_CONFIRMATION_MAX_BULLETS = 10;
+const PRE_SUMMARY_CONFIRMATION_MAX_BULLETS = 14;
 
 /** まとめ前確認文：①導入 ②箇条書き ③確認2行（共感・判断はまとめ側へ移動） */
 function buildPreSummaryConfirmationMessage(state) {
-  const bulletLines = buildStateFactsBullets(state, { forSummary: true });
+  const bulletLines = enforceConfirmationBulletsCompleteness(state);
   const bullets = Array.isArray(bulletLines)
     ? bulletLines.slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS)
     : [];
@@ -9189,7 +9317,8 @@ function buildRedVisitReasonsBullets(state) {
 
   const worsening = val("worsening", answers.worsening) || val("worsening_trend", answers.worsening_trend);
   if (worsening && !isUnknown(worsening) && /悪化|悪くなっ|ひどくなっ/.test(worsening)) {
-    bullets.push("・発症時より悪化している");
+    const w = lightBulletCleanupForUserWords(String(worsening).trim());
+    if (w) bullets.push(`・${w}`);
   }
 
   const impact = val("impact", answers.daily_impact);
@@ -11779,6 +11908,10 @@ function calculateRiskFromState(state) {
       console.log("---- KAIRO URGENCY DEBUG (worsening_trend=発症時より悪化 かつ pain>=5 → RED) ----");
       return { ratio: 1, level: "🔴", urgency: "red" };
     }
+    // 喉主症状 INFECTION：経過の「悪化」で痛みが強くないときは 🔴 にせず最低🟡（KAIRO_SPEC）
+    if (isThroatInfectionSession(state)) {
+      return { ratio: 0.52, level: "🟡", urgency: "yellow" };
+    }
   }
 
   const scores = {
@@ -11947,8 +12080,17 @@ async function generateSummaryForConfirmation(conversationId) {
   }
   const epochAtStart = state.summaryGenerationEpoch;
   ensureUserUtterancesCapturedBeforeConfirmation(conversationId, state);
-  // 照合・追補は確認文表示をブロックしないようここ（まとめ生成直前）で実行する
-  await supplementStateBulletsFromUncoveredUserUtterances(state);
+  const hadSkip = !!state.skipSupplementBeforeSummary;
+  if (state.skipSupplementBeforeSummary) {
+    state.skipSupplementBeforeSummary = false;
+  }
+  const hasBulletsAfterEnsure =
+    Array.isArray(state.stateAboutBulletsCache) && state.stateAboutBulletsCache.length > 0;
+  const needSupplement = !hasBulletsAfterEnsure || !hadSkip;
+  await Promise.all([
+    needSupplement ? supplementStateBulletsFromUncoveredUserUtterances(state) : Promise.resolve(),
+    resolveLocationContext(state, state.clientMeta),
+  ]);
   if (state.summaryGenerationEpoch !== epochAtStart) {
     return { message: state.summaryText || "", followUpQuestion: null, followUpMessage: null };
   }
@@ -11970,23 +12112,13 @@ async function generateSummaryForConfirmation(conversationId) {
     return "pain_fever";
   })();
   const otcWarningIndex = Math.floor(Math.random() * 5);
-  await resolveLocationContext(state, state.clientMeta);
   const locationContext = state.locationContext || {};
-  const hasLocationSnapshot = !!(state?.locationSnapshot?.lat && state?.locationSnapshot?.lng);
   if (level === "🔴") {
-    if (hasLocationSnapshot) {
-      [state.clinicCandidates, state.hospitalCandidates, state.pharmacyCandidates] = await Promise.all([
-        resolveCareCandidates(state, careDestination),
-        resolveHospitalCandidates(state),
-        resolvePharmacyCandidates(state),
-      ]);
-    } else {
-      [state.clinicCandidates, state.hospitalCandidates] = await Promise.all([
-        resolveCareCandidates(state, careDestination),
-        resolveHospitalCandidates(state),
-      ]);
-      state.pharmacyCandidates = await resolvePharmacyCandidates(state);
-    }
+    [state.clinicCandidates, state.hospitalCandidates, state.pharmacyCandidates] = await Promise.all([
+      resolveCareCandidates(state, careDestination),
+      resolveHospitalCandidates(state),
+      resolvePharmacyCandidates(state),
+    ]);
   } else {
     // 🟢/🟡: 薬局検索を非同期で行い、まとめ表示を待たせない
     state.pharmacyCandidates = [];
@@ -13043,12 +13175,18 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    // 6スロット完了時: 確認文を即返却（TwoStage は待たない）。返却直後にバックグラウンドで箇条書き整形→まとめ生成を開始。表示はユーザー応答時のみ。
+    // 6スロット完了時: 確認文の箇条書きは TwoStage＋追補を await してから組み立てる（非同期だとキャッシュ未生成で欠落する）。まとめ生成のみバックグラウンド。
     if (shouldJudgeNow && !conversationState[conversationId].confirmationShown && !conversationState[conversationId].summaryShown) {
       ensureUserUtterancesCapturedBeforeConfirmation(conversationId, conversationState[conversationId]);
-      const confirmMsg = buildPreSummaryConfirmationMessage(
-        conversationState[conversationId]
-      );
+      const stPre = conversationState[conversationId];
+      try {
+        await buildStateFactsBulletsTwoStage(stPre);
+        await supplementStateBulletsFromUncoveredUserUtterances(stPre);
+        stPre.skipSupplementBeforeSummary = true;
+      } catch (e) {
+        console.error("[Pre-summary bullets]", e?.message || e);
+      }
+      const confirmMsg = buildPreSummaryConfirmationMessage(conversationState[conversationId]);
       conversationHistory[conversationId].push({ role: "assistant", content: confirmMsg });
       conversationState[conversationId].confirmationPending = true;
       conversationState[conversationId].confirmationShown = true;
@@ -13058,8 +13196,6 @@ app.post("/api/chat", async (req, res) => {
         const st = conversationState[conversationId];
         if (!st) return;
         try {
-          await buildStateFactsBulletsTwoStage(st);
-          await supplementStateBulletsFromUncoveredUserUtterances(st);
           if (!st.summaryGenerationPromise) {
             st.summaryGenerationPromise = generateSummaryForConfirmation(conversationId);
           }

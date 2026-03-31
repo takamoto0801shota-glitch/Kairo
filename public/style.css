@@ -211,10 +211,18 @@ body {
     font-weight: 300;
 }
 
+/* まとめ生成待ち（確認応答直後のプレースホルダ） */
+.message.ai.summary-pending {
+    color: #5a7a74;
+    font-style: italic;
+    font-weight: 400;
+}
+
 /* Kairoメッセージは動かさない（横・縦・フェード禁止） */
 .message.ai,
 .message.ai.has-blocks,
 .message.ai.loading,
+.message.ai.summary-pending,
 .message.ai .message-block,
 .message.ai .block-header,
 .message.ai .block-content {
