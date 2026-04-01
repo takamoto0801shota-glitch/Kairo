@@ -1294,6 +1294,26 @@ function renderSafeFallback() {
   renderSummaryBase(`🟡 ${text}`);
 }
 
+/** 確認文直後：サーバ同期の「今の状態について（簡易）」のみ。詳細まとめは返信後にチャットへ */
+function renderSummaryQuickPreview(text) {
+  const summaryCard = document.getElementById("summaryCard");
+  if (!summaryCard || !text || typeof text !== "string") return;
+  clearSummaryContainer();
+  const contentDiv = document.createElement("div");
+  contentDiv.id = "summaryCardContent";
+  contentDiv.className = "summary-card-content summary-quick-preview";
+  contentDiv.textContent = text.trim();
+  summaryCard.appendChild(contentDiv);
+  const footer = document.createElement("div");
+  footer.className = "summary-quick-preview-footer";
+  footer.textContent =
+    "詳細（今すぐやること・受診先など）は準備中です。返信後に全文をお見せします。";
+  summaryCard.appendChild(footer);
+  summaryCard.style.display = "block";
+  summaryCard.style.opacity = "1";
+  summaryCard.style.visibility = "visible";
+}
+
 function renderSummary() {
   // 初回バナー直後・フォロー文直後はまとめカードを出さない（ヒアリング／フォロー分岐のみ）
   if (
@@ -1578,6 +1598,9 @@ async function handleUserInput() {
       if (aiResponse.isPreSummaryConfirmation) {
         appState.awaitingSummaryReply = true;
         sessionStorage.setItem(AWAITING_SUMMARY_SESSION_KEY, "1");
+        if (aiResponse.summaryQuickPreview && typeof aiResponse.summaryQuickPreview === "string") {
+          renderSummaryQuickPreview(aiResponse.summaryQuickPreview);
+        }
       }
 
       if (shouldShowSections) {

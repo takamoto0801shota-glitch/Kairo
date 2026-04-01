@@ -383,6 +383,24 @@ body {
     padding: 0;
 }
 
+.summary-card-content.summary-quick-preview {
+    font-weight: 500;
+    font-size: 14px;
+    text-align: left;
+    max-height: 40vh;
+    overflow-y: auto;
+    line-height: 1.55;
+}
+
+.summary-quick-preview-footer {
+    font-size: 12px;
+    color: #5a7a74;
+    margin-top: 8px;
+    text-align: center;
+    font-weight: 400;
+    line-height: 1.45;
+}
+
 /* AIメッセージのブロック（カード）スタイル */
 .message.ai .message-block {
     background-color: #ffffff;

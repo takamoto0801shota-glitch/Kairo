@@ -878,10 +878,14 @@ function initConversationState(input = {}) {
     /** 先行まとめ生成と追加情報後の再生成を区別。不一致なら generateSummaryForConfirmation は state.summaryText を上書きしない */
     summaryGenerationEpoch: 0,
     summaryGenerationPromise: null,
+    /** プリフェッチ開始時の入力フィンガープリント。変更がなければ Promise を再生成しない */
+    summaryPrefetchFingerprint: null,
     /** 確認文直前に supplement 済みのとき true。まとめ生成内の追補を省略可能（キャッシュが消えた場合は再実行） */
     skipSupplementBeforeSummary: false,
     /** クライアントが初回バナー「体調の不安…」を表示したセッション。true の間はまとめ・確認文へ進む前に十分なユーザーターンを要する */
     hasIntroBannerSession: false,
+    /** 初回安全文（17.1）で使った主症状短縮ラベル。🤝②「一時的な〇〇」と必ず同期する（KAIRO_SPEC 650） */
+    safetyIntroMainSymptomLabel: null,
   };
 }
 
@@ -7054,7 +7058,98 @@ function formatOnsetTrendBullet(prefix, rawVal, kind) {
   return v.startsWith("・") ? v : `・${v}`;
 }
 
-/** Phase2：統一JSONのみ参照。1行目は名詞句。出力順固定。最大8行（複数症状の分割に対応）。 */
+/**
+ * 箇条書き1行を KAIRO_SPEC（1行＝完結した自然な一文）に近づける。既に十分な文ならそのまま。
+ */
+function coerceStateAboutBulletFragmentToSentenceInner(text, label) {
+  let t = String(text || "").trim();
+  if (!t) return t;
+  if (/^痛みは/.test(t)) return t;
+  if (
+    /(が出ている|がある|を伴っている|見られている|の可能性|である|から始まっている|から続いている|続いている|始まっている)/.test(t) &&
+    t.length >= 8
+  ) {
+    return t;
+  }
+  if (/可能性$/.test(t) && !/の可能性$/.test(t)) {
+    t = t.replace(/可能性$/, "の可能性");
+    if (t.length >= 12) return t;
+  }
+  if (/^(さっき|今さっき|たった今|数分|数十分|数時間前|昨日|一昨日|今朝|昨夜|\d+\s*日前|\d+\s*時間)/.test(t)) {
+    return `症状は${t}から始まっている`;
+  }
+  if (/^(ズキズキ|キリキリ|ヒリヒリ|チクチク|重い|締め付け|鈍い)(する)?$/.test(t)) {
+    const head = t.replace(/する$/, "");
+    return `${head}する痛みが出ている`;
+  }
+  if (/^(吐き気|嘔吐|発熱|咳|のどの痛み|鼻詰まり)$/.test(t)) {
+    return `${t}がある`;
+  }
+  if (/^経過の様子は/.test(t) || /^症状は/.test(t) || /^日常生活や身体への影響は/.test(t)) {
+    return t;
+  }
+  if (/悪化|マシ|波|回復|横ばい|悪くな|良くな/.test(t) && t.length >= 8) {
+    return `経過の様子は${t}`;
+  }
+  if (t.length < 22 && !/(が出ている|がある|である|を伴っている|見られている|の可能性)/.test(t)) {
+    return `${t}が出ている`;
+  }
+  return t;
+}
+
+/** raw ラベル付きスロット値 → 確認文・まとめ用の一文箇条書き */
+function coerceSlotLabelAndValueToBulletLine(label, value) {
+  const l = String(label || "").trim();
+  let v = lightBulletCleanupForUserWords(String(value || "").trim());
+  if (!v) return null;
+  if (/^痛みの強さ/.test(l)) {
+    const n = v.replace(/^痛みは\s*/i, "").trim();
+    return `・痛みは${n}`;
+  }
+  if (/^症状の様子/.test(l)) {
+    if (/^症状の様子は/.test(v)) return `・${v}`;
+    if (v.length >= 12 && /(が出ている|である|ある|続いている)/.test(v)) return `・${v}`;
+    return `・症状の様子は${v}である`;
+  }
+  if (/^経過時間/.test(l)) {
+    if (/^症状は/.test(v) && /(から続い|から始ま)/.test(v)) return `・${v}`;
+    if (v.length >= 10 && /(から|続い|経過|始ま|前から)/.test(v)) return `・${v}`;
+    return `・症状は${v}から続いている`;
+  }
+  if (/^悪化傾向/.test(l)) {
+    if (/^経過の様子は/.test(v)) return `・${v}`;
+    if (v.length >= 10 && /(ている|ある|である|悪化|回復|横ばい|マシ|波)/.test(v)) return `・${v}`;
+    return `・経過の様子は${v}である`;
+  }
+  if (/^影響・見た目・体温/.test(l)) {
+    return `・日常生活や身体への影響は${v}である`;
+  }
+  if (/^付随症状/.test(l)) {
+    if (v.length >= 8 && /(がある|を伴っている|がみられる)/.test(v)) return `・${v}`;
+    return `・${v}がある`;
+  }
+  if (/^きっかけ・原因/.test(l)) {
+    const c = polishCausePhraseToWrittenJapanese(v);
+    if (c) return `・${c}`;
+    return `・${coerceStateAboutBulletFragmentToSentenceInner(v, l)}`;
+  }
+  if (/^追加情報/.test(l)) {
+    return v.length >= 12 ? `・${v}` : `・${coerceStateAboutBulletFragmentToSentenceInner(v, l)}`;
+  }
+  return `・${coerceStateAboutBulletFragmentToSentenceInner(v, l)}`;
+}
+
+function finalizeMeaningJsonBulletLinesForSpec(bullets) {
+  if (!Array.isArray(bullets)) return [];
+  return bullets.map((line) => {
+    const inner = String(line || "").replace(/^・\s*/, "").trim();
+    if (!inner) return line;
+    const fixed = coerceStateAboutBulletFragmentToSentenceInner(inner, null);
+    return `・${fixed}`;
+  });
+}
+
+/** Phase2：統一JSONのみ参照。1行＝1意味の完結した自然文。出力順固定。最大8行（複数症状の分割に対応）。 */
 function formatBulletsFromMeaningJson(meaning, category = "PAIN") {
   if (!meaning || typeof meaning !== "object") return [];
   const bullets = [];
@@ -7073,7 +7168,9 @@ function formatBulletsFromMeaningJson(meaning, category = "PAIN") {
     let m = main
       .replace(/ような痛みが出ているような痛み/g, "ような痛み")
       .replace(/痛みが出ているような痛み/g, "痛み");
-    m = m.replace(/が出ている$|である$|です$|ます$|ている$|あった$|なった$/, "").trim();
+    if (!/(が出ている|がある|である|を伴っている|見られている)$/.test(m)) {
+      m = `${m}が出ている`;
+    }
     bullets.push(`・${m}`);
   }
   const onset = String(meaning.onset || "").trim();
@@ -7106,7 +7203,7 @@ function formatBulletsFromMeaningJson(meaning, category = "PAIN") {
     if (c) bullets.push(`・${c}`);
   }
   const out = bullets.slice(0, 8).filter(Boolean);
-  return out;
+  return finalizeMeaningJsonBulletLinesForSpec(out);
 }
 
 /** 付随症状スロットの生の選択肢（表示専用ポリシー用）。判断ロジック・LLMには渡さない。 */
@@ -8091,7 +8188,8 @@ function mergeRawSlotInputsIntoBullets(state, bullets) {
     if (/^会話内自由記述/.test(label)) continue;
     if (isRawSlotValueExcludedFromBulletCoverage(label, value)) continue;
     if (!bulletLinesCoverSlotText(out, value)) {
-      out.push(`・${polishUserSlotForBulletLine(value)}`);
+      const line = coerceSlotLabelAndValueToBulletLine(label, value);
+      if (line) out.push(line);
     }
   }
   return out;
@@ -8121,7 +8219,7 @@ function appendMissingRawValuesAsBullets(bullets, missingValues) {
     const val = String(v || "").trim();
     if (!val) continue;
     if (bulletLinesCoverSlotText(out, val)) continue;
-    out.push(`・${polishUserSlotForBulletLine(val)}`);
+    out.push(`・${coerceStateAboutBulletFragmentToSentenceInner(val, null)}`);
   }
   return out;
 }
@@ -8190,10 +8288,14 @@ function enforceConfirmationBulletsCompleteness(state) {
       });
     }
   }
+  state.stateAboutBulletsCache = finalizeMeaningJsonBulletLinesForSpec(state.stateAboutBulletsCache);
   return state.stateAboutBulletsCache.slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS);
 }
 
-/** 箇条書き：Phase1 は統一 JSON のみ。痛みの強さ1行はサーバ固定で先頭に付与。箇条書き本文は formatBulletsFromMeaningJson で整形。 */
+/**
+ * 箇条書き：Phase1 は統一 JSON のみ。痛みの強さ1行はサーバ固定で先頭に付与。箇条書き本文は formatBulletsFromMeaningJson で整形。
+ * 性能（④）: meaning_json・supplement・まとめ要約を1プロンプト統合する案はトークン・品質トレードオフが大きいため、別途フラグ設計時に検証する。
+ */
 async function buildStateFactsBulletsTwoStage(state, opts = {}) {
   if (!state || !process.env.OPENAI_API_KEY) return null;
   syncHistoryTextForCareFromConversation(state);
@@ -8222,6 +8324,7 @@ async function buildStateFactsBulletsTwoStage(state, opts = {}) {
         MEANING_JSON_CONTEXT_RULES,
         catHint,
         "【onset・trend】単語のみ禁止。経過・変化の事実を変えないこと。表現の型は問わない。",
+        "【Phase2前提・一文必須】onset は「症状は〜から続いている／始まっている」のように主語つきの一文。trend も完結した一文。otherSymptoms は「〜がある」「〜を伴っている」で終える。main_symptom は必ず「〜が出ている」で終える。名詞だけ・時刻だけ（例:数時間前）・タイプだけ（例:ズキズキする）の onset／main は禁止。",
         "【必須・漏れ禁止】ラベル付きのユーザー回答（痛みの強さ・症状の様子・経過・悪化傾向・影響・付随・きっかけ等）に具体値がある項目は、JSON と format 後の箇条書きの双方に必ず反映する（省略・丸ごと落としは禁止。不明のみ「不明」と明示）。",
         "【必須】ユーザー回答に「経過時間:」があり、空・ない・わからない以外であれば onset に必ず書く（JSON で空にしない）。「悪化傾向:」がある場合は trend に必ず書く。",
         "悪化の表現は緊急度判定用に強い語を使わなくてよい。ユーザーが述べた内容・語彙をそのまま活かし、語尾だけを整える程度に（「発症時より〜」などの定型への言い換えはしない。事実を変えないこと）。",
@@ -8425,8 +8528,27 @@ const PRE_SUMMARY_ADD_MORE_PHRASES = [
   "他に伝えたいことがあれば教えてください。",
 ];
 
-/** ② 一時的な〇〇：初回安全文と同じ主症状短縮（KAIRO_SPEC 🤝 🟢🟡） */
+/** 会話の最初のユーザー発言（初回ヒアリングの根拠） */
+function getFirstUserMessageTextForState(state) {
+  if (!state?.conversationId) return "";
+  const hist = conversationHistory[state.conversationId];
+  if (!hist || !Array.isArray(hist)) return "";
+  const u = hist.find((m) => m.role === "user");
+  return u ? String(u.content || "").trim() : "";
+}
+
+/**
+ * ② 一時的な〇〇：初回安全文の toMainSymptomLabelForSafety と同一ラベルを必ず使う（KAIRO_SPEC 650）。
+ * primarySymptom や箇条書き由来の短語に上書きされないよう、初回応答時に保存した safetyIntroMainSymptomLabel を最優先。
+ */
 function greenYellowPatternNounForTemporary(state) {
+  const pinned = String(state?.safetyIntroMainSymptomLabel || "").trim();
+  if (pinned) return pinned;
+  const firstUser = getFirstUserMessageTextForState(state);
+  if (firstUser) {
+    const fromFirst = toMainSymptomLabelForSafety(firstUser);
+    if (fromFirst && fromFirst !== "症状") return fromFirst;
+  }
   const m = compactMainSymptomNounForRed(state);
   if (m && m !== "症状") return m;
   return "体調不良";
@@ -9031,6 +9153,36 @@ async function buildStateAboutEmpathyAndJudgmentAsync(state, level) {
 }
 
 const PRE_SUMMARY_CONFIRMATION_MAX_BULLETS = 14;
+
+/** 確認文直後レスポンス用：LLM なし・箇条書きキャッシュから「今の状態について」簡易版のみ（1秒以内目標） */
+function buildSummaryQuickPreviewFromState(state) {
+  if (!state) return "";
+  const level = finalizeRiskLevel(state);
+  const bullets = buildStateFactsBullets(state, { forSummary: true });
+  const bulletBlock =
+    Array.isArray(bullets) && bullets.length > 0
+      ? bullets.join("\n")
+      : "（状態を整理しています）";
+  return [
+    `${level} ここまでの情報を整理します`,
+    buildSummaryIntroTemplate(),
+    "",
+    "🤝 今の状態について（簡易）",
+    bulletBlock,
+  ].join("\n");
+}
+
+/** プリフェッチ再実行判定用（スロット・箇条書き・追加事実・会話要約の変化で無効化） */
+function computeSummaryPrefetchFingerprint(state) {
+  if (!state) return "";
+  const bullets = Array.isArray(state.stateAboutBulletsCache)
+    ? state.stateAboutBulletsCache.join("\x1e")
+    : "";
+  const slots = state.slotFilled ? JSON.stringify(state.slotFilled) : "";
+  const extra = (state.confirmationExtraFacts || []).join("\x1e");
+  const care = String(state.historyTextForCare || "").length;
+  return `${state.summaryGenerationEpoch}|${slots}|${bullets}|${extra}|${care}`;
+}
 
 /** まとめ前確認文：①導入 ②箇条書き ③確認2行（共感・判断はまとめ側へ移動） */
 function buildPreSummaryConfirmationMessage(state) {
@@ -12286,23 +12438,33 @@ async function generateSummaryForConfirmation(conversationId) {
     }
     const stateBullets = buildStateFactsBullets(state, { forSummary: true });
     const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "";
-    let lastBlock = "";
-    for (let i = 0; i < 5; i++) {
-      try {
-        lastBlock = await generateLastBlockWithLLM(level, state, stateBlock);
-        break;
-      } catch (_) {}
-    }
-    const actionsBlock = await (async () => {
-      const historyText = (history || []).filter((m) => m.role === "user").map((m) => m.content).join("\n");
-      const ctx = buildCurrentStateContext(state, historyText, state?.lastConcreteDetailsText || "");
-      const lastResort = await generateMinimalActionsLastResort(ctx);
-      if (lastResort.length > 0) {
-        return lastResort.map((a) => `・${a.title}\n→ ${a.reason}`).join("\n\n");
-      }
-      const supplemented = ensureActionCount([], 2, ctx, {});
-      return supplemented.map((a) => `・${toConciseActionTitle(a.title)}\n→ ${ensureReliableReason(a.reason, {})}`).join("\n\n");
-    })();
+    const historyText = (history || []).filter((m) => m.role === "user").map((m) => m.content).join("\n");
+    const ctx = buildCurrentStateContext(state, historyText, state?.lastConcreteDetailsText || "");
+    const [lastBlock, actionsBlock] = await Promise.all([
+      (async () => {
+        for (let i = 0; i < 5; i++) {
+          try {
+            return await generateLastBlockWithLLM(level, state, stateBlock);
+          } catch (_) {
+            /* retry */
+          }
+        }
+        return "";
+      })(),
+      (async () => {
+        try {
+          const lastResort = await generateMinimalActionsLastResort(ctx);
+          if (lastResort.length > 0) {
+            return lastResort.map((a) => `・${a.title}\n→ ${a.reason}`).join("\n\n");
+          }
+          const supplemented = ensureActionCount([], 2, ctx, {});
+          return supplemented.map((a) => `・${toConciseActionTitle(a.title)}\n→ ${ensureReliableReason(a.reason, {})}`).join("\n\n");
+        } catch (e) {
+          console.error("[generateSummaryForConfirmation minimal actions]", e?.message || e);
+          return "・無理をせず、安静を優先してください\n→ 今の状態で負担を減らす行動は、回復を早める助けになります。";
+        }
+      })(),
+    ]);
     if (state.summaryGenerationEpoch !== epochAtStart) {
       return { message: state.summaryText || "", followUpQuestion: null, followUpMessage: null };
     }
@@ -12351,6 +12513,8 @@ app.post("/api/chat", async (req, res) => {
     if (!process.env.OPENAI_API_KEY) {
       const fallback = buildFixedQuestion("pain_score", false);
       const symptomLabel = toMainSymptomLabelForSafety(message || "");
+      const stNoKey = getOrInitConversationState(conversationId);
+      stNoKey.safetyIntroMainSymptomLabel = symptomLabel;
       const safetyTemplate = FIRST_QUESTION_SAFETY_TEMPLATES[Math.floor(Math.random() * FIRST_QUESTION_SAFETY_TEMPLATES.length)];
       const safetyLine = safetyTemplate(symptomLabel);
       const fullResponse = `${safetyLine}\n\n${fallback.question}`;
@@ -12491,6 +12655,7 @@ app.post("/api/chat", async (req, res) => {
       const category = resolveLockedQuestionCategory(state, historyText);
       applyCategoryQuestionOverride(fixed, firstSlot, category, false, historyText, state);
       const symptomLabel = toMainSymptomLabelForSafety(message);
+      state.safetyIntroMainSymptomLabel = symptomLabel;
       const safetyTemplate = FIRST_QUESTION_SAFETY_TEMPLATES[Math.floor(Math.random() * FIRST_QUESTION_SAFETY_TEMPLATES.length)];
       const safetyLine = safetyTemplate(symptomLabel);
       const fullResponse = `${safetyLine}\n\n${fixed.question}`;
@@ -12547,6 +12712,7 @@ app.post("/api/chat", async (req, res) => {
         conversationState[conversationId].summaryGenerationEpoch =
           (conversationState[conversationId].summaryGenerationEpoch || 0) + 1;
         conversationState[conversationId].summaryGenerationPromise = null;
+        conversationState[conversationId].summaryPrefetchFingerprint = null;
         (conversationState[conversationId].confirmationExtraFacts =
           conversationState[conversationId].confirmationExtraFacts || []).push(msg);
         conversationState[conversationId].stateAboutBulletsCache = null;
@@ -12574,6 +12740,7 @@ app.post("/api/chat", async (req, res) => {
             const promise = conversationState[conversationId].summaryGenerationPromise;
             result = promise ? await promise : await generateSummaryForConfirmation(conversationId);
             conversationState[conversationId].summaryGenerationPromise = null;
+            conversationState[conversationId].summaryPrefetchFingerprint = null;
           }
           summaryMsg = result?.message || "";
           followUpQ = result?.followUpQuestion || null;
@@ -13181,33 +13348,47 @@ app.post("/api/chat", async (req, res) => {
       const stPre = conversationState[conversationId];
       try {
         await buildStateFactsBulletsTwoStage(stPre);
-        await supplementStateBulletsFromUncoveredUserUtterances(stPre);
+      } catch (e) {
+        console.error("[Pre-summary twoStage]", e?.message || e);
+      }
+      try {
+        await Promise.all([
+          supplementStateBulletsFromUncoveredUserUtterances(stPre).catch((e) => {
+            console.error("[Pre-summary supplement]", e?.message || e);
+            return { added: 0 };
+          }),
+          resolveLocationContext(stPre, stPre.clientMeta).catch((e) => {
+            console.error("[Pre-summary location]", e?.message || e);
+          }),
+        ]);
         stPre.skipSupplementBeforeSummary = true;
       } catch (e) {
-        console.error("[Pre-summary bullets]", e?.message || e);
+        console.error("[Pre-summary parallel]", e?.message || e);
+        stPre.skipSupplementBeforeSummary = true;
       }
       const confirmMsg = buildPreSummaryConfirmationMessage(conversationState[conversationId]);
+      const stForPrefetch = conversationState[conversationId];
+      const prefetchFp = computeSummaryPrefetchFingerprint(stForPrefetch);
+      if (!stForPrefetch.summaryGenerationPromise || stForPrefetch.summaryPrefetchFingerprint !== prefetchFp) {
+        stForPrefetch.summaryPrefetchFingerprint = prefetchFp;
+        stForPrefetch.summaryGenerationPromise = generateSummaryForConfirmation(conversationId).catch((e) => {
+          console.error("[Background pre-summary]", e?.message || e);
+          return { message: "", followUpQuestion: null, followUpMessage: null };
+        });
+      }
       conversationHistory[conversationId].push({ role: "assistant", content: confirmMsg });
       conversationState[conversationId].confirmationPending = true;
       conversationState[conversationId].confirmationShown = true;
       conversationState[conversationId].lastOptions = [];
       conversationState[conversationId].lastQuestionType = null;
-      void (async () => {
-        const st = conversationState[conversationId];
-        if (!st) return;
-        try {
-          if (!st.summaryGenerationPromise) {
-            st.summaryGenerationPromise = generateSummaryForConfirmation(conversationId);
-          }
-        } catch (e) {
-          console.error("[Background pre-summary]", e?.message || e);
-        }
-      })();
       const finalLevel = finalizeRiskLevel(conversationState[conversationId]);
+      const summaryQuickPreview = buildSummaryQuickPreviewFromState(conversationState[conversationId]);
       return res.json({
         message: confirmMsg,
         response: confirmMsg,
         isPreSummaryConfirmation: true,
+        summaryQuickPreview,
+        summaryFullPending: true,
         judgeMeta: {
           judgement: finalLevel,
           confidence,
