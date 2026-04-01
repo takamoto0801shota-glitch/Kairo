@@ -6930,6 +6930,8 @@ function sanitizeBulletPoints(bullets) {
       if (!/^・/.test(s)) s = `・${s}`;
       if (s.length <= 2) return null;
       const inner = s.replace(/^・\s*/, "").trim();
+      if (/頭が痛いが出ている/.test(inner)) return null;
+      if (isBrokenCauseGrammarOnly(inner)) return null;
       const cleaned = lightBulletCleanupForUserWords(inner);
       if (!cleaned) return null;
       s = `・${cleaned}`;
@@ -7022,7 +7024,7 @@ function buildPainTypePhraseForAssembly(type) {
   if (t === "ズキズキ") return "ズキズキする";
   if (t === "重い") return "重い感じの";
   if (t === "締め付け") return "締め付けられるような";
-  if (t === "その他") return "";
+  if (t === "その他") return "その他のタイプの";
   return t;
 }
 
@@ -7065,6 +7067,9 @@ function coerceStateAboutBulletFragmentToSentenceInner(text, label) {
   let t = String(text || "").trim();
   if (!t) return t;
   if (/^痛みは/.test(t)) return t;
+  if (/頭が痛いが出ている/.test(t)) {
+    return t.replace(/頭が痛いが出ている/g, "頭痛が出ている");
+  }
   if (
     /(が出ている|がある|を伴っている|見られている|の可能性|である|から始まっている|から続いている|続いている|始まっている)/.test(t) &&
     t.length >= 8
@@ -7149,6 +7154,59 @@ function finalizeMeaningJsonBulletLinesForSpec(bullets) {
   });
 }
 
+/** PAIN：symptom を箇条書き用の名詞に（「頭が痛い」→「頭痛」。主症状を二重に書かないため） */
+function normalizePainSymptomNounForBullets(symptom) {
+  let s = String(symptom || "").trim();
+  if (!s) return "";
+  if (/^頭が痛い$|^頭が痛いです$/.test(s)) return "頭痛";
+  if (/頭が痛く/.test(s)) return s.replace(/頭が痛く/, "頭痛が");
+  if (/^お腹が痛い$/.test(s)) return "腹痛";
+  if (/^歯が痛い$/.test(s)) return "歯痛";
+  return s;
+}
+
+/** cause：文法だけ弾く（「〜ですの可能性」等）。天候の話題そのものは禁止しない — 解釈は polish 側。 */
+function isBrokenCauseGrammarOnly(cause) {
+  const raw = String(cause || "").trim();
+  if (!raw) return false;
+  if (/ですの可能性$|ますの可能性$|でしたの可能性$|だの可能性$/.test(raw)) return true;
+  return false;
+}
+
+/**
+ * 口語の天候メモを「きっかけの可能性」名詞句へ（JSON cause 用）。
+ * すでに十分な解釈文なら上書きしない。
+ */
+function reinterpretWeatherAndEnvironmentCause(cause) {
+  let t = String(cause || "").trim().replace(/[。．]+$/g, "").trim();
+  if (!t) return t;
+  if (/きっかけの可能性$/.test(t) && t.length >= 14) return t.endsWith("の可能性") ? t : `${t}の可能性`;
+  const flat = t.replace(/\s+/g, "");
+  if (/雨に伴う|雨による|雨での湿気|湿気がきっかけ/.test(flat)) return /の可能性$/.test(t) ? t : `${t}の可能性`;
+  if (/^(今日は|昨日は)?雨(です|だ|だった)?$/.test(t) || /^雨の日/.test(t) || /^雨です/.test(t) || t === "雨") {
+    return "雨に伴う湿気がきっかけの可能性";
+  }
+  if (/雨|くもり|曇り|霧|じめじめ|湿気|湿度/.test(t) && t.length <= 18 && !/きっかけ/.test(t)) {
+    return "雨に伴う湿気がきっかけの可能性";
+  }
+  if (/晴れ|日差し|紫外線|太陽|日焼け|暑さ/.test(t) && t.length <= 22 && !/きっかけ/.test(t)) {
+    return "強い日差しや乾燥がきっかけの可能性";
+  }
+  if (/雪|寒さ|冷え込|気温が低/.test(t) && t.length <= 22 && !/きっかけ/.test(t)) {
+    return "冷えや気温の変化がきっかけの可能性";
+  }
+  return t;
+}
+
+/** PAIN：主症状と同趣旨の重複行（頭が痛いが出ている 等）を otherSymptoms から除外 */
+function otherSymptomLineDuplicatesPainMainSymptom(symptomNorm, lineText) {
+  const t = String(lineText || "").replace(/^・/, "").trim();
+  if (!t) return false;
+  if (/頭が痛いが出ている|^頭痛が出ている$/.test(t) && /頭痛|頭が痛い/.test(symptomNorm)) return true;
+  if (/^頭が痛いがある$|頭が痛いを伴っている/.test(t)) return true;
+  return false;
+}
+
 /** Phase2：統一JSONのみ参照。1行＝1意味の完結した自然文。出力順固定。最大8行（複数症状の分割に対応）。 */
 function formatBulletsFromMeaningJson(meaning, category = "PAIN") {
   if (!meaning || typeof meaning !== "object") return [];
@@ -7164,7 +7222,21 @@ function formatBulletsFromMeaningJson(meaning, category = "PAIN") {
   } else if (!main && meaning.pain?.type) {
     main = String(meaning.pain.type).trim() + "する痛み";
   }
-  if (main) {
+  if (category === "PAIN") {
+    const symptomN = normalizePainSymptomNounForBullets(String(meaning.symptom || "").trim());
+    const typ = String(meaning.type || "").trim();
+    const typePhrase = buildPainTypePhraseForAssembly(typ);
+    if (typePhrase && symptomN) {
+      const candidateLine = `・${typePhrase}${symptomN}が出ている`;
+      const othersArr = Array.isArray(meaning.otherSymptoms) ? meaning.otherSymptoms : [];
+      const candNorm = candidateLine.replace(/^・/, "").replace(/\s+/g, "");
+      const dup = othersArr.some((o) => {
+        const os = String(o || "").replace(/\s+/g, "");
+        return os === candNorm || (os.includes("ズキズキ") && candNorm.includes("ズキズキ") && /痛み|頭痛/.test(os));
+      });
+      if (!dup) bullets.push(candidateLine);
+    }
+  } else if (main) {
     let m = main
       .replace(/ような痛みが出ているような痛み/g, "ような痛み")
       .replace(/痛みが出ているような痛み/g, "痛み");
@@ -7184,9 +7256,13 @@ function formatBulletsFromMeaningJson(meaning, category = "PAIN") {
     if (line) bullets.push(line);
   }
   const others = meaning.otherSymptoms;
+  const symDedupe =
+    category === "PAIN" ? normalizePainSymptomNounForBullets(String(meaning.symptom || "").trim()) : "";
   if (Array.isArray(others) && others.length > 0) {
     others.slice(0, 6).forEach((s) => {
-      const line = formatOtherSymptomBulletLine(String(s).trim());
+      const st = String(s).trim();
+      if (category === "PAIN" && symDedupe && otherSymptomLineDuplicatesPainMainSymptom(symDedupe, st)) return;
+      const line = formatOtherSymptomBulletLine(st);
       if (line) bullets.push(line);
     });
   } else if (meaning.noOtherSymptoms === true) {
@@ -7559,6 +7635,7 @@ function validateMeaningJsonPhase1(parsed, category, raw, state = null) {
   const ctx = String(parsed.context || "").trim();
   if (ctx && isContextContaminatedWithCause(ctx)) return false;
   const cause = String(parsed.cause || "").trim();
+  if (cause && isBrokenCauseGrammarOnly(cause)) return false;
   if (cause && !/可能性$/.test(cause)) return false;
   if (/原因は不明|原因不明|わからない原因|不明のみ/.test(cause)) return false;
   if (cause && isCauseAbstractOnly(cause)) return false;
@@ -7577,11 +7654,16 @@ function validateMeaningJsonPhase1(parsed, category, raw, state = null) {
 
 /**
  * cause を口語から書き言葉へ（例: 運動をしすぎたからかも → 運動のしすぎがきっかけの可能性）。
- * 必ず「〜の可能性」で終える。
+ * 必ず「〜の可能性」で終える。天候はブロックせず、名詞句に解釈する。
  */
 function polishCausePhraseToWrittenJapanese(cause) {
   let c = String(cause || "").trim();
   if (!c) return c;
+  if (/ですの可能性$|ますの可能性$|でしたの可能性$/.test(c)) {
+    c = c.replace(/ですの可能性$|ますの可能性$|でしたの可能性$/, "").trim();
+  }
+  c = reinterpretWeatherAndEnvironmentCause(c);
+  if (!c) return "";
   c = c.replace(/の可能性の可能性$/g, "の可能性");
   c = c.replace(/の可能性$/, "").trim();
   let m = c.match(/^(.+?)をしすぎたからかもがきっかけ$/);
@@ -7682,6 +7764,8 @@ function validateStateAboutBulletsQuality(bullets, raw = "", parsed = null, cate
     if (hasUnnaturalIntraLineRepetition(s)) return false;
     if (/ような痛みが出ているような|ですです|。。。{2,}/.test(s)) return false;
     if (/が出ているが出ている/.test(s)) return false;
+    if (/頭が痛いが出ている/.test(s)) return false;
+    if (isBrokenCauseGrammarOnly(s)) return false;
   }
   const normalizedLines = bullets.map((b) =>
     String(b || "")
@@ -7780,10 +7864,12 @@ const MEANING_JSON_CATEGORY_HINT = {
   GI: `【GI】symptom・severity・type は空。main_symptom は腹部・消化器の主訴を一文で具体的に。`,
 };
 
-const MEANING_JSON_CAUSE_RULES = `【cause】きっかけ・原因の推測。必ず「〜の可能性」で終わる。なければ空。禁止:「原因は不明」。核名詞を含め、「影響の可能性」だけの抽象1語は禁止。
-【文体・必須】口語のままにしない。ユーザーが「〜かも」「〜だと思う」「〜したからかも」と言っても、書き言葉の名詞句に直してから cause に書く。
+const MEANING_JSON_CAUSE_RULES = `【cause】きっかけ・原因の推測。必ず「〜の可能性」で終わる名詞句（「〜がきっかけの可能性」形式を推奨）。なければ空。禁止:「原因は不明」。核名詞を含め、「影響の可能性」だけの抽象1語は禁止。
+【天候・解釈】雨・晴れ・気温などに触れる場合は、羅列や口語（「今日は雨」だけ）で終わらせず、体調へのつながりを**名詞句で**書く（例:「雨に伴う湿気がきっかけの可能性」「強い日差しや乾燥がきっかけの可能性」）。天候を書くこと自体は可。
+【絶対NG・文法】「今日は雨ですの可能性」「〜ですの可能性」は禁止（「です」と「の可能性」の二重）。必ず「雨に伴う湿気がきっかけの可能性」のように解釈して書く。
+【文体・必須】口語のままにしない。ユーザーが「〜かも」「〜だと思う」と言っても、書き言葉の名詞句に直してから cause に書く。
 NG例:「運動をしすぎたからかも」→そのまま cause にしない／「運動をしすぎたからかもがきっかけの可能性」のような不自然な連結は禁止。
-OK例:「運動のしすぎがきっかけの可能性」「睡眠不足がきっかけの可能性」。`;
+OK例:「運動のしすぎがきっかけの可能性」「雨に伴う湿気がきっかけの可能性」「睡眠不足がきっかけの可能性」。`;
 
 const MEANING_JSON_CONTEXT_RULES = `【context】「今どういう状態か」背景・継続のみ。原因・きっかけは書かない。禁止:スマホの使いすぎ／〜の影響／長時間使用／原因／の使用 など原因語。
 【文体】口語語尾（かも・かな・だと思う）のままにせず、意味を保った書き言葉の一文にする。文末を「〜状態」に揃える必要はない。単語だけ禁止。`;
@@ -8333,6 +8419,8 @@ async function buildStateFactsBulletsTwoStage(state, opts = {}) {
         "例外（サーバが表示専用で1行付与）: PAIN で付随「これ以外は特にない」、GI で「特に変化はない」は otherSymptoms:[]・noOtherSymptoms:false。",
         "自由記述は 状態→時間→強さ→原因 の順で解釈。PAIN は symptom・severity・type を先に決める。",
         "同一文に主症状と経過が混ざる場合（例:頭が痛くて5日続いている）は main_symptom に主症状のみ、onset に経過のみ。format 後の箇条書きで主症状を二重にしない。",
+        "【PAIN・箇条書き】サーバは痛みの強さ行の次に「痛みの質＋symptom名詞（頭痛など）」の1行のみを出す。main_symptom をそのまま重ねた「頭が痛いが出ている」のような二重行は禁止。symptom フィールドは名詞（頭痛）にし、「頭が痛い」のままにしない。otherSymptoms に主症状と同じ内容を入れない。",
+        "【cause・JSON】天候に言及する場合は cause に「〜がきっかけの可能性」形式の名詞句のみ（例: 雨に伴う湿気がきっかけの可能性）。「今日は雨ですの可能性」のような文法破綻は禁止。",
         "「追加情報:」行は otherSymptoms または context に必ず反映。",
         "",
       ].join("\n");
@@ -8814,8 +8902,16 @@ function collectGreenYellowLowMediumCombinationParts(state) {
   const durRisk = norm?.duration?.riskLevel;
   if (durRisk === RISK_LEVELS.LOW || durRisk === RISK_LEVELS.MEDIUM) {
     const dur = String(getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "") || "").trim();
-    if (dur && /(さっき|数時間前|数十分|今さっき)/.test(dur)) candidates.push({ label: "発症から時間が短い", inv: 85 });
-    else if (dur && /(日|週|昨日|一昨日|一日以上)/.test(dur)) candidates.push({ label: "症状が続いている", inv: 85 });
+    if (!shouldBlockRedByRecentShortDuration(state)) {
+      if (dur && /(さっき|数時間前|数十分|今さっき)/.test(dur)) candidates.push({ label: "発症から時間が短い", inv: 85 });
+      else if (dur && /(日|週|昨日|一昨日|一日以上)/.test(dur)) candidates.push({ label: "症状が続いている", inv: 85 });
+    }
+  }
+  if (shouldBlockRedByRecentShortDuration(state)) {
+    const sp = buildDurationTemporaryPossibilityLabelForRedGuard(state);
+    if (sp && !candidates.some((c) => /一時的な可能性/.test(String(c.label || "")))) {
+      candidates.push({ label: sp, inv: 92 });
+    }
   }
 
   const ccRisk = norm?.cause_category?.riskLevel;
@@ -8827,7 +8923,9 @@ function collectGreenYellowLowMediumCombinationParts(state) {
     }
   }
 
-  let picked = pickComboPartsByInversePriority(candidates, 2, 3);
+  const comboMaxParts = shouldBlockRedByRecentShortDuration(state) ? 2 : 3;
+
+  let picked = pickComboPartsByInversePriority(candidates, 2, comboMaxParts);
   if (picked.length >= 2) return picked;
 
   const parts = [];
@@ -8856,7 +8954,7 @@ function collectGreenYellowLowMediumCombinationParts(state) {
     const extra = parts.map((p) => ({ label: shortenComboLabelFromBulletText(p) || p, inv: 72 }));
     candidates.push(...extra);
   }
-  picked = pickComboPartsByInversePriority(candidates, 2, 3);
+  picked = pickComboPartsByInversePriority(candidates, 2, comboMaxParts);
   if (picked.length >= 2) return picked;
 
   const mainSafe = main && main !== "症状" ? main : "症状の出方";
@@ -8865,7 +8963,7 @@ function collectGreenYellowLowMediumCombinationParts(state) {
     { label: "急いで受診が必要な所見は見えにくい", inv: 54 },
     { label: "付随の所見は限定的", inv: 53 }
   );
-  return pickComboPartsByInversePriority(candidates, 2, 3);
+  return pickComboPartsByInversePriority(candidates, 2, comboMaxParts);
 }
 
 /**
@@ -12038,6 +12136,24 @@ function shouldBlockRedByRecentShortDuration(state) {
   const selectedIndex = state?.durationMeta?.selectedIndex;
   if (selectedIndex === 0 || selectedIndex === 1) return true;
   return /(さっき|今さっき|数時間前|数時間|数分|数十分|今朝)/.test(durationRaw);
+}
+
+/**
+ * RED抑制ガード時の①組み合わせ行：経過を書くとき「一時的な可能性」を含む短いラベル（KAIRO_SPEC 特例）。
+ * 呼び出し元は shouldBlockRedByRecentShortDuration(state) === true のときのみ。
+ */
+function buildDurationTemporaryPossibilityLabelForRedGuard(state) {
+  if (!state) return "";
+  const dur = String(
+    getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "")
+  ).trim();
+  const selectedIndex = state?.durationMeta?.selectedIndex;
+  if (selectedIndex === 0) return "さっきから（一時的な可能性）";
+  if (selectedIndex === 1) return "数時間前から（一時的な可能性）";
+  if (/(さっき|今さっき|たった今|数分|数十分)/.test(dur)) return "さっきから（一時的な可能性）";
+  if (/(数時間前|数時間)/.test(dur)) return "数時間前から（一時的な可能性）";
+  if (/(今朝)/.test(dur)) return "今朝から（一時的な可能性）";
+  return "短い経過（一時的な可能性）";
 }
 
 function calculateRiskFromState(state) {
