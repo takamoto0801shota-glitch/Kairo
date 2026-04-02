@@ -1511,14 +1511,48 @@ async function handleUserInput() {
     appState.awaitingSummaryReply ||
     sessionStorage.getItem(AWAITING_SUMMARY_SESSION_KEY) === "1";
   let summaryPlaceholderEl = null;
+  let pollSummaryInterval = null;
+  let pollRenderedSectionCount = 0;
   if (expectingSummary) {
     summaryPlaceholderEl = addPendingSummaryPlaceholder();
+    pollSummaryInterval = setInterval(async () => {
+      try {
+        const cid = localStorage.getItem(CONVERSATION_ID_KEY);
+        if (!cid) return;
+        const r = await fetch(`/api/summary-progress?conversationId=${encodeURIComponent(cid)}`);
+        if (!r.ok) return;
+        const progress = await r.json();
+        const secs = Array.isArray(progress.sections) ? progress.sections.filter(Boolean) : [];
+        if (secs.length > pollRenderedSectionCount) {
+          if (summaryPlaceholderEl) {
+            removePendingSummaryPlaceholder(summaryPlaceholderEl);
+            summaryPlaceholderEl = null;
+          }
+          for (let i = pollRenderedSectionCount; i < secs.length; i += 1) {
+            renderSection(secs[i]);
+          }
+          pollRenderedSectionCount = secs.length;
+        }
+        if (!progress.generationActive && progress.complete) {
+          if (pollSummaryInterval) {
+            clearInterval(pollSummaryInterval);
+            pollSummaryInterval = null;
+          }
+        }
+      } catch (_) {
+        /* ignore */
+      }
+    }, 450);
   }
     try {
       // 質問フェーズは従来どおり通常APIで即時応答
       const data = await callOpenAI(userText, resetSession);
       console.log("[DEBUG] full aiResponse", data);
       const aiResponse = data;
+      if (pollSummaryInterval) {
+        clearInterval(pollSummaryInterval);
+        pollSummaryInterval = null;
+      }
       if (summaryPlaceholderEl) {
         removePendingSummaryPlaceholder(summaryPlaceholderEl);
         summaryPlaceholderEl = null;
@@ -1535,7 +1569,16 @@ async function handleUserInput() {
       const triageState = aiResponse.triage_state || { is_final: false, triage_level: null, required_fields_filled: 0 };
       const isFirstResponse = wasFirstUserTurn;
       const sections = Array.isArray(aiResponse.sections) ? aiResponse.sections.filter(Boolean) : [];
-      const shouldShowSections = !isFirstResponse && triageState.is_final && sections.length > 0;
+      const sectionsToAnimate =
+        pollRenderedSectionCount > 0 && sections.length > pollRenderedSectionCount
+          ? sections.slice(pollRenderedSectionCount)
+          : sections;
+      const pollAlreadyRenderedAllSections =
+        pollRenderedSectionCount > 0 &&
+        sections.length > 0 &&
+        pollRenderedSectionCount >= sections.length;
+      const shouldShowSections =
+        !isFirstResponse && triageState.is_final && sectionsToAnimate.length > 0;
 
       if (aiResponse.isFollowUpOnlyResponse) {
         appState.followUpSummarySuppress = true;
@@ -1618,9 +1661,9 @@ async function handleUserInput() {
         };
 
         const timerId0 = setTimeout(() => {
-          if (sections[0]) {
-            renderSection(sections[0]);
-            if (sections.length === 1) {
+          if (sectionsToAnimate[0]) {
+            renderSection(sectionsToAnimate[0]);
+            if (sectionsToAnimate.length === 1) {
               const t = setTimeout(onLastSectionRendered, 300);
               appState.sectionTimers.push(t);
             }
@@ -1628,10 +1671,10 @@ async function handleUserInput() {
         }, firstDelay);
         appState.sectionTimers.push(timerId0);
 
-        for (let idx = 1; idx < sections.length; idx++) {
-          const isLast = idx === sections.length - 1;
+        for (let idx = 1; idx < sectionsToAnimate.length; idx++) {
+          const isLast = idx === sectionsToAnimate.length - 1;
           const timerId = setTimeout(() => {
-            renderSection(sections[idx]);
+            renderSection(sectionsToAnimate[idx]);
             if (isLast) {
               const t = setTimeout(onLastSectionRendered, 300);
               appState.sectionTimers.push(t);
@@ -1639,6 +1682,35 @@ async function handleUserInput() {
           }, firstDelay + idx * interval);
           appState.sectionTimers.push(timerId);
         }
+      } else if (
+        pollAlreadyRenderedAllSections &&
+        triageState.is_final &&
+        !isFirstResponse &&
+        !aiResponse.isPreSummaryConfirmation
+      ) {
+        const firstDelay = QUESTION_DELAY_MS + 600;
+        const followUpMessage = aiResponse.followUpMessage;
+        const followUpQuestion = aiResponse.followUpQuestion || DEFAULT_FOLLOW_UP_QUESTION;
+        const onLastSectionRendered = () => {
+          const canShowSummaryCard =
+            !suppressInlineSummary &&
+            !appState.followUpSummarySuppress &&
+            !appState.postSummaryFollowUpSuppress;
+          let showedSummaryCard = false;
+          if (canShowSummaryCard) {
+            renderSummary();
+            showedSummaryCard = true;
+            persistSummaryDoneForConversation(aiResponse.conversationId);
+          }
+          if (followUpMessage) addMessage(followUpMessage, false, true, { fromFollowUpTrigger: true });
+          addMessage(followUpQuestion, false, true, { fromFollowUpTrigger: true });
+          if (showedSummaryCard) {
+            appState.postSummaryFollowUpSuppress = true;
+            appState.followUpSummarySuppress = true;
+          }
+        };
+        const t = setTimeout(onLastSectionRendered, firstDelay);
+        appState.sectionTimers.push(t);
       } else {
         setTimeout(() => {
           // まとめ後のフォロー応答（sections空 or isFollowUpOnlyResponse）ではrenderSummaryを絶対に呼ばない
@@ -1655,13 +1727,19 @@ async function handleUserInput() {
             renderSummary();
           }
           const msgToShow = stripFollowUpFromMessage(aiMessage);
-          addMessage(msgToShow, false, true, {
-            animateFromTop: !!aiResponse.isPreSummaryConfirmation,
-            skipSummaryBlock: suppressInlineSummary,
-          });
+          if (!pollAlreadyRenderedAllSections) {
+            addMessage(msgToShow, false, true, {
+              animateFromTop: !!aiResponse.isPreSummaryConfirmation,
+              skipSummaryBlock: suppressInlineSummary,
+            });
+          }
         }, QUESTION_DELAY_MS);
       }
     } catch (error) {
+        if (pollSummaryInterval) {
+          clearInterval(pollSummaryInterval);
+          pollSummaryInterval = null;
+        }
         if (summaryPlaceholderEl) {
           removePendingSummaryPlaceholder(summaryPlaceholderEl);
         }
