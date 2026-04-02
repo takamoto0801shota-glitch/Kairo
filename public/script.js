@@ -419,8 +419,9 @@ async function clearHistory() {
 function parseAIMessage(text) {
   // 見出しアイコンのパターン（様子見/市販薬の場合 + 病院をおすすめする場合）
   const headerPatterns = [
-    // 様子見/市販薬の場合
+    // 様子見/市販薬の場合（緊急度は 🟢 / 🟡 で先頭行が変わる）
     { icon: '🟢', name: 'ここまでの情報を整理します' },
+    { icon: '🟡', name: 'ここまでの情報を整理します' },
     { icon: '🤝', name: '今の状態について' },
     { icon: '✅', name: '今すぐやること' },
     { icon: '⏳', name: '今後の見通し' },
@@ -1569,10 +1570,15 @@ async function handleUserInput() {
       const triageState = aiResponse.triage_state || { is_final: false, triage_level: null, required_fields_filled: 0 };
       const isFirstResponse = wasFirstUserTurn;
       const sections = Array.isArray(aiResponse.sections) ? aiResponse.sections.filter(Boolean) : [];
-      const sectionsToAnimate =
-        pollRenderedSectionCount > 0 && sections.length > pollRenderedSectionCount
-          ? sections.slice(pollRenderedSectionCount)
-          : sections;
+      /** ポーリングで既に出した分はアニメーションで再表示しない（count === length のとき従来は全文が再度出て二重になる） */
+      let sectionsToAnimate;
+      if (pollRenderedSectionCount === 0) {
+        sectionsToAnimate = sections;
+      } else if (sections.length > 0 && pollRenderedSectionCount >= sections.length) {
+        sectionsToAnimate = [];
+      } else {
+        sectionsToAnimate = sections.slice(pollRenderedSectionCount);
+      }
       const pollAlreadyRenderedAllSections =
         pollRenderedSectionCount > 0 &&
         sections.length > 0 &&

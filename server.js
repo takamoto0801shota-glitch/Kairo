@@ -943,7 +943,7 @@ ${stateContext ? `\n${stateContext}\n` : ""}
 🤝 今の状態について（LLM理解レイヤー）：
 - 情報整理は単なる言い換えではなく「症状の状態を説明する文章」として生成する。
 - 禁止：回答をそのまま並べること（例：・ズキズキする、・さっき始まった）
-- OK：症状の意味を短い文章で説明（例：・ズキズキするタイプの痛みが出ている、・症状は急に始まっている）
+- OK：症状の意味を短い文章で説明（例：・ズキズキするタイプの痛み、・症状は急に始まった）
 - 処理順序：回答 → 状況理解 → 要約。Step1:回答を整理 → Step2:症状の意味を考える → Step3:意味を短い文章にする
 
 🤝 今の状態について（順番厳守）：
@@ -1014,15 +1014,56 @@ function hasAnySummaryBlocks(text) {
   const normalized = normalizeHospitalMemoHeaderText(text);
   return (
     normalized.includes("🟢 ここまでの情報を整理します") ||
-    normalized.includes("🤝 今の状態について") ||
+    textIncludesHandshakeAboutHeader(normalized) ||
     normalized.includes("✅ 今すぐやること") ||
     normalized.includes("⏳ 今後の見通し") ||
     normalized.includes("💊 一般的な市販薬") ||
     normalized.includes("🌱 最後に") ||
-    normalized.includes("📝 今の状態について") ||
+    textIncludesMemoAboutHeader(normalized) ||
     normalized.includes("🏥 受診先の候補") ||
     normalized.includes("💬 最後に")
   );
+}
+
+/** LLM 出力の 🤝 見出し（前後空白・全角スペースのゆらぎを許容。KAIRO_SPEC 🤝 ブロック正規化・分割で使用） */
+function isHandshakeStateAboutHeaderLine(line) {
+  return /^\s*🤝\s*今の状態について/.test(String(line || ""));
+}
+
+function textIncludesHandshakeAboutHeader(text) {
+  return /🤝\s*今の状態について/.test(String(text || ""));
+}
+
+/** 🔴 LLM の 📝 見出し（空白・「いまの状態を整理します」別表記のゆらぎを許容） */
+function isMemoStateAboutHeaderLine(line) {
+  const t = String(line || "");
+  return (
+    /^\s*📝\s*今の状態について/.test(t) ||
+    /^\s*📝\s*いまの状態を整理します（メモ）/.test(t) ||
+    /^\s*📝\s*いまの状態を整理します\s*$/.test(t.trim())
+  );
+}
+
+function textIncludesMemoAboutHeader(text) {
+  const s = String(text || "");
+  return (
+    /📝\s*今の状態について/.test(s) ||
+    /📝\s*いまの状態を整理します(（メモ）)?/.test(s)
+  );
+}
+
+/** splitByKnownHeaders / removeForbiddenSummaryBlocks 用：🤝 見出しは空白ゆらぎを許容 */
+function lineMatchesSummaryHeaderFlex(line, header) {
+  const t = String(line || "").trim();
+  if (!header || !t) return false;
+  if (t.startsWith(header)) return true;
+  if (header === "🤝 今の状態について") {
+    return isHandshakeStateAboutHeaderLine(t);
+  }
+  if (header === "📝 今の状態について" || header === "📝 いまの状態を整理します（メモ）") {
+    return isMemoStateAboutHeaderLine(t);
+  }
+  return false;
 }
 
 function hasAllSummaryBlocks(text) {
@@ -1035,7 +1076,15 @@ function hasAllSummaryBlocks(text) {
     : normalized.includes("🟡")
       ? yellowHeaders
       : normalHeaders;
-  return required.every((header) => normalized.includes(header));
+  return required.every((header) => {
+    if (header === "🤝 今の状態について") {
+      return textIncludesHandshakeAboutHeader(normalized);
+    }
+    if (header === "📝 今の状態について") {
+      return textIncludesMemoAboutHeader(normalized);
+    }
+    return normalized.includes(header);
+  });
 }
 
 function getRequiredSummaryHeadersByLevel(level) {
@@ -1076,7 +1125,7 @@ function splitByKnownHeaders(text, headers) {
     blocks.set(currentHeader, [currentHeader, ...currentLines].join("\n").trim());
   };
   for (const line of lines) {
-    const matched = headers.find((h) => line.trim().startsWith(h));
+    const matched = headers.find((h) => lineMatchesSummaryHeaderFlex(line, h));
     if (matched) {
       flush();
       currentHeader = matched;
@@ -1110,7 +1159,7 @@ function removeForbiddenSummaryBlocks(text, allowedHeaders) {
   const lines = String(text || "").split("\n");
   const allowed = new Set(allowedHeaders);
   const allHeaders = ALL_SUMMARY_HEADERS;
-  const isHeader = (line) => allHeaders.find((h) => line.trim().startsWith(h)) || null;
+  const isHeader = (line) => allHeaders.find((h) => lineMatchesSummaryHeaderFlex(line, h)) || null;
   const output = [];
   let skipping = false;
   for (const line of lines) {
@@ -3374,7 +3423,15 @@ function stripHospitalMapLinks(text) {
 function replaceSummaryBlock(text, header, block) {
   if (!text) return text;
   const lines = text.split("\n");
-  const startIndex = lines.findIndex((line) => line.startsWith(header));
+  const startIndex = lines.findIndex((line) => {
+    if (header === "🤝 今の状態について") {
+      return isHandshakeStateAboutHeaderLine(line);
+    }
+    if (header === "📝 今の状態について" || header === "📝 いまの状態を整理します") {
+      return isMemoStateAboutHeaderLine(line);
+    }
+    return line.startsWith(header);
+  });
   if (startIndex === -1) {
     const altHeader = "✅ 今すぐやること（これだけでOK）";
     if (header === "✅ 今すぐやること" && lines.some((l) => l.startsWith(altHeader))) {
@@ -3401,7 +3458,7 @@ function replaceSummaryBlock(text, header, block) {
 /** 追加情報・違う等のとき、「今の状態について」ブロックのみ差し替え（他ブロックはそのまま） */
 async function replaceStateAboutBlockOnly(summaryText, state, historyText = "") {
   if (!summaryText || !state) return summaryText;
-  const hasRedStateBlock = summaryText.includes("📝 今の状態について") || summaryText.includes("📝 いまの状態を整理します");
+  const hasRedStateBlock = textIncludesMemoAboutHeader(summaryText);
   if (hasRedStateBlock) {
     const memoLines = [
       "📝 今の状態について",
@@ -4524,7 +4581,8 @@ function enforceSummaryIntroTemplate(text) {
   if (headerIndex === -1) {
     if (isHospitalFlow(text)) return text;
     const hasGreenStructure =
-      text.includes("🤝 今の状態について") ||
+      textIncludesHandshakeAboutHeader(text) ||
+      textIncludesMemoAboutHeader(text) ||
       text.includes("✅ 今すぐやること") ||
       text.includes("⏳ 今後の見通し") ||
       text.includes("🌱 最後に");
@@ -4537,7 +4595,8 @@ function enforceSummaryIntroTemplate(text) {
   const nextBlockIndex = lines.findIndex(
     (line, idx) =>
       idx > headerIndex &&
-      (line.startsWith("🤝 ") ||
+      (isHandshakeStateAboutHeaderLine(line) ||
+        isMemoStateAboutHeaderLine(line) ||
         line.startsWith("✅ ") ||
         line.startsWith("⏳ ") ||
         line.startsWith("🚨 ") ||
@@ -4698,16 +4757,16 @@ function buildDecisionReasonBullets(state) {
   const reasons = [];
   const normalized = state?.slotNormalized || {};
   if (normalized.pain_score?.riskLevel === RISK_LEVELS.HIGH) {
-    reasons.push("・痛みが強めに出ている");
+    reasons.push("・痛みが強め");
   }
   if (normalized.worsening?.riskLevel === RISK_LEVELS.HIGH) {
     reasons.push("・痛み方が強めの側に寄っている");
   }
   if (normalized.daily_impact?.riskLevel === RISK_LEVELS.HIGH) {
-    reasons.push("・日常の動きに支障が出ている");
+    reasons.push("・日常の動きに支障がある");
   }
   if (normalized.associated_symptoms?.riskLevel === RISK_LEVELS.HIGH) {
-    reasons.push("・付随する症状が強めに出ている");
+    reasons.push("・付随する症状が強め");
   }
   if (reasons.length === 0) {
     buildFactsFromSlotAnswers(state).forEach((fact) => reasons.push(fact));
@@ -5592,6 +5651,22 @@ function hasCorrectionIntent(text) {
   return /(やっぱ|やはり|訂正|正しくは|違う|いや|前の|さっきの|言い直|むしろ|実は|訂正します|追加で|付け加え|言い忘れ|訂正:)/.test(
     String(text || "")
   );
+}
+
+/**
+ * 確認応答で、この発言を confirmationExtraFacts に積むか。
+ * 訂正・上書きのみ（スロットに反映すれば足りる）の場合は false にし、
+ * mergeConfirmationExtraFacts で生テキスト行が二重に載らないようにする（追加情報のときだけ true）。
+ */
+function shouldAppendConfirmationExtraFacts(msg) {
+  const t = String(msg || "").trim();
+  if (!t) return false;
+  if (/(追加で|付け加え|言い忘れ)/.test(t)) return true;
+  if (/(訂正|正しくは|訂正します|訂正:)/.test(t)) return false;
+  if (/(いや|前の|さっきの|言い直|むしろ|実は)/.test(t)) return false;
+  if (/(やっぱ|やはり)/.test(t)) return false;
+  if (/^違う[、,]?\s*\S/.test(t)) return false;
+  return true;
 }
 
 function extractSeverityFromText(text) {
@@ -6892,12 +6967,12 @@ function buildFactsFromSlotAnswers(state) {
 function stripStateAboutIntroOutro(text) {
   if (!text) return text;
   const lines = text.split("\n");
-  const stateAboutHeaders = ["🤝 今の状態について", "📝 今の状態について"];
   const nextBlockPattern = /^(✅|⏳|🚨|💊|🌱|🏥|💬)\s/;
   const introOutroPattern = /^(今の情報から見ると、|という状況です。?)\s*$/;
   let inStateBlock = false;
   const result = lines.map((line) => {
-    const isHeader = stateAboutHeaders.some((h) => line.startsWith(h));
+    const isHeader =
+      isHandshakeStateAboutHeaderLine(line) || isMemoStateAboutHeaderLine(line);
     if (isHeader) {
       inStateBlock = true;
       return line;
@@ -6958,6 +7033,47 @@ function validateSummaryAgainstNormalized(text, state) {
   return true;
 }
 
+/**
+ * 箇条書き：敬語をやめた言い切り・常体へ。禁止「が出ている」。
+ * 事実の語順は変えず語尾・禁止表現のみ整える。
+ */
+function applyBulletPlainAssertiveStyle(inner) {
+  let t = String(inner || "").trim();
+  if (!t) return t;
+  t = t.replace(/経過の様子は経過は/g, "経過は");
+  t = t.replace(/が出ている/g, "");
+  t = t.replace(/が出てる/g, "");
+  t = t.replace(/が出ています/g, "");
+  t = t.replace(/が出てます/g, "");
+  t = t.replace(/が感じられています。?$/g, "");
+  t = t.replace(/が感じられています/g, "");
+  t = t.replace(/を感じています。?$/g, "を感じる");
+  t = t.replace(/向かっています。?$/g, "向かっている");
+  t = t.replace(/始まりました。?$/g, "始まった");
+  t = t.replace(/始まっています。?$/g, "始まっている");
+  t = t.replace(/続いています。?$/g, "続いている");
+  t = t.replace(/あります。?$/g, "ある");
+  t = t.replace(/可能性があります。?$/g, "可能性がある");
+  t = t.replace(/可能性があります$/g, "可能性がある");
+  t = t.replace(/から始まっている。?$/g, "から始まった");
+  t = t.replace(/です。$/g, "");
+  t = t.replace(/ます。$/g, "");
+  t = t.replace(/です$/g, "");
+  t = t.replace(/ます$/g, "");
+  t = t.replace(/でした。$/g, "だった");
+  t = t.replace(/でした$/g, "だった");
+  t = t.replace(/ました。$/g, "た");
+  t = t.replace(/ました$/g, "た");
+  t = t.replace(/います。$/g, "いる");
+  t = t.replace(/います$/g, "いる");
+  t = t.replace(/である。$/g, "");
+  t = t.replace(/である$/g, "");
+  t = t.replace(/。+$/g, "");
+  t = t.replace(/\s+/g, " ").trim();
+  t = t.replace(/、$/g, "").trim();
+  return t;
+}
+
 /** 箇条書き：ユーザーに近い文言のまま、語尾だけ軽く整える（定型への置換・言い換えはしない） */
 function lightBulletCleanupForUserWords(raw) {
   let t = String(raw || "").trim();
@@ -6989,9 +7105,9 @@ function sanitizeBulletPoints(bullets) {
       // 重複接尾の修正（ようなような→ような、感じ感じ→感じ）
       s = s.replace(/(ような|感じ|タイプの痛み)\1+/g, "$1");
       s = s.replace(/痛み痛み/g, "痛み").replace(/症状症状/g, "症状");
-      s = s.replace(/ような痛みが出ているような痛みが出ている/g, "ような痛みが出ている");
-      s = s.replace(/ような痛みが出ているような/g, "ような痛みが出ている");
-      s = s.replace(/痛みが出ているような痛みが出ている/g, "痛みが出ている");
+      s = s.replace(/ような痛みが出ているような痛みが出ている/g, "のような痛み");
+      s = s.replace(/ような痛みが出ているような/g, "のような痛み");
+      s = s.replace(/痛みが出ているような痛みが出ている/g, "痛み");
       // 痛み方の定型：「ズキズキような」→「ズキズキのような」。「する」は除く（LLM／旧整形の両方）
       s = s.replace(
         /・(ズキズキ|キリキリ|ヒリヒリ|チクチク|ジンジン|ドクドク|重い|締め付け|鈍い)するような痛みが出ている/g,
@@ -7006,13 +7122,20 @@ function sanitizeBulletPoints(bullets) {
       // ・の連続や空行
       s = s.replace(/^・+/g, "・").replace(/\s{2,}/g, " ");
       if (s.length <= 2) return null;
+      const innerPlain = s.replace(/^・\s*/, "").trim();
+      const plainOut = applyBulletPlainAssertiveStyle(innerPlain);
+      if (!plainOut) return null;
+      s = `・${plainOut}`;
+      if (s.length <= 2) return null;
       // 明らかに不自然な終わり方（体言止め以外で不完全な文）
       if (/[がはをに]$/.test(s)) return null;
       if (/^・\s*$/.test(s)) return null;
       return s;
     })
     .filter(Boolean);
-  return dedupeBulletsOneLinePerInferenceSlot(cleaned);
+  const bySlot = dedupeBulletsOneLinePerInferenceSlot(cleaned);
+  const bySubsume = dedupeBulletsBySubsumption(bySlot);
+  return dedupeBulletsSequentialSimilarity(bySubsume);
 }
 
 /**
@@ -7023,10 +7146,10 @@ function coerceStateAboutBulletFragmentToSentenceInner(text, label) {
   if (!t) return t;
   if (/^痛みは/.test(t)) return t;
   if (/頭が痛いが出ている/.test(t)) {
-    return t.replace(/頭が痛いが出ている/g, "頭痛が出ている");
+    return t.replace(/頭が痛いが出ている/g, "頭痛がある");
   }
   if (
-    /(が出ている|がある|を伴っている|見られている|の可能性|である|から始まっている|から続いている|続いている|始まっている)/.test(t) &&
+    /(がある|を伴っている|見られている|の可能性|である|から始まっている|から続いている|続いている|始まっている)/.test(t) &&
     t.length >= 8
   ) {
     return t;
@@ -7036,11 +7159,11 @@ function coerceStateAboutBulletFragmentToSentenceInner(text, label) {
     if (t.length >= 12) return t;
   }
   if (/^(さっき|今さっき|たった今|数分|数十分|数時間前|昨日|一昨日|今朝|昨夜|\d+\s*日前|\d+\s*時間)/.test(t)) {
-    return `症状は${t}から始まっている`;
+    return `症状は${t}から始まった`;
   }
   if (/^(ズキズキ|キリキリ|ヒリヒリ|チクチク|重い|締め付け|鈍い)(する)?$/.test(t)) {
     const head = t.replace(/する$/, "");
-    return `${head}する痛みが出ている`;
+    return `${head}のような痛み`;
   }
   if (/^(吐き気|嘔吐|発熱|咳|のどの痛み|鼻詰まり)$/.test(t)) {
     return `${t}がある`;
@@ -7051,8 +7174,8 @@ function coerceStateAboutBulletFragmentToSentenceInner(text, label) {
   if (/悪化|マシ|波|回復|横ばい|悪くな|良くな/.test(t) && t.length >= 8) {
     return `経過の様子は${t}`;
   }
-  if (t.length < 22 && !/(が出ている|がある|である|を伴っている|見られている|の可能性)/.test(t)) {
-    return `${t}が出ている`;
+  if (t.length < 22 && !/(がある|である|を伴っている|見られている|の可能性)/.test(t)) {
+    return t;
   }
   return t;
 }
@@ -7068,8 +7191,8 @@ function coerceSlotLabelAndValueToBulletLine(label, value) {
   }
   if (/^症状の様子/.test(l)) {
     if (/^症状の様子は/.test(v)) return `・${v}`;
-    if (v.length >= 12 && /(が出ている|である|ある|続いている)/.test(v)) return `・${v}`;
-    return `・症状の様子は${v}である`;
+    if (v.length >= 12 && /(がある|である|続いている)/.test(v)) return `・${v}`;
+    return `・症状の様子は${v}`;
   }
   if (/^経過時間/.test(l)) {
     if (/^症状は/.test(v) && /(から続い|から始ま)/.test(v)) return `・${v}`;
@@ -7079,10 +7202,10 @@ function coerceSlotLabelAndValueToBulletLine(label, value) {
   if (/^悪化傾向/.test(l)) {
     if (/^経過の様子は/.test(v)) return `・${v}`;
     if (v.length >= 10 && /(ている|ある|である|悪化|回復|横ばい|マシ|波)/.test(v)) return `・${v}`;
-    return `・経過の様子は${v}である`;
+    return `・経過の様子は${v}`;
   }
   if (/^影響・見た目・体温/.test(l)) {
-    return `・日常生活や身体への影響は${v}である`;
+    return `・日常生活や身体への影響は${v}`;
   }
   if (/^付随症状/.test(l)) {
     if (v.length >= 8 && /(がある|を伴っている|がみられる)/.test(v)) return `・${v}`;
@@ -7314,8 +7437,49 @@ function bulletsAreSimilar(a, b) {
   const nb = normalizeBulletKeyForDedupe(b);
   if (!na || !nb) return false;
   if (na === nb) return true;
-  if (na.length >= 10 && nb.length >= 10 && (na.includes(nb) || nb.includes(na))) return true;
+  const minSub = 6;
+  if (na.length >= minSub && nb.length >= minSub && (na.includes(nb) || nb.includes(na))) return true;
   return false;
+}
+
+/**
+ * 同一情報の短い行と長い行が並ぶとき、長い方1行に寄せる（短い方を落とす）。
+ * 後から来た長い行が短い行を置き換える。
+ */
+function dedupeBulletsBySubsumption(bullets) {
+  if (!Array.isArray(bullets) || bullets.length <= 1) return bullets || [];
+  const out = [];
+  const norm = (x) => normalizeBulletKeyForDedupe(x);
+  const minCore = 6;
+  for (const b of bullets) {
+    const nb = norm(b);
+    if (!nb || nb.length < 2) continue;
+    const filtered = out.filter((o) => {
+      const no = norm(o);
+      if (!no.length) return true;
+      return !(nb.length > no.length && no.length >= minCore && nb.includes(no));
+    });
+    out.length = 0;
+    out.push(...filtered);
+    const coveredByLonger = out.some((o) => {
+      const no = norm(o);
+      return no.length > nb.length && nb.length >= minCore && no.includes(nb);
+    });
+    if (coveredByLonger) continue;
+    out.push(b);
+  }
+  return out;
+}
+
+/** 同趣旨の行を1つに（先に出た行を優先）。bulletsAreSimilar に依存 */
+function dedupeBulletsSequentialSimilarity(bullets) {
+  if (!Array.isArray(bullets) || bullets.length <= 1) return bullets || [];
+  const out = [];
+  for (const b of bullets) {
+    if (out.some((o) => bulletsAreSimilar(o, b))) continue;
+    out.push(b);
+  }
+  return out;
 }
 
 /** 確認文への返答でユーザーが付け足した自由文を箇条書き1行にする */
@@ -7419,7 +7583,7 @@ function mergeConfirmationExtraFactsIntoStateBulletsCache(state) {
       deduped.push(line);
     }
   }
-  state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(deduped, state);
+  state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(sanitizeBulletPoints(deduped), state);
 }
 
 /** 箇条書きに載せない「空・ない・わからない」等（付随の表示専用「ない」は別ルート） */
@@ -7696,7 +7860,7 @@ function mergeMissingBulletLinesIntoStateAboutCache(state, base, missingLines) {
     deduped.push(line);
     added++;
   }
-  state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(deduped.slice(0, 14), state);
+  state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(sanitizeBulletPoints(deduped).slice(0, 14), state);
   return added;
 }
 
@@ -7928,7 +8092,9 @@ function enforceConfirmationBulletsCompletenessCore(state) {
       });
     }
   }
-  state.stateAboutBulletsCache = finalizeStateAboutBulletLinesForSpec(state.stateAboutBulletsCache);
+  state.stateAboutBulletsCache = sanitizeBulletPoints(
+    finalizeStateAboutBulletLinesForSpec(state.stateAboutBulletsCache)
+  );
   return state.stateAboutBulletsCache.slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS);
 }
 
@@ -7946,7 +8112,9 @@ async function polishConfirmationBulletsWithLlm(state) {
     const systemPrompt = [
       "あなたは医療用チャットの「今の状態について」箇条書きの編集者です。出力はJSONのみ。",
       "【重要】下に渡す箇条書きは、スロット値をつなぎ合わせて自動生成したものです。文のつながりや語感は元からかなりぎこちなく、読みにくいことがほとんどです。",
-      "だからこそ、あなたの仕事はその内容・事実を変えずに、ユーザーが一読で理解できるよう、自然で整った書き言葉へ書き直すことです。丁寧に整えてよい。",
+      "だからこそ、あなたの仕事はその内容・事実を変えずに、ユーザーが一読で理解できるよう、自然で整った一文へ書き直すことです。",
+      "【文体】敬語（です・ます・ございます・でした・ました等）は使わない。常体・言い切りで短く（体言止め、〜だ、〜ある、〜の可能性 など）。",
+      "【禁止表現】「が出ている」は使わない（言い換え・省略で除去）。",
       "【必須】次の事実を落とさないこと。数値（痛みの/10 等）・経過の日数・ユーザーが述べた症状・原因の可能性の内容は維持または言い換えのみ。",
       "【禁止】新しい症状・病名の推定・受診判断・入力にない事実の追加。",
       "【形式】各行は「・」で始まる1行。行数は入力と同程度（最大14行）。重複行は統合してよい。",
@@ -11434,11 +11602,11 @@ function buildStateDecisionLine(state, level) {
 async function normalizeStateBlockForGreenYellowAsync(text, state) {
   if (!text) return text;
   const lines = text.split("\n");
-  const start = lines.findIndex((line) => line.startsWith("🤝 今の状態について"));
+  const start = lines.findIndex((line) => isHandshakeStateAboutHeaderLine(line));
   if (start === -1) return text;
   const end = lines.findIndex(
     (line, idx) =>
-      idx > start && (line.startsWith("✅") || line.startsWith("⏳") || line.startsWith("🚨") || line.startsWith("💊") || line.startsWith("🌱"))
+      idx > start && /^\s*(✅|⏳|🚨|💊|🌱|🏥|💬)\s/.test(line)
   );
   const sliceEnd = end >= 0 ? end : lines.length;
   const level = state?.decisionLevel === "🟡" ? "🟡" : "🟢";
@@ -12368,12 +12536,46 @@ async function generateSummaryForConfirmation(conversationId) {
     if (state.summaryGenerationEpoch !== epochAtStart) {
       return { message: state.summaryText || "", followUpQuestion: null, followUpMessage: null };
     }
+    let aboutLineGy = "";
+    if (level === "🟢" || level === "🟡") {
+      try {
+        aboutLineGy = await buildStateAboutLineAsync(state, level);
+      } catch (_) {
+        /* 極限フォールバック：組み合わせブロック省略可 */
+      }
+    }
+    let aboutRedMemo = "";
+    if (level === "🔴") {
+      try {
+        aboutRedMemo = await buildStateAboutEmpathyAndJudgmentAsync(state, "🔴");
+      } catch (_) {
+        /* 極限フォールバック */
+      }
+    }
+    if (level === "🔴") {
+      const minimalRed = [
+        "📝 今の状態について",
+        stateBlock || "症状の状態を確認しました。",
+        ...(aboutRedMemo ? ["", aboutRedMemo] : []),
+        "",
+        "✅ 今すぐやること",
+        actionsBlock,
+        "",
+        "🏥 受診先の候補",
+        "近い医療機関での受診を検討してください。",
+        "",
+        lastBlock || "💬 最後に\n今は体を休めることを優先してください。",
+      ].join("\n");
+      setSummaryPartialSectionsFromFinalText(state, minimalRed, level);
+      return { message: minimalRed, followUpQuestion: null, followUpMessage: null };
+    }
     const minimal = [
       `${level} ここまでの情報を整理します`,
       buildSummaryIntroTemplate(),
       "",
       "🤝 今の状態について",
       stateBlock || "症状の状態を確認しました。",
+      ...(aboutLineGy ? ["", aboutLineGy] : []),
       "",
       "✅ 今すぐやること",
       actionsBlock,
@@ -12381,7 +12583,7 @@ async function generateSummaryForConfirmation(conversationId) {
       "⏳ 今後の見通し",
       "症状の変化には気をつけて、悪化したら再度ご相談ください。",
       "",
-      lastBlock || `${level === "🔴" ? "💬" : "🌱"} 最後に\n今は体を休めることを優先してください。`,
+      lastBlock || "🌱 最後に\n今は体を休めることを優先してください。",
     ].join("\n");
     setSummaryPartialSectionsFromFinalText(state, minimal, level);
     return { message: minimal, followUpQuestion: null, followUpMessage: null };
@@ -12616,8 +12818,10 @@ app.post("/api/chat", async (req, res) => {
           (conversationState[conversationId].summaryGenerationEpoch || 0) + 1;
         conversationState[conversationId].summaryGenerationPromise = null;
         conversationState[conversationId].summaryPrefetchFingerprint = null;
-        (conversationState[conversationId].confirmationExtraFacts =
-          conversationState[conversationId].confirmationExtraFacts || []).push(msg);
+        if (shouldAppendConfirmationExtraFacts(msg)) {
+          (conversationState[conversationId].confirmationExtraFacts =
+            conversationState[conversationId].confirmationExtraFacts || []).push(msg);
+        }
         conversationState[conversationId].stateAboutBulletsCache = null;
       }
       ensureUserUtterancesCapturedBeforeConfirmation(conversationId, conversationState[conversationId]);
@@ -14272,7 +14476,11 @@ function getSummarySectionSpecsByJudgement(judgement) {
   }
   if (judgement === "🟡") {
     return [
-      { id: 1, title: "🟢 ここまでの情報を整理します", patterns: [/^🟢\s*ここまでの情報を整理します/] },
+      {
+        id: 1,
+        title: "🟢 ここまでの情報を整理します",
+        patterns: [/^🟢\s*ここまでの情報を整理します/, /^🟡\s*ここまでの情報を整理します/],
+      },
       { id: 2, title: "🤝 今の状態について", patterns: [/^🤝\s*今の状態について/] },
       { id: 3, title: "✅ 今すぐやること", patterns: [/^✅\s*今すぐやること（これだけでOK）/, /^✅\s*今すぐやること/] },
       { id: 4, title: "⏳ 今後の見通し", patterns: [/^⏳\s*今後の見通し/, /^⏳\s*この先の見通し/] },
@@ -14280,7 +14488,11 @@ function getSummarySectionSpecsByJudgement(judgement) {
     ];
   }
   return [
-    { id: 1, title: "🟢 ここまでの情報を整理します", patterns: [/^🟢\s*ここまでの情報を整理します/] },
+    {
+      id: 1,
+      title: "🟢 ここまでの情報を整理します",
+      patterns: [/^🟢\s*ここまでの情報を整理します/, /^🟡\s*ここまでの情報を整理します/],
+    },
     { id: 2, title: "🤝 今の状態について", patterns: [/^🤝\s*今の状態について/] },
     { id: 3, title: "✅ 今すぐやること", patterns: [/^✅\s*今すぐやること（これだけでOK）/, /^✅\s*今すぐやること/] },
     { id: 4, title: "⏳ 今後の見通し", patterns: [/^⏳\s*今後の見通し/, /^⏳\s*この先の見通し/] },
