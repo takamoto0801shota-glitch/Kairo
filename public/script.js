@@ -592,7 +592,7 @@ function setConcreteModalBody(textOrStructured) {
 }
 
 const GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK =
-  "今すぐ受診しても、得られる対応が自宅と大きく変わらない可能性が高いです。\n逆に動くと悪化しやすいので、休む方が合理的です。";
+  "今すぐ受診しても、得られる対応は自宅と大きく変わりません。\n逆に動くと悪化しやすいので、休む方が合理的です。";
 
 /** 納得文の直後（改行のうえ）に必ず1文。①を第一優先（②③は仕様書・将来差し替え用） */
 const GREEN_YELLOW_MODAL_SYMPTOM_COMMONNESS_PRIMARY =
@@ -808,10 +808,12 @@ async function showConcreteHospitalDetails() {
 
 // Check if decision is completed (判断が完了しているかチェック)
 function isDecisionCompleted(text) {
-  // 判断を示すブロックが含まれているかチェック
+  const t = String(text || "").normalize("NFC");
+  // 判断を示すブロックが含まれているかチェック（🟡欠落で二重まとめが付くのを防ぐ）
   const decisionIndicators = [
     '🔴 ここまでの情報を整理します',
     '🟢 ここまでの情報を整理します',
+    '🟡 ここまでの情報を整理します',
     '🤝 今の状態について',
     '✅ 今すぐやること',
     '⏳ 今後の見通し',
@@ -821,7 +823,7 @@ function isDecisionCompleted(text) {
     '病院に行くことをおすすめします',
     '病院をおすすめします'
   ];
-  
+
   const decisionPatterns = [
     /今は.*様子見/,
     /市販薬/,
@@ -830,11 +832,13 @@ function isDecisionCompleted(text) {
     /判断します/,
     /おすすめします/
   ];
-  
-  // 判断を示すブロックが含まれているか
-  const hasDecisionBlock = decisionIndicators.some(indicator => text.includes(indicator));
-  const hasDecisionPattern = decisionPatterns.some(pattern => pattern.test(text));
-  
+
+  const hasSummaryIntroAnyLevel = /(?:🟢|🟡|🔴)\s*ここまでの情報を整理します/.test(t);
+  const hasDecisionBlock =
+    hasSummaryIntroAnyLevel ||
+    decisionIndicators.some((indicator) => t.includes(indicator));
+  const hasDecisionPattern = decisionPatterns.some((pattern) => pattern.test(t));
+
   return hasDecisionBlock || hasDecisionPattern;
 }
 
@@ -1074,10 +1078,13 @@ function addMessage(text, isUser = false, save = true, options = {}) {
   const finalizeMessage = () => {
     // 判断が完了しているかチェック
     const decisionCompleted = isDecisionCompleted(text);
-    
+    // サーバが 🟢/🟡/🔴 ブロック付きまとめを返したときは、クライアント生成の summary-block を付けない（二重まとめ防止）
+    const hasParsedSummaryBlocks = !!(blocks && blocks.length > 0);
+
     // まとめは初回のみ：summaryGenerated済みの場合やフォロー専用応答では絶対にまとめを追加しない
     const shouldAddSummary =
       decisionCompleted &&
+      !hasParsedSummaryBlocks &&
       !isSummaryLocked() &&
       !options.skipSummaryBlock &&
       !appState.introSummarySuppress &&
@@ -1182,18 +1189,8 @@ function addMessage(text, isUser = false, save = true, options = {}) {
 
 // Add summary block to message (まとめブロックを追加)
 function addSummaryBlock(messageDiv, fullText) {
-  const hasSummaryInText =
-    fullText.includes('🌱 最後に') ||
-    fullText.includes('💬 最後に') ||
-    fullText.includes('🔴 ここまでの情報を整理します') ||
-    fullText.includes('🟢 ここまでの情報を整理します') ||
-    fullText.includes('🤝 今の状態について') ||
-    fullText.includes('✅ 今すぐやること') ||
-    fullText.includes('⏳ 今後の見通し') ||
-    fullText.includes('📝 今の状態について') ||
-    fullText.includes('📝 いまの状態を整理します') ||
-    fullText.includes('🏥 受診先の候補');
-  if (hasSummaryInText) {
+  // DOM 上に既にブロック型まとめがある（parseAIMessage 描画済み）場合は付与しない（🟢/🟡/🔴 共通・二重防止）
+  if (messageDiv.querySelector(".message-block:not(.summary-block)")) {
     return;
   }
   if (messageDiv.dataset.summaryAdded === "true") {

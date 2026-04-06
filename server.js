@@ -497,8 +497,8 @@ contextFlag = true の場合、次のKairoの発話のどこかで
   - severityIndex = weightedTotal / 18.6
 - 判定基準（Phase2）：
   - 0.65以上 → 🔴
-  - 0.4〜0.64 → 🟡
-  - 0.4未満 → 🟢
+  - 0.45以上0.65未満 → 🟡
+  - 0.45未満（10点換算で4.5未満）→ 🟢
 - 「高」がちょうど1つだけの場合：上記指数で計算し、結果が🟢でも**強制的に🟡**とする（🟡未満には落とさない）。
 - ユーザーには指数や内部計算過程を一切表示しない。
 
@@ -1033,6 +1033,21 @@ function isHandshakeStateAboutHeaderLine(line) {
 
 function textIncludesHandshakeAboutHeader(text) {
   return /🤝\s*今の状態について/.test(String(text || ""));
+}
+
+/** 🤝 ブロックが箇条書きのみ（共感・判断の段落なし）か。🟡で多発する欠落の検出用 */
+function handshakeStateBlockNeedsEmpathy(text) {
+  if (!textIncludesHandshakeAboutHeader(text)) return false;
+  const lines = String(text || "").split("\n");
+  const start = lines.findIndex((l) => isHandshakeStateAboutHeaderLine(l));
+  if (start < 0) return false;
+  const end = lines.findIndex(
+    (l, i) => i > start && /^\s*(✅|⏳|🚨|💊|🌱|🏥|💬)\s/.test(l)
+  );
+  const body = lines.slice(start + 1, end < 0 ? lines.length : end);
+  const nonEmpty = body.map((l) => String(l || "").trim()).filter(Boolean);
+  if (nonEmpty.length === 0) return true;
+  return nonEmpty.every((t) => /^・/.test(t));
 }
 
 /** 🔴 LLM の 📝 見出し（空白・「いまの状態を整理します」別表記のゆらぎを許容） */
@@ -3493,17 +3508,30 @@ async function replaceStateAboutBlockOnly(summaryText, state, historyText = "") 
     result = replaceSummaryBlock(result, "📝 今の状態について", memoLines);
     return result;
   }
-  const level = state?.decisionLevel === "🟡" ? "🟡" : "🟢";
-  const aboutLine = await buildStateAboutLineAsync(state, level);
+  const level = finalizeRiskLevel(state);
+  if (level !== "🟢" && level !== "🟡") return summaryText;
+  let aboutLine = await buildStateAboutLineAsync(state, level);
+  if (!String(aboutLine || "").trim()) {
+    aboutLine = buildGreenYellowStateAboutBlock(state);
+  }
   const decisionLine = buildStateDecisionLine(state, level);
   const newBlock = [
     "🤝 今の状態について",
     ...buildStateFactsBullets(state, { forSummary: true }),
     "",
-    ...(aboutLine ? [aboutLine] : []),
+    aboutLine,
     ...(decisionLine ? [decisionLine] : []),
   ].join("\n");
   return replaceSummaryBlock(summaryText, "🤝 今の状態について", newBlock);
+}
+
+/** 🤝 が箇条書きのみのときだけ差し替え（重複 LLM を避ける）。まとめ本線・確認応答の両方で使用 */
+async function ensureHandshakeStateBlockFull(text, state, historyTextForCare = "") {
+  if (!text || !state) return text;
+  const level = finalizeRiskLevel(state);
+  if (level !== "🟢" && level !== "🟡") return text;
+  if (!handshakeStateBlockNeedsEmpathy(text)) return text;
+  return replaceStateAboutBlockOnly(text, state, historyTextForCare);
 }
 
 /** 先行まとめが揃っているとき、確認で追加情報があった場合に「✅ 今すぐやること」だけ差し替える（他ブロックは維持） */
@@ -3527,15 +3555,15 @@ async function replaceImmediateActionsBlockOnly(summaryText, state, historyText 
   }
 }
 
+/**
+ * 先行まとめ（GET /api/summary-progress）用の部分セクション。
+ * 「今の状態について」は箇条書き・共感・判断・網羅検証まで含めた**完全形**をまとめ本線で組み立てるため、ここでは出さない（箇条書きだけが先行すると不完全表示になる）。
+ */
 function buildSummaryPartialSectionsBeforeLlm(state) {
   if (!state) return [];
   const level = finalizeRiskLevel(state);
   const intro = `${level} ここまでの情報を整理します\n${buildSummaryIntroTemplate()}`;
-  const bullets = (buildStateFactsBullets(state, { forSummary: true }) || []).join("\n");
-  if (level === "🔴") {
-    return [intro, ["📝 今の状態について", bullets].join("\n")];
-  }
-  return [intro, ["🤝 今の状態について", bullets].join("\n")];
+  return [intro];
 }
 
 function setSummaryPartialSectionsFromFinalText(state, text, level) {
@@ -10016,9 +10044,36 @@ function getModalCommonNonInfectionFallbackPair(mainSymptom) {
 
 /** 🟢/🟡モーダル：🟡ブロックと「現時点の安心材料」の間に出す納得文（LLM・失敗時フォールバック） */
 const GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK = [
-  "今すぐ受診しても、得られる対応が自宅と大きく変わらない可能性が高いです。",
+  "今すぐ受診しても、得られる対応は自宅と大きく変わりません。",
   "逆に動くと悪化しやすいので、休む方が合理的です。",
 ].join("\n");
+
+/** 納得文に推量語が含まれる場合は不採用（断定形「です／ます／あります」系に寄せる） */
+function acceptanceConvictionHasHedging(text) {
+  const t = String(text || "");
+  return (
+    /かもしれません|かもしれない|でしょう[。．\s]|だろう[。．\s]|だろう$|のではないか|のかもしれ/.test(t) ||
+    /可能性が高い/.test(t)
+  );
+}
+
+/** 「。」終わりの文がちょうど2つ・長さ仕様内・推量表現なしなら採用。それ以外はフォールバック（KAIRO_SPEC：必ず二文・断定形） */
+function enforceAcceptanceConvictionTwoSentences(text) {
+  const fallback = GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK;
+  const raw = String(text || "")
+    .trim()
+    .replace(/\*\*/g, "")
+    .replace(/^["「『]|["」』]$/g, "")
+    .trim();
+  if (!raw) return fallback;
+  const linear = raw.replace(/\s*\n\s*/g, "").trim();
+  const parts = linear.match(/[^。．]+[。．]/g);
+  if (!parts || parts.length !== 2) return fallback;
+  const out = parts.map((p) => p.trim()).join("\n");
+  if (acceptanceConvictionHasHedging(out)) return fallback;
+  if (out.length >= 35 && out.length <= 450) return out;
+  return fallback;
+}
 
 /** 納得文の直後（改行のうえ）に必ず1文。①を第一優先（②③は仕様書・将来差し替え用） */
 const GREEN_YELLOW_MODAL_SYMPTOM_COMMONNESS_PRIMARY =
@@ -10037,11 +10092,15 @@ async function generateGreenYellowModalAcceptanceText(mainSymptom = "", userSumm
             role: "system",
             content: [
               "あなたは医療情報を要約するアシスタントです。",
-              "🟢または🟡判定のユーザー向け補助モーダル用に、「納得文」を2〜3文で書いてください。",
-              "意図：今すぐ受診しても、得られる対応が自宅での対応と大きく変わらない可能性があること、無理に動くと負担が増えやすいので休む判断が合理的であることを、落ち着いたトーンで伝える。",
-              "受診という選択肢を罵ったり禁止したりはしない。断定診断・煽り・恐怖訴求は禁止。",
+              "🟢または🟡判定のユーザー向け補助モーダル用に、「納得文」を必ずちょうど2文で書いてください（「。」で終わる文が2つ。3文以上・1文のみは禁止）。",
+              "各文の文末は「です。」「ます。」「あります。」など断定形に統一する（「かもしれません」「でしょう」「だろう」「のではないか」など推量・婉曲は禁止）。",
+              "次の2文の意味・トーンに必ず寄せること（語句は完全に同じでなくてよい）：",
+              "1文目の型：今すぐ受診しても、得られる対応は自宅と大きく変わらない、という趣旨（断定で述べる。「可能性が高いです」に頼らない）。",
+              "2文目の型：逆に動くと悪化しやすいので、休む方が合理的、という趣旨（文末は断定形）。",
+              "意図：受診で得られる対応が自宅と大きく変わらないこと・無理に動くと負担が増えやすいので休む合理性を、落ち着いたトーンで伝える。",
+              "受診という選択肢を罵ったり禁止したりはしない。医学的に不適切な断定診断・煽り・恐怖訴求は禁止。",
               "「あなたの場合」「この症状は」などの個別化は禁止。主症状ラベルは必要なら1回まで。",
-              "出力は本文のみ（JSON不要）。改行は最大1回（2段落まで）。",
+              "出力は本文のみ（JSON不要）。2文のあいだは改行1つ（計2行）か、同一行に「。」で区切って2文。",
             ].join("\n"),
           },
           {
@@ -10054,7 +10113,8 @@ async function generateGreenYellowModalAcceptanceText(mainSymptom = "", userSumm
       });
       let text = (completion?.choices?.[0]?.message?.content || "").trim();
       text = text.replace(/\*\*/g, "").replace(/^["「]|["」]$/g, "").trim();
-      if (text.length >= 35 && text.length <= 450) return text;
+      text = enforceAcceptanceConvictionTwoSentences(text);
+      if (text !== GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK) return text;
     } catch (_) {
       /* fallback below */
     }
@@ -11701,14 +11761,18 @@ async function normalizeStateBlockForGreenYellowAsync(text, state) {
       idx > start && /^\s*(✅|⏳|🚨|💊|🌱|🏥|💬)\s/.test(line)
   );
   const sliceEnd = end >= 0 ? end : lines.length;
-  const level = state?.decisionLevel === "🟡" ? "🟡" : "🟢";
-  const aboutLine = await buildStateAboutLineAsync(state, level);
+  const level = finalizeRiskLevel(state);
+  if (level !== "🟢" && level !== "🟡") return text;
+  let aboutLine = await buildStateAboutLineAsync(state, level);
+  if (!String(aboutLine || "").trim()) {
+    aboutLine = buildGreenYellowStateAboutBlock(state);
+  }
   const decisionLine = buildStateDecisionLine(state, level);
   const newBlock = [
     "🤝 今の状態について",
     ...buildStateFactsBullets(state, { forSummary: true }),
     "",
-    ...(aboutLine ? [aboutLine] : []),
+    aboutLine,
     ...(decisionLine ? [decisionLine] : []),
   ];
   return [...lines.slice(0, start), ...newBlock, ...lines.slice(sliceEnd)].join("\n");
@@ -11806,6 +11870,98 @@ function normalizeAnswerText(text) {
   return text.replace(/\s+/g, "").trim();
 }
 
+/** 全角カタカナ → ひらがな（選択肢マッチ用） */
+function katakanaToHiragana(s) {
+  return String(s || "").replace(/[\u30a1-\u30f6]/g, (ch) =>
+    String.fromCharCode(ch.charCodeAt(0) - 0x60)
+  );
+}
+
+/** 括弧内の注釈を除いた選択肢本文（比較用） */
+function stripOptionParensForMatch(s) {
+  return String(s || "")
+    .replace(/[（(][^）)]*[）)]/g, "")
+    .trim();
+}
+
+/**
+ * ひらがな・カタカナ・誤字ゆらぎを吸収するための緩い正規化（意味は変えない）。
+ * NFKC・空白除去・句読点除去・カタカナ→ひらがな
+ */
+function normalizeLooseJapanese(s) {
+  return katakanaToHiragana(
+    String(s || "")
+      .normalize("NFKC")
+      .replace(/[\s　・]+/g, "")
+      .replace(/[。．!！?？,、]/g, "")
+  );
+}
+
+function levenshteinDistance(a, b) {
+  const s = String(a || "");
+  const t = String(b || "");
+  const m = s.length;
+  const n = t.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i += 1) dp[i][0] = i;
+  for (let j = 0; j <= n; j += 1) dp[0][j] = j;
+  for (let i = 1; i <= m; i += 1) {
+    for (let j = 1; j <= n; j += 1) {
+      const cost = s[i - 1] === t[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+    }
+  }
+  return dp[m][n];
+}
+
+function stringSimilarityRatio(a, b) {
+  const s = String(a || "");
+  const t = String(b || "");
+  if (!s.length && !t.length) return 1;
+  if (!s.length || !t.length) return 0;
+  const d = levenshteinDistance(s, t);
+  const maxLen = Math.max(s.length, t.length);
+  return 1 - d / maxLen;
+}
+
+/**
+ * 選択肢と自由記述・ひらがな・軽い誤字の類似度で最良の index を返す。
+ * 閾値は短い文言ほど厳しめ（誤爆防止）。同点に近いときは棄却。
+ */
+function fuzzyMatchJapaneseOption(answer, options) {
+  if (!answer || !Array.isArray(options) || options.length === 0) return null;
+  const u = normalizeLooseJapanese(answer);
+  if (!u) return null;
+  const scored = [];
+  for (let i = 0; i < options.length; i += 1) {
+    const opt = String(options[i] || "");
+    const oFull = normalizeLooseJapanese(opt);
+    const oStrip = normalizeLooseJapanese(stripOptionParensForMatch(opt));
+    let score = 0;
+    for (const o of [oFull, oStrip]) {
+      if (!o) continue;
+      if (u === o) {
+        score = 1;
+        break;
+      }
+      if (o.includes(u) || u.includes(o)) {
+        score = Math.max(score, 0.93);
+      } else {
+        score = Math.max(score, stringSimilarityRatio(u, o));
+      }
+    }
+    const minLen = Math.min(u.length, Math.max(oFull.length, 1), Math.max(oStrip.length, 1));
+    const threshold = minLen <= 3 ? 0.72 : minLen <= 6 ? 0.62 : minLen <= 12 ? 0.55 : 0.48;
+    if (score >= threshold) scored.push({ i, score });
+  }
+  if (scored.length === 0) return null;
+  scored.sort((a, b) => b.score - a.score);
+  if (scored.length > 1 && scored[1].score >= scored[0].score - 0.04) return null;
+  return scored[0].i;
+}
+
 function userAskedSummary(message) {
   return /まとめ|要約|サマリー/.test(message || "");
 }
@@ -11818,16 +11974,16 @@ function hasFinalQuestionPrefix(text) {
   return firstLine.startsWith("最後に") || firstLine.startsWith("最後の質問");
 }
 
-function matchAnswerToOption(answer, options) {
+function matchAnswerToOptionWithMeta(answer, options) {
   const normalizedAnswer = normalizeAnswerText(answer);
   if (!normalizedAnswer) {
-    return null;
+    return { index: null, canonicalize: false };
   }
 
   if (options.some((opt) => (opt || "").includes("思い当たる"))) {
     if (normalizedAnswer.match(/思い当たる|当たる|ある/)) {
       const index = options.findIndex((opt) => (opt || "").includes("思い当たる"));
-      if (index >= 0) return index;
+      if (index >= 0) return { index, canonicalize: true };
     }
   }
 
@@ -11836,7 +11992,7 @@ function matchAnswerToOption(answer, options) {
       normalizeAnswerText(opt).match(/(ない|なし|思い当たらない|特になし|特にない)$/)
     );
     if (negativeIndex !== -1) {
-      return negativeIndex;
+      return { index: negativeIndex, canonicalize: true };
     }
   }
 
@@ -11848,20 +12004,34 @@ function matchAnswerToOption(answer, options) {
   })();
 
   if (indexByNumber !== null) {
-    return indexByNumber;
+    return { index: indexByNumber, canonicalize: true };
   }
 
   for (let i = 0; i < options.length; i += 1) {
     const normalizedOption = normalizeAnswerText(options[i]);
     if (normalizedOption && normalizedAnswer.includes(normalizedOption)) {
-      return i;
+      return { index: i, canonicalize: true };
     }
   }
 
   for (let i = 0; i < options.length; i += 1) {
     const normalizedOption = normalizeAnswerText(options[i]);
     if (normalizedOption && normalizedOption.includes(normalizedAnswer)) {
-      return i;
+      return { index: i, canonicalize: true };
+    }
+  }
+
+  const uLoose = normalizeLooseJapanese(answer);
+  if (uLoose) {
+    for (let i = 0; i < options.length; i += 1) {
+      const oLoose = normalizeLooseJapanese(options[i]);
+      const oStrip = normalizeLooseJapanese(stripOptionParensForMatch(options[i]));
+      if (oLoose && (oLoose.includes(uLoose) || uLoose.includes(oLoose))) {
+        return { index: i, canonicalize: true };
+      }
+      if (oStrip && (oStrip.includes(uLoose) || uLoose.includes(oStrip))) {
+        return { index: i, canonicalize: true };
+      }
     }
   }
 
@@ -11869,8 +12039,8 @@ function matchAnswerToOption(answer, options) {
     if (!a || !b) return 0;
     const bigrams = (str) => {
       const arr = [];
-      for (let i = 0; i < str.length - 1; i += 1) {
-        arr.push(str.slice(i, i + 2));
+      for (let j = 0; j < str.length - 1; j += 1) {
+        arr.push(str.slice(j, j + 2));
       }
       return arr;
     };
@@ -11896,20 +12066,29 @@ function matchAnswerToOption(answer, options) {
     }
   }
   if (bestIndex !== null && bestScore >= 0.2) {
-    return bestIndex;
+    return { index: bestIndex, canonicalize: true };
+  }
+
+  const fuzzyIdx = fuzzyMatchJapaneseOption(answer, options);
+  if (fuzzyIdx !== null) {
+    return { index: fuzzyIdx, canonicalize: true };
   }
 
   if (normalizedAnswer.match(/動けない|無理|強い|ひどい|悪化|辛い|つらい/)) {
-    return 2;
+    return { index: 2, canonicalize: false };
   }
   if (normalizedAnswer.match(/少し|やや|中|真ん中|そこそこ/)) {
-    return 1;
+    return { index: 1, canonicalize: false };
   }
   if (normalizedAnswer.match(/普通|軽い|問題ない|大丈夫|上/)) {
-    return 0;
+    return { index: 0, canonicalize: false };
   }
 
-  return null;
+  return { index: null, canonicalize: false };
+}
+
+function matchAnswerToOption(answer, options) {
+  return matchAnswerToOptionWithMeta(answer, options).index;
 }
 
 function mapFreeTextToOptionIndex(answer, options, type) {
@@ -12069,11 +12248,19 @@ function hasConcreteCauseDetail(text) {
 }
 
 function classifyAnswerToOption(answer, options, type) {
-  const exact = matchAnswerToOption(answer, options);
-  if (exact !== null) return { index: exact, usedFreeText: false };
+  const meta = matchAnswerToOptionWithMeta(answer, options);
+  if (meta.index !== null) {
+    return {
+      index: meta.index,
+      usedFreeText: false,
+      useCanonicalSlotText: meta.canonicalize === true,
+    };
+  }
   const mapped = mapFreeTextToOptionIndex(answer, options, type);
-  if (mapped !== null) return { index: mapped, usedFreeText: true };
-  return { index: null, usedFreeText: false };
+  if (mapped !== null) {
+    return { index: mapped, usedFreeText: true, useCanonicalSlotText: false };
+  }
+  return { index: null, usedFreeText: false, useCanonicalSlotText: false };
 }
 
 function computeUrgencyLevel(questionCount, totalScore, debugMeta = {}) {
@@ -12264,7 +12451,7 @@ function calculateRiskFromState(state) {
   let urgency = "green";
   if (severityIndex >= 0.65) {
     urgency = "red";
-  } else if (severityIndex >= 0.4) {
+  } else if (severityIndex >= 0.45) {
     urgency = "yellow";
   }
   if (urgency === "red" && blockRedByRecentShortDuration) {
@@ -12540,6 +12727,9 @@ async function generateSummaryForConfirmation(conversationId) {
   aiResponse = correctKanjiAndTypos(aiResponse);
   aiResponse = enforceSummaryIntroTemplate(aiResponse);
   aiResponse = await enforceSummaryStructureStrict(aiResponse, level, history, state);
+  if (level === "🟢" || level === "🟡") {
+    aiResponse = await ensureHandshakeStateBlockFull(aiResponse, state, historyTextForOtc);
+  }
   if (level === "🟢" || level === "🟡") {
     aiResponse = await ensureImmediateActionsBlock(
       aiResponse,
@@ -12944,7 +13134,8 @@ app.post("/api/chat", async (req, res) => {
           state.summaryText &&
           hasAllSummaryBlocks(state.summaryText)
         ) {
-          summaryMsg = await replaceImmediateActionsBlockOnly(state.summaryText, state, historyTextForBlock);
+          summaryMsg = await replaceStateAboutBlockOnly(state.summaryText, state, historyTextForBlock);
+          summaryMsg = await replaceImmediateActionsBlockOnly(summaryMsg, state, historyTextForBlock);
           immediateActionsPatchedInTry = true;
         } else {
           let result;
@@ -13018,6 +13209,12 @@ app.post("/api/chat", async (req, res) => {
         ].join("\n");
       }
       summaryMsg = ensureGreenHeaderForYellow(summaryMsg, finalizeRiskLevel(state));
+      {
+        const lr = finalizeRiskLevel(state);
+        if ((lr === "🟢" || lr === "🟡") && summaryMsg) {
+          summaryMsg = await ensureHandshakeStateBlockFull(summaryMsg, state, historyTextForBlock);
+        }
+      }
       if (hasAddedInfo && summaryMsg && !immediateActionsPatchedInTry) {
         summaryMsg = await replaceImmediateActionsBlockOnly(summaryMsg, state, historyTextForBlock);
       }
@@ -13281,7 +13478,10 @@ app.post("/api/chat", async (req, res) => {
         if (!conversationState[conversationId].slotFilled[type]) {
           conversationState[conversationId].slotFilled[type] = true;
         }
-        const valueForDisplay = String(message || "").trim();
+        const valueForDisplay =
+          classified.useCanonicalSlotText === true
+            ? lastOptionsSnapshot[selectedIndex]
+            : String(message || "").trim() || lastOptionsSnapshot[selectedIndex];
         conversationState[conversationId].slotAnswers[type] =
           valueForDisplay || lastOptionsSnapshot[selectedIndex];
         let normalized = buildNormalizedAnswer(
@@ -13949,6 +14149,13 @@ app.post("/api/chat", async (req, res) => {
         conversationHistory[conversationId],
         conversationState[conversationId]
       );
+      if (level === "🟢" || level === "🟡") {
+        aiResponse = await ensureHandshakeStateBlockFull(
+          aiResponse,
+          conversationState[conversationId],
+          historyTextForOtc
+        );
+      }
       if (level === "🟢" || level === "🟡") {
         aiResponse = await ensureImmediateActionsBlock(
           aiResponse,
