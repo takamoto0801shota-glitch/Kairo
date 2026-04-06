@@ -3512,7 +3512,7 @@ async function replaceStateAboutBlockOnly(summaryText, state, historyText = "") 
   if (level !== "🟢" && level !== "🟡") return summaryText;
   let aboutLine = await buildStateAboutLineAsync(state, level);
   if (!String(aboutLine || "").trim()) {
-    aboutLine = buildGreenYellowStateAboutBlock(state);
+    aboutLine = buildGreenYellowStateAboutBlock(state, level);
   }
   const decisionLine = buildStateDecisionLine(state, level);
   const newBlock = [
@@ -3665,7 +3665,7 @@ function stripSearchTraceFromReason(text) {
     .trim();
 }
 
-/** 仕様10.1②：理由行に ・ は使わない */
+/** 仕様10.1①：理由行に ・ は使わない */
 function stripBulletFromReason(text) {
   return String(text || "")
     .replace(/^・\s*/gm, "")
@@ -3674,7 +3674,7 @@ function stripBulletFromReason(text) {
     .trim();
 }
 
-/** 仕様10.1②：番号付き（1) / 1️⃣）は禁止 */
+/** 仕様10.1①：番号付き（1) / 1️⃣）は禁止 */
 function stripNumberingFromText(text) {
   return String(text || "")
     .replace(/^[0-9]+[)）]\s*/g, "")
@@ -3835,30 +3835,9 @@ function pickActionsForBlock(plan, maxCount = 3) {
   return picked;
 }
 
-/** ① なぜそれでいいのか（安心の土台・2文以内） */
-function buildWhySection(context = {}) {
-  const location = String(context?.location || context?.mainSymptom || "症状").trim();
-  const templates = [
-    [
-      "現在の状態では、体が一時的に過敏になっている可能性があります。",
-      "この段階では刺激を減らすことが回復の近道になります。",
-    ],
-    [
-      "今の経過であれば、一時的な変化として捉えられることが多いです。",
-      "刺激を減らすことで、体が回復モードに入りやすくなります。",
-    ],
-    [
-      "症状の強さや経過から、今は負荷を下げる段階と考えられます。",
-      "静かな環境で様子を見ることが、次の判断の土台になります。",
-    ],
-  ];
-  const idx = Math.floor(Math.random() * templates.length);
-  return templates[idx].join("\n");
-}
-
 /**
- * ③ 予想経過の「特例」：経過が「1時間以上前」の類（さっき・数分級以外）のとき true。
- * KAIRO_SPEC 10.1 ③：数日スケールの見通し文に切り替える。
+ * ② 予想経過の「特例」：経過が「1時間以上前」の類（さっき・数分級以外）のとき true。
+ * KAIRO_SPEC 10.1 ②：数日スケールの見通し文に切り替える。
  */
 function isExpectedCourseLongDurationVariant(state) {
   if (!state) return false;
@@ -3873,7 +3852,7 @@ function isExpectedCourseLongDurationVariant(state) {
   return true;
 }
 
-/** ③ 予想経過（安心設計） */
+/** ② 予想経過（安心設計） */
 function buildExpectedCourse(context = {}, state = null) {
   if (state && isExpectedCourseLongDurationVariant(state)) {
     const templates = [
@@ -4060,7 +4039,7 @@ function buildDoActionsFromPlan(plan, state, level, options = {}) {
   return ensured.slice(0, maxCount);
 }
 
-/** ④ 締めの一文（心理的アンカー） */
+/** ③ 締めの一文（心理的アンカー） */
 function buildClosingLine() {
   const templates = [
     "今は体を回復モードに入れることが最優先です。",
@@ -4155,13 +4134,11 @@ ${fullRules}
   return `${header}\n${level === "🔴" ? "今の状況で受診を選ぶのは適切な判断です。" : "今は体を休めることを優先してください。"}`;
 }
 
-/** 本文用：モーダルと同じ LLM リファイン＋buildDoActionsFromPlan を使用し、①②③④の枠で出力 */
+/** 本文用：モーダルと同じ LLM リファイン＋buildDoActionsFromPlan を使用し、①②③の枠で出力 */
 async function buildImmediateActionsBlock(level, state, historyText = "", research = null) {
   const plan = research || {};
   const context = plan?.currentStateContext || buildCurrentStateContext(state, historyText || "", state?.lastConcreteDetailsText || "");
   const lines = ["✅ 今すぐやること"];
-  lines.push(buildWhySection(context));
-  lines.push("");
 
   const refinedActions = await refineDoActionsWithLLM(plan, state, level, { forSummary: true });
   let doActions = buildDoActionsFromPlan(plan, state, level, {
@@ -8892,49 +8869,53 @@ function shouldUseWindyColdOnsetPatternForStateAbout(state) {
   return associatedSymptomsImpliesCoughOrNasalForWindPattern(state);
 }
 
+/**
+ * 🤝🟢🟡 ② 状態の意味（パターン化）の2行。🟢 と 🟡 で②本文のみ異なる（〇〇 は `greenYellowPatternNounForTemporary` 共通）。
+ */
+function buildGreenYellowStateAboutPatternLines(state, level) {
+  const lv = level === "🟡" || level === "🟢" ? level : finalizeRiskLevel(state);
+  if (shouldUseWindyColdOnsetPatternForStateAbout(state)) {
+    if (lv === "🟡") {
+      return [
+        "この組み合わせは、",
+        "風の初期症状としてよく見られる一方で、注意が必要なサインも含まれます。",
+      ];
+    }
+    return ["この組み合わせは、", "風の初期症状としてよく見られるパターンです。"];
+  }
+  const noun = greenYellowPatternNounForTemporary(state);
+  if (lv === "🟡") {
+    return [
+      "この組み合わせは、",
+      `一時的な${noun}としてよく見られる一方で、注意が必要なサインも含まれます。`,
+    ];
+  }
+  return ["この組み合わせは、", `一時的な${noun}としてよく見られるパターンです。`];
+}
+
 /** 🤝🟢🟡 専用：共感廃止・3 ブロック固定（KAIRO_SPEC）。短語はヒューリスティックのみ。 */
-function buildGreenYellowStateAboutBlock(state) {
+function buildGreenYellowStateAboutBlock(state, level) {
   const rawParts = collectGreenYellowLowMediumCombinationParts(state);
   const parts = rawParts.map((p) => finalizeComboLabelForCombinationLine(p)).filter(Boolean);
   const comboInner = parts.map((p) => `「${p}」`).join("＋");
-  if (shouldUseWindyColdOnsetPatternForStateAbout(state)) {
-    return [
-      `${comboInner}状態です。`,
-      "この組み合わせは、",
-      "風の初期症状としてよく見られるパターンです。",
-      "👉 今すぐ受診が必要な状態ではありません",
-      "👉 まずは休んで様子を見る判断で問題ありません",
-    ].join("\n");
-  }
-  const noun = greenYellowPatternNounForTemporary(state);
+  const patternLines = buildGreenYellowStateAboutPatternLines(state, level);
   return [
     `${comboInner}状態です。`,
-    "この組み合わせは、",
-    `一時的な${noun}としてよく見られるパターンです。`,
+    ...patternLines,
     "👉 今すぐ受診が必要な状態ではありません",
     "👉 まずは休んで様子を見る判断で問題ありません",
   ].join("\n");
 }
 
 /** 🤝🟢🟡 同上。組み合わせ「〇〇」は LLM で削ぎ落とし（KAIRO_SPEC 605）。 */
-async function buildGreenYellowStateAboutBlockAsync(state) {
+async function buildGreenYellowStateAboutBlockAsync(state, level) {
   const rawParts = collectGreenYellowLowMediumCombinationParts(state);
   const parts = (await finalizeCombinationPartsWithLlm(state, rawParts)).filter(Boolean);
   const comboInner = parts.map((p) => `「${p}」`).join("＋");
-  if (shouldUseWindyColdOnsetPatternForStateAbout(state)) {
-    return [
-      `${comboInner}状態です。`,
-      "この組み合わせは、",
-      "風の初期症状としてよく見られるパターンです。",
-      "👉 今すぐ受診が必要な状態ではありません",
-      "👉 まずは休んで様子を見る判断で問題ありません",
-    ].join("\n");
-  }
-  const noun = greenYellowPatternNounForTemporary(state);
+  const patternLines = buildGreenYellowStateAboutPatternLines(state, level);
   return [
     `${comboInner}状態です。`,
-    "この組み合わせは、",
-    `一時的な${noun}としてよく見られるパターンです。`,
+    ...patternLines,
     "👉 今すぐ受診が必要な状態ではありません",
     "👉 まずは休んで様子を見る判断で問題ありません",
   ].join("\n");
@@ -9159,14 +9140,14 @@ function buildStateAboutEmpathyAndJudgment(state, level) {
   if (level === "🔴") {
     return buildRedStateAboutEmpathyBlock(state);
   }
-  return buildGreenYellowStateAboutBlock(state);
+  return buildGreenYellowStateAboutBlock(state, level);
 }
 
 async function buildStateAboutEmpathyAndJudgmentAsync(state, level) {
   if (level === "🔴") {
     return buildRedStateAboutEmpathyBlockAsync(state);
   }
-  return buildGreenYellowStateAboutBlockAsync(state);
+  return buildGreenYellowStateAboutBlockAsync(state, level);
 }
 
 const PRE_SUMMARY_CONFIRMATION_MAX_BULLETS = 14;
@@ -9604,7 +9585,7 @@ function buildConcreteStatePatternMessage(state, summaryFacts = [], summarySecti
     lines.push("");
   }
   if (isGreenOrYellow) {
-    lines.push("現時点の安心材料");
+    lines.push(getGreenYellowModalReassuranceHeading(level));
     reassurance.forEach((line) => lines.push(line));
     lines.push("このような症状では、強い緊急サインは今のところはっきりしていません。");
     lines.push("");
@@ -9866,6 +9847,62 @@ function replaceUnsaidPhrasesInReason(reason, userWords) {
     .trim();
 }
 
+/** モーダル原因行：表記ゆれの統一（疾患名） */
+function normalizeModalDiseaseToken(text) {
+  return String(text || "").replace(/偏頭痛/g, "片頭痛");
+}
+
+/** 「→」右の理由に紛れ込みやすい冗長表現を除去（痛み強さは別ルールで禁止だが、前置きノイズを削る） */
+function stripModalReasonNoisePhrases(text) {
+  let t = String(text || "").trim();
+  t = t.replace(/^痛みは強めで[、,]?\s*/g, "");
+  t = t.replace(/^痛みが強めで[、,]?\s*/g, "");
+  t = t.replace(/([。、])\s*痛みは強めで[、,]?\s*/g, "$1 ");
+  t = t.replace(/\s*痛みは強めで[、,]?\s*/g, " ");
+  t = t.replace(/\s{2,}/g, " ").trim();
+  return t;
+}
+
+/**
+ * 1行を最終表示用に整形（疾患名統一・理由ノイズ除去）。`・病名 → 理由` 形式を想定。
+ */
+function finalizeModalCauseDisplayLine(item) {
+  const raw = String(item || "").trim();
+  if (!raw) return raw;
+  const arrowIdx = raw.indexOf(" → ");
+  if (arrowIdx === -1) {
+    const body = raw.replace(/^・\s*/, "").trim();
+    return `・${normalizeModalDiseaseToken(body)}`;
+  }
+  const head = normalizeModalDiseaseToken(raw.slice(0, arrowIdx).replace(/^・\s*/, "").trim());
+  const tail = stripModalReasonNoisePhrases(normalizeModalDiseaseToken(raw.slice(arrowIdx + 3).trim()));
+  return `・${head} → ${tail}`;
+}
+
+/** 正規化後の病名（→ 左）が同一の行を1件にまとめる */
+function dedupeModalLinesByNormalizedHead(linesIn) {
+  const lines = Array.isArray(linesIn) ? linesIn.slice() : [];
+  const seen = new Set();
+  const out = [];
+  for (const item of lines) {
+    const s = String(item || "").replace(/^・\s*/, "").trim();
+    const idx = s.indexOf(" → ");
+    const headRaw = idx >= 0 ? s.slice(0, idx) : s;
+    const key = normalizeModalDiseaseToken(headRaw)
+      .toLowerCase()
+      .replace(/\s+/g, "")
+      .replace(/（[^）]*）/g, "");
+    if (!key) {
+      out.push(item);
+      continue;
+    }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
 /**
  * 「🟢 よくある原因」と「🟡 状況によっては確認が必要」の重複を除去（同じ病名・包含関係）。
  */
@@ -9875,7 +9912,7 @@ function dedupeModalCommonAndConditional(commonIn, conditionalIn) {
   const causeKey = (line) => {
     const s = String(line || "").replace(/^・\s*/, "").trim();
     const idx = s.indexOf(" → ");
-    const head = (idx >= 0 ? s.slice(0, idx) : s).trim();
+    const head = normalizeModalDiseaseToken((idx >= 0 ? s.slice(0, idx) : s).trim());
     return head
       .toLowerCase()
       .replace(/\s+/g, "")
@@ -10042,7 +10079,7 @@ function getModalCommonNonInfectionFallbackPair(mainSymptom) {
   return fallbacks[mainSymptom] || fallbacks.頭痛;
 }
 
-/** 🟢/🟡モーダル：🟡ブロックと「現時点の安心材料」の間に出す納得文（LLM・失敗時フォールバック） */
+/** 🟢/🟡モーダル：🟡ブロックと安心材料見出し（🟢「現時点の安心材料」／🟡「今すぐ受診が必要ではない理由」）の間に出す納得文（LLM・失敗時フォールバック） */
 const GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK = [
   "今すぐ受診しても、得られる対応は自宅と大きく変わりません。",
   "逆に動くと悪化しやすいので、休む方が合理的です。",
@@ -10167,6 +10204,7 @@ async function buildDiseaseSafetyFilteredMessage(
       "- conditional = 条件付きで考慮すべき状況（2〜4件）。各項目は「・<病名> → <関連した理由>」形式。**主症状に関連する病名のみ**使用。主症状と無関係な病名は絶対に含めない。理由はユーザー症状と関連付ける。検索結果＋ユーザー症状から要約。煽らない表現。固定テンプレート禁止。**感染症系（ウイルス・細菌・上気道炎・胃腸炎など）はここに分類する**（common に出さない）。",
       "- **common と conditional は重複禁止**：同じ疾患名・同義の原因名を両方に書かない。conditional は「追加で鑑別や受診判断が必要になりうるもの」に限定し、common に既に出した病名・ほぼ同じ内容は conditional に繰り返さない。",
       "- 禁止（原因モーダル・common/conditional の「→」右側の理由のみ）：痛みの強さスロット由来の表現を絶対に使わない（3/10・〇/10・やや強い・中程度・軽い等。箇条書きの痛み行の言い換えも含めない）。本文のまとめや 🔴 の受診理由箇条書きには適用しない。",
+      "- 疾患名は**片頭痛**に統一し、**偏頭痛**という表記は使わない。理由文に**痛みは強めで**のような冗長な前置きを重ねない。",
       "- rare_emergency = 稀だが緊急性あり。**2件のみ**（強制）。検索結果＋ユーザー症状から要約。腫瘍・出血・致死・がん・破裂などの重篤疾患はここにのみ入れる。固定テンプレート禁止。",
       "- common/conditional に腫瘍・出血・致死・がん・破裂を含めない",
       "- 「あなたの場合」「この症状は」などの個別化表現は禁止。恐怖を煽る表現は禁止",
@@ -10236,11 +10274,11 @@ async function buildDiseaseSafetyFilteredMessage(
 
   common = common.map((item) => {
     const arrowIdx = item.indexOf(" → ");
-    if (arrowIdx === -1) return item;
+    if (arrowIdx === -1) return finalizeModalCauseDisplayLine(item);
     const reason = item.slice(arrowIdx + 3).trim();
     let fixed = replaceUnsaidPhrasesInReason(reason, userWords);
     fixed = stripPainScoreFromReason(fixed) || fixed;
-    return `${item.slice(0, arrowIdx + 3)}${fixed}`;
+    return finalizeModalCauseDisplayLine(`${item.slice(0, arrowIdx + 3)}${fixed}`);
   });
 
   // common が2件未満のときのみ、主症状に紐づいた fallback から補う（感染症系は入れない）
@@ -10260,9 +10298,18 @@ async function buildDiseaseSafetyFilteredMessage(
     for (const item of pool) {
       if (common.length >= 4) break;
       const name = (item.match(/^・([^→]+)/) || [])[1]?.trim?.() || "";
-      if (!name || seen.has(name) || common.some((c) => c.includes(name))) continue;
-      seen.add(name);
-      common.push(item);
+      const nameKey = normalizeModalDiseaseToken(name).toLowerCase().replace(/\s+/g, "");
+      if (!nameKey || seen.has(nameKey)) continue;
+      if (
+        common.some((c) => {
+          const h = (c.match(/^・([^→]+)/) || [])[1]?.trim?.() || "";
+          return normalizeModalDiseaseToken(h).toLowerCase().replace(/\s+/g, "") === nameKey;
+        })
+      ) {
+        continue;
+      }
+      seen.add(nameKey);
+      common.push(finalizeModalCauseDisplayLine(item));
     }
   }
   common = common.slice(0, 4);
@@ -10322,11 +10369,14 @@ async function buildDiseaseSafetyFilteredMessage(
   }
   conditional = conditional.map((item) => {
     const arrowIdx = item.indexOf(" → ");
-    if (arrowIdx === -1) return item;
+    if (arrowIdx === -1) return finalizeModalCauseDisplayLine(item);
     const reason = item.slice(arrowIdx + 3).trim();
     const fixed = stripPainScoreFromReason(reason) || reason;
-    return `${item.slice(0, arrowIdx + 3)}${fixed}`;
+    return finalizeModalCauseDisplayLine(`${item.slice(0, arrowIdx + 3)}${fixed}`);
   });
+
+  common = dedupeModalLinesByNormalizedHead(common);
+  conditional = dedupeModalLinesByNormalizedHead(conditional);
 
   const deduped = dedupeModalCommonAndConditional(common, conditional);
   common = deduped.common;
@@ -10335,7 +10385,7 @@ async function buildDiseaseSafetyFilteredMessage(
   const causeKeyForRefill = (line) => {
     const s = String(line || "").replace(/^・\s*/, "").trim();
     const idx = s.indexOf(" → ");
-    const head = (idx >= 0 ? s.slice(0, idx) : s).trim();
+    const head = normalizeModalDiseaseToken((idx >= 0 ? s.slice(0, idx) : s).trim());
     return head
       .toLowerCase()
       .replace(/\s+/g, "")
@@ -10357,7 +10407,7 @@ async function buildDiseaseSafetyFilteredMessage(
       }
       if (overlapCommon) continue;
       if (conditional.some((c) => causeKeyForRefill(c) === nk)) continue;
-      conditional.push(next);
+      conditional.push(finalizeModalCauseDisplayLine(next));
     }
   }
   conditional = conditional.slice(0, 4);
@@ -10468,7 +10518,7 @@ async function buildDiseaseFocusedModalMessage(searchResults = [], mainSymptom =
       });
       if (level === "🟢" || level === "🟡") {
         const category = state ? (state.triageCategory || resolveQuestionCategoryFromState(state)) : "PAIN";
-        lines.push("現時点の安心材料");
+        lines.push(getGreenYellowModalReassuranceHeading(level));
         (state ? buildReassuranceBulletsForPatterns(state) : ["・強い緊急サインは今のところはっきりしていません"]).slice(0, 3).forEach((b) => lines.push(b));
         lines.push("");
         lines.push("こんな変化があれば受診を検討");
@@ -10531,7 +10581,7 @@ function buildDiseaseFocusedModalFallback(mainSymptom, level, state = null) {
   });
   if (level === "🟢" || level === "🟡") {
     const category = state ? (state.triageCategory || resolveQuestionCategoryFromState(state)) : "PAIN";
-    lines.push("現時点の安心材料");
+    lines.push(getGreenYellowModalReassuranceHeading(level));
     (state ? buildReassuranceBulletsForPatterns(state) : ["・強い緊急サインは今のところはっきりしていません"]).slice(0, 3).forEach((b) => lines.push(b));
     lines.push("");
     lines.push("こんな変化があれば受診を検討");
@@ -10650,7 +10700,7 @@ function buildEvidenceDrivenConcreteMessage(options = {}) {
   ];
 
   if (level === "🟢" || level === "🟡") {
-    lines.push("", "現時点の安心材料");
+    lines.push("", getGreenYellowModalReassuranceHeading(level));
     buildReassuranceBulletsForPatterns(state).slice(0, 3).forEach((b) => lines.push(b));
     lines.push("", "こんな変化があれば受診を検討");
     buildConsultChangeBulletsForPatterns(category).slice(0, 3).forEach((b) => lines.push(b));
@@ -10756,6 +10806,7 @@ function enforceConcreteModalStructure(message, options = {}) {
 
   const sectionHeaders = new Set([
     "現時点の安心材料",
+    "今すぐ受診が必要ではない理由",
     "こんな変化があれば受診を検討",
     "今回受診をおすすめしている理由",
   ]);
@@ -10838,7 +10889,7 @@ function enforceConcreteModalStructure(message, options = {}) {
   });
 
   if (level === "🟢" || level === "🟡") {
-    out.push("", "現時点の安心材料");
+    out.push("", getGreenYellowModalReassuranceHeading(level));
     const reassurance = buildReassuranceBulletsForPatterns(state).slice(0, 3);
     reassurance.forEach((line) => out.push(line));
     out.push("", "こんな変化があれば受診を検討");
@@ -10876,6 +10927,11 @@ function dedupeDiseaseSearchResults(results = []) {
 
 /** 🤝/📝モーダル：🟢/🟡のとき、よくある原因と🟡ブロックの間に挿入する固定1行（KAIRO_SPEC） */
 const GREEN_YELLOW_STATE_MODAL_BRIDGE_LINE = "👉 今回の症状ここに当てはまる可能性が高い";
+
+/** 🟢/🟡モーダル：`structured.reassuranceBullets` の見出し（中身は同一） */
+function getGreenYellowModalReassuranceHeading(level) {
+  return level === "🟡" ? "今すぐ受診が必要ではない理由" : "現時点の安心材料";
+}
 
 async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], summarySection = "") {
   const mainSymptom = toMainSymptomForDiseaseSearch(state);
@@ -10946,7 +11002,6 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
     lines.push("あなたの状態の理解を深める", "");
     lines.push("🟢 よくある原因");
     structured.common.forEach((c) => lines.push(c.startsWith("・") ? c : `・${c}`));
-    lines.push("");
     if (level === "🟢" || level === "🟡") {
       lines.push(GREEN_YELLOW_STATE_MODAL_BRIDGE_LINE);
       lines.push("");
@@ -10958,7 +11013,6 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
       lines.push(
         String(structured.acceptanceConviction || "").trim() || GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK
       );
-      lines.push("");
       lines.push(GREEN_YELLOW_MODAL_SYMPTOM_COMMONNESS_PRIMARY);
       lines.push("");
     }
@@ -10966,7 +11020,7 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
     structured.rare_emergency.forEach((r) => lines.push(r.startsWith("・") ? r : `・${r}`));
     lines.push("");
     if (level === "🟢" || level === "🟡") {
-      lines.push("現時点の安心材料");
+      lines.push(getGreenYellowModalReassuranceHeading(level));
       structured.reassuranceBullets.forEach((b) => lines.push(b));
       lines.push("");
       lines.push("こんな変化があれば受診を検討");
@@ -11045,7 +11099,7 @@ function compactConcreteMessageForQuery(detailMessage) {
     .filter((line) => line.length > 0)
     .filter(
       (line) =>
-        !/^(あなたの状態の理解を深める|今の状態は、次のようなパターンと似ています。|現時点の安心材料|こんな変化があれば受診を検討|今回受診をおすすめしている理由|■|🟢 よくある原因|🟡 状況によっては確認が必要|🔴 すぐ受診が必要なサイン)/.test(
+        !/^(あなたの状態の理解を深める|今の状態は、次のようなパターンと似ています。|現時点の安心材料|今すぐ受診が必要ではない理由|こんな変化があれば受診を検討|今回受診をおすすめしている理由|■|🟢 よくある原因|🟡 状況によっては確認が必要|🔴 すぐ受診が必要なサイン)/.test(
           line
         )
     )
@@ -11765,7 +11819,7 @@ async function normalizeStateBlockForGreenYellowAsync(text, state) {
   if (level !== "🟢" && level !== "🟡") return text;
   let aboutLine = await buildStateAboutLineAsync(state, level);
   if (!String(aboutLine || "").trim()) {
-    aboutLine = buildGreenYellowStateAboutBlock(state);
+    aboutLine = buildGreenYellowStateAboutBlock(state, level);
   }
   const decisionLine = buildStateDecisionLine(state, level);
   const newBlock = [
@@ -14631,6 +14685,10 @@ app.post("/api/state-patterns", async (req, res) => {
     return res.status(200).json(basePayload);
   } catch (error) {
     console.error("state-patterns error:", error);
+    const cid = (req.body && req.body.conversationId) || null;
+    const errState = cid ? getOrInitConversationState(cid) : null;
+    const errLevel = errState ? errState.decisionLevel || finalizeRiskLevel(errState) : "🟢";
+    const reassuranceHead = getGreenYellowModalReassuranceHeading(errLevel);
     return res.status(200).json({
       message: [
         "今の状態は、次のようなパターンと似ています。",
@@ -14640,7 +14698,7 @@ app.post("/api/state-patterns", async (req, res) => {
         "強さが上がるか、同じ強さのまま続くかが、次の判断ポイントです。",
         "新しい症状が加わらないかを、短い間隔で確認していくのが安全です。",
         "",
-        "現時点の安心材料",
+        reassuranceHead,
         "・強い緊急サインが直ちに重なっている情報は今のところ見えていません",
         "",
         "こんな変化があれば受診を検討",
@@ -14648,6 +14706,7 @@ app.post("/api/state-patterns", async (req, res) => {
         "・新しい強い症状が加わる",
         "・数時間たっても改善の動きが見えない",
       ].join("\n"),
+      triageLevel: errLevel,
       sourcePolicy: [],
     });
   }

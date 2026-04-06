@@ -598,6 +598,11 @@ const GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK =
 const GREEN_YELLOW_MODAL_SYMPTOM_COMMONNESS_PRIMARY =
   "このような症状は、多くの人にも見られる比較的よくあるものです。";
 
+/** 🟢/🟡モーダル：`reassuranceBullets` ブロック見出し（中身は同一） */
+function getGreenYellowModalReassuranceHeadingClient(triageLevel) {
+  return triageLevel === "🟡" ? "今すぐ受診が必要ではない理由" : "現時点の安心材料";
+}
+
 function renderStructuredStateModal(body, { structured, message, triageLevel }) {
   const s = structured;
   if (!s) {
@@ -608,7 +613,6 @@ function renderStructuredStateModal(body, { structured, message, triageLevel }) 
   const lines = [];
   lines.push("🟢 よくある原因");
   (s.common || []).forEach((c) => lines.push(c.startsWith("・") ? c : `・${c}`));
-  lines.push("");
   if (triageLevel === "🟢" || triageLevel === "🟡") {
     lines.push("👉 今回の症状ここに当てはまる可能性が高い");
     lines.push("");
@@ -619,10 +623,9 @@ function renderStructuredStateModal(body, { structured, message, triageLevel }) 
   if (triageLevel === "🟢" || triageLevel === "🟡") {
     const conv = String(s.acceptanceConviction || "").trim() || GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK;
     lines.push(conv);
-    lines.push("");
     lines.push(GREEN_YELLOW_MODAL_SYMPTOM_COMMONNESS_PRIMARY);
     lines.push("");
-    lines.push("現時点の安心材料");
+    lines.push(getGreenYellowModalReassuranceHeadingClient(triageLevel));
     (s.reassuranceBullets || []).forEach((b) => lines.push(b));
     lines.push("");
     lines.push("こんな変化があれば受診を検討");
@@ -714,6 +717,8 @@ async function showConcreteStateDetails(blockContent) {
     }
   } catch (error) {
     console.error("具体化モーダル生成エラー:", error);
+    const reassuranceHeading =
+      appState.riskLevel === "YELLOW" ? "今すぐ受診が必要ではない理由" : "現時点の安心材料";
     setConcreteModalBody(
       [
         "あなたの状態の理解を深める",
@@ -723,7 +728,7 @@ async function showConcreteStateDetails(blockContent) {
         "■ 一時的な体調変化のパターン",
         "このような症状では、日内の負荷や睡眠、食事などで一時的に不調が強まることがあります。",
         "",
-        "現時点の安心材料",
+        reassuranceHeading,
         "・今わかっている範囲では、強い緊急サインははっきりしていません",
         "",
         "こんな変化があれば受診を検討",
