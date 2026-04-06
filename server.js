@@ -1013,6 +1013,7 @@ function normalizeHospitalMemoHeaderText(text) {
 function hasAnySummaryBlocks(text) {
   const normalized = normalizeHospitalMemoHeaderText(text);
   return (
+    /🔴\s*ここまでの情報を整理します/.test(normalized) ||
     normalized.includes("🟢 ここまでの情報を整理します") ||
     textIncludesHandshakeAboutHeader(normalized) ||
     normalized.includes("✅ 今すぐやること") ||
@@ -1044,6 +1045,11 @@ function isMemoStateAboutHeaderLine(line) {
   );
 }
 
+/** 🔴 まとめ先頭：ここまでの情報を整理します（enforce / split 用） */
+function isRedIntroHeaderLine(line) {
+  return /^\s*🔴\s*ここまでの情報を整理します/.test(String(line || ""));
+}
+
 function textIncludesMemoAboutHeader(text) {
   const s = String(text || "");
   return (
@@ -1057,6 +1063,12 @@ function lineMatchesSummaryHeaderFlex(line, header) {
   const t = String(line || "").trim();
   if (!header || !t) return false;
   if (t.startsWith(header)) return true;
+  if (header === "🟢 ここまでの情報を整理します") {
+    return t.startsWith("🟡 ここまでの情報を整理します");
+  }
+  if (header === "🔴 ここまでの情報を整理します") {
+    return isRedIntroHeaderLine(t);
+  }
   if (header === "🤝 今の状態について") {
     return isHandshakeStateAboutHeaderLine(t);
   }
@@ -1068,7 +1080,13 @@ function lineMatchesSummaryHeaderFlex(line, header) {
 
 function hasAllSummaryBlocks(text) {
   const normalized = normalizeHospitalMemoHeaderText(text);
-  const hospitalHeaders = ["📝 今の状態について", "✅ 今すぐやること", "🏥 受診先の候補", "💬 最後に"];
+  const hospitalHeaders = [
+    "🔴 ここまでの情報を整理します",
+    "📝 今の状態について",
+    "✅ 今すぐやること",
+    "🏥 受診先の候補",
+    "💬 最後に",
+  ];
   const normalHeaders = ["🟢 ここまでの情報を整理します", "🤝 今の状態について", "✅ 今すぐやること", "⏳ 今後の見通し", "🌱 最後に"];
   const yellowHeaders = ["🟡 ここまでの情報を整理します", "🤝 今の状態について", "✅ 今すぐやること", "⏳ 今後の見通し", "🌱 最後に"];
   const required = isHospitalFlow(normalized)
@@ -1077,6 +1095,9 @@ function hasAllSummaryBlocks(text) {
       ? yellowHeaders
       : normalHeaders;
   return required.every((header) => {
+    if (header === "🔴 ここまでの情報を整理します") {
+      return /🔴\s*ここまでの情報を整理します/.test(normalized);
+    }
     if (header === "🤝 今の状態について") {
       return textIncludesHandshakeAboutHeader(normalized);
     }
@@ -1090,6 +1111,7 @@ function hasAllSummaryBlocks(text) {
 function getRequiredSummaryHeadersByLevel(level) {
   if (level === "🔴") {
     return [
+      "🔴 ここまでの情報を整理します",
       "📝 今の状態について",
       "✅ 今すぐやること",
       "🏥 受診先の候補",
@@ -1141,6 +1163,7 @@ function splitByKnownHeaders(text, headers) {
 }
 
 const ALL_SUMMARY_HEADERS = [
+  "🔴 ここまでの情報を整理します",
   "🟢 ここまでの情報を整理します",
   "🤝 今の状態について",
   "✅ 今すぐやること",
@@ -1185,7 +1208,7 @@ function stripEmergencyBlock(text) {
   const startIdx = lines.findIndex((l) => l.startsWith("🚨 ") || l.includes("🚨 もし次の症状が出たら"));
   if (startIdx < 0) return text;
   const nextBlockIdx = lines.findIndex(
-    (l, idx) => idx > startIdx && /^(🟢|🟡|🤝|✅|⏳|💊|🌱|📝|🏥|💬)\s/.test(l)
+    (l, idx) => idx > startIdx && /^(🟢|🟡|🔴|🤝|✅|⏳|💊|🌱|📝|🏥|💬)\s/.test(l)
   );
   const endIdx = nextBlockIdx >= 0 ? nextBlockIdx : lines.length;
   const before = lines.slice(0, startIdx);
@@ -3363,7 +3386,7 @@ function stripInfectionOnlineClinicGuidance(text, state) {
 }
 
 const REST_BLOCK_HEADER = /^🧾\s*休息とMCの目安/;
-const NEXT_SECTION_HEADER = /^(🟢|🟡|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬)\s/;
+const NEXT_SECTION_HEADER = /^(🟢|🟡|🔴|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬)\s/;
 
 /** 🔴時はMC・休息ブロックを必ず除去（LLM漏れ対策） */
 function stripMcForRed(text, level) {
@@ -3442,7 +3465,7 @@ function replaceSummaryBlock(text, header, block) {
   const isHospitalBlock = /^🏥\s/.test(header);
   const nextIndex = lines.findIndex((line, idx) => {
     if (idx <= startIndex) return false;
-    if (!/^(🟢|🟡|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(line)) return false;
+    if (!/^(🟢|🟡|🔴|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(line)) return false;
     if (isHospitalBlock && line.startsWith("🏥 ")) return false;
     return true;
   });
@@ -3562,7 +3585,7 @@ async function ensureLastBlock(text, level, state = null, contextText = "") {
     if (idx === -1) return { found: false, body: "", foundHeader: null };
     const foundHeader = lines[idx].startsWith(header) ? header : altHeader;
     const start = idx;
-    const next = lines.findIndex((l, i) => i > start && /^(🟢|🟡|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(l));
+    const next = lines.findIndex((l, i) => i > start && /^(🟢|🟡|🔴|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(l));
     const end = next === -1 ? lines.length : next;
     const body = lines.slice(start + 1, end).join("\n").trim();
     return { found: true, body, foundHeader };
@@ -4178,7 +4201,7 @@ function ensurePainInfectionYellowFirstAction(text, level, state) {
   for (let i = headerIdx + 1; i < lines.length; i++) {
     const t = lines[i].trim();
     if (!t) continue;
-    if (/^(🟢|🟡|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(t)) break;
+    if (/^(🟢|🟡|🔴|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(t)) break;
     if (/^[・•\-]\s/.test(t) || (t.startsWith("・") || t.startsWith("•") || t.startsWith("-"))) {
       firstBulletIdx = i;
       break;
@@ -4186,7 +4209,7 @@ function ensurePainInfectionYellowFirstAction(text, level, state) {
   }
   if (firstBulletIdx < 0) {
     // 箇条書き行がない場合はヘッダ直後に挿入
-    const nextHeaderIdx = lines.findIndex((l, idx) => idx > headerIdx && /^(🟢|🟡|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(l.trim()));
+    const nextHeaderIdx = lines.findIndex((l, idx) => idx > headerIdx && /^(🟢|🟡|🔴|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(l.trim()));
     const blockEnd = nextHeaderIdx >= 0 ? nextHeaderIdx : lines.length;
     const before = lines.slice(0, headerIdx + 1);
     const after = lines.slice(headerIdx + 1, blockEnd);
@@ -4199,7 +4222,7 @@ function ensurePainInfectionYellowFirstAction(text, level, state) {
   let restStart = firstBulletIdx + 1;
   if (restStart < lines.length && /^→\s/.test(lines[restStart].trim())) restStart++;
   while (restStart < lines.length && !lines[restStart].trim()) restStart++;
-  const nextHeaderIdx = lines.findIndex((l, idx) => idx > headerIdx && /^(🟢|🟡|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(l.trim()));
+  const nextHeaderIdx = lines.findIndex((l, idx) => idx > headerIdx && /^(🟢|🟡|🔴|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(l.trim()));
   const blockEnd = nextHeaderIdx >= 0 ? nextHeaderIdx : lines.length;
   const beforeBlock = lines.slice(headerIdx, firstBulletIdx);
   const restOfBlock = lines.slice(restStart, blockEnd);
@@ -4436,6 +4459,7 @@ function renderActionDetailMessage(cushion, doActions = [], dontActions = [], si
     if (idx < Math.min(dontActions.length, 2) - 1) lines.push("");
   });
   if (Array.isArray(singaporeRestLines) && singaporeRestLines.length > 0) {
+    lines.push("");
     lines.push(...singaporeRestLines);
   }
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
@@ -9562,7 +9586,7 @@ function buildConcreteStatePatternMessage(state, summaryFacts = [], summarySecti
     lines.push("今回受診をおすすめしている理由");
     buildRedVisitReasonsBullets(state).forEach((line) => lines.push(line));
     lines.push("");
-    lines.push("これらがあるため、一度医療機関で確認しておくと安心です。");
+    lines.push("・様子を見る選択もありますが、このケースではリスクがあります。");
   }
   return { message: lines.join("\n").trim(), query };
 }
@@ -9990,6 +10014,54 @@ function getModalCommonNonInfectionFallbackPair(mainSymptom) {
   return fallbacks[mainSymptom] || fallbacks.頭痛;
 }
 
+/** 🟢/🟡モーダル：🟡ブロックと「現時点の安心材料」の間に出す納得文（LLM・失敗時フォールバック） */
+const GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK = [
+  "今すぐ受診しても、得られる対応が自宅と大きく変わらない可能性が高いです。",
+  "逆に動くと悪化しやすいので、休む方が合理的です。",
+].join("\n");
+
+/** 納得文の直後（改行のうえ）に必ず1文。①を第一優先（②③は仕様書・将来差し替え用） */
+const GREEN_YELLOW_MODAL_SYMPTOM_COMMONNESS_PRIMARY =
+  "このような症状は、多くの人にも見られる比較的よくあるものです。";
+
+async function generateGreenYellowModalAcceptanceText(mainSymptom = "", userSummary = "") {
+  if (!process.env.OPENAI_API_KEY) return GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK;
+  const sym = String(mainSymptom || "症状").trim().slice(0, 40);
+  const ref = String(userSummary || "").trim().slice(0, 900);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: [
+              "あなたは医療情報を要約するアシスタントです。",
+              "🟢または🟡判定のユーザー向け補助モーダル用に、「納得文」を2〜3文で書いてください。",
+              "意図：今すぐ受診しても、得られる対応が自宅での対応と大きく変わらない可能性があること、無理に動くと負担が増えやすいので休む判断が合理的であることを、落ち着いたトーンで伝える。",
+              "受診という選択肢を罵ったり禁止したりはしない。断定診断・煽り・恐怖訴求は禁止。",
+              "「あなたの場合」「この症状は」などの個別化は禁止。主症状ラベルは必要なら1回まで。",
+              "出力は本文のみ（JSON不要）。改行は最大1回（2段落まで）。",
+            ].join("\n"),
+          },
+          {
+            role: "user",
+            content: [`主症状カテゴリ: ${sym}`, ref ? `参考（ユーザー言動の要約）:\n${ref}` : ""].filter(Boolean).join("\n\n"),
+          },
+        ],
+        temperature: 0.28 + attempt * 0.08,
+        max_tokens: 320,
+      });
+      let text = (completion?.choices?.[0]?.message?.content || "").trim();
+      text = text.replace(/\*\*/g, "").replace(/^["「]|["」]$/g, "").trim();
+      if (text.length >= 35 && text.length <= 450) return text;
+    } catch (_) {
+      /* fallback below */
+    }
+  }
+  return GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK;
+}
+
 /** 🤝/📝モーダル：LLM安全フィルタ＋頻度順再構成（SEO順・生検索結果の表示は廃止） */
 async function buildDiseaseSafetyFilteredMessage(
   searchResults = [],
@@ -10246,15 +10318,19 @@ async function buildDiseaseSafetyFilteredMessage(
   }
   rare_emergency = rare_emergency.slice(0, 2);
 
-  const COMMON_SYMPTOM_REASSURANCE = [
-    "このような症状は、多くの人にも見られる比較的よくあるものです。",
-    "今のような症状は、特別なものではなく、日常的によく見られるケースのひとつです。",
-    "このような症状は、多くの方に見られる一般的なもののひとつです。",
-  ];
   const reassuranceCommon =
     level === "🔴"
-      ? "今のあなたは🟡の可能性もないとは言えません。なので、確認をするためにも受診をおすすめします。"
-      : `${mainSymptom}のほとんどは命に関わるものではありません。特に、急激な悪化や神経症状がなければ、よくあるタイプの可能性が高いです。\n\n${COMMON_SYMPTOM_REASSURANCE[0]}`;
+      ? "今は🟡の可能性があり、放置すると悪化するリスクがあるため、受診する判断が合理的です"
+      : "";
+
+  let acceptanceConviction = "";
+  if (level === "🟢" || level === "🟡") {
+    try {
+      acceptanceConviction = await generateGreenYellowModalAcceptanceText(mainSymptom, userSummary);
+    } catch (_) {
+      acceptanceConviction = GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK;
+    }
+  }
 
   const redVisitReasonsBullets = level === "🔴" && state ? buildRedVisitReasonsBullets(state) : [];
 
@@ -10263,6 +10339,7 @@ async function buildDiseaseSafetyFilteredMessage(
     conditional,
     rare_emergency,
     reassuranceCommon,
+    acceptanceConviction,
     reassuranceBullets: reassurance.slice(0, 3),
     consultChangeBullets: consultChanges.slice(0, 3),
     redVisitReasonsBullets,
@@ -10340,7 +10417,7 @@ async function buildDiseaseFocusedModalMessage(searchResults = [], mainSymptom =
         lines.push("今回受診をおすすめしている理由");
         buildRedVisitReasonsBullets(state).forEach((b) => lines.push(b));
         lines.push("");
-        lines.push("これらがあるため、一度医療機関で確認しておくと安心です。");
+        lines.push("・様子を見る選択もありますが、このケースではリスクがあります。");
       }
       return lines.join("\n").trim();
     }
@@ -10403,7 +10480,7 @@ function buildDiseaseFocusedModalFallback(mainSymptom, level, state = null) {
     lines.push("今回受診をおすすめしている理由");
     buildRedVisitReasonsBullets(state).forEach((b) => lines.push(b));
     lines.push("");
-    lines.push("これらがあるため、一度医療機関で確認しておくと安心です。");
+    lines.push("・様子を見る選択もありますが、このケースではリスクがあります。");
   }
   return lines.join("\n").trim();
 }
@@ -10520,7 +10597,7 @@ function buildEvidenceDrivenConcreteMessage(options = {}) {
   } else if (level === "🔴") {
     lines.push("", "今回受診をおすすめしている理由");
     buildRedVisitReasonsBullets(state).forEach((b) => lines.push(b));
-    lines.push("", "これらがあるため、一度医療機関で確認しておくと安心です。");
+    lines.push("", "・様子を見る選択もありますが、このケースではリスクがあります。");
   }
   return lines.join("\n").trim();
 }
@@ -10710,7 +10787,7 @@ function enforceConcreteModalStructure(message, options = {}) {
   } else if (level === "🔴") {
     out.push("", "今回受診をおすすめしている理由");
     buildRedVisitReasonsBullets(state).forEach((line) => out.push(line));
-    out.push("", "これらがあるため、一度医療機関で確認しておくと安心です。");
+    out.push("", "・様子を見る選択もありますが、このケースではリスクがあります。");
   }
 
   return out
@@ -10736,6 +10813,9 @@ function dedupeDiseaseSearchResults(results = []) {
   }
   return out.sort((a, b) => (a.trusted === b.trusted ? 0 : a.trusted ? -1 : 1));
 }
+
+/** 🤝/📝モーダル：🟢/🟡のとき、よくある原因と🟡ブロックの間に挿入する固定1行（KAIRO_SPEC） */
+const GREEN_YELLOW_STATE_MODAL_BRIDGE_LINE = "👉 今回の症状ここに当てはまる可能性が高い";
 
 async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], summarySection = "") {
   const mainSymptom = toMainSymptomForDiseaseSearch(state);
@@ -10807,13 +10887,23 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
     lines.push("🟢 よくある原因");
     structured.common.forEach((c) => lines.push(c.startsWith("・") ? c : `・${c}`));
     lines.push("");
+    if (level === "🟢" || level === "🟡") {
+      lines.push(GREEN_YELLOW_STATE_MODAL_BRIDGE_LINE);
+      lines.push("");
+    }
     lines.push("🟡 状況によっては確認が必要");
     structured.conditional.forEach((c) => lines.push(c.startsWith("・") ? c : `・${c}`));
     lines.push("");
+    if (level === "🟢" || level === "🟡") {
+      lines.push(
+        String(structured.acceptanceConviction || "").trim() || GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK
+      );
+      lines.push("");
+      lines.push(GREEN_YELLOW_MODAL_SYMPTOM_COMMONNESS_PRIMARY);
+      lines.push("");
+    }
     lines.push("🔴 すぐ受診が必要なサイン（折りたたみ・初期非表示）");
     structured.rare_emergency.forEach((r) => lines.push(r.startsWith("・") ? r : `・${r}`));
-    lines.push("");
-    lines.push(structured.reassuranceCommon);
     lines.push("");
     if (level === "🟢" || level === "🟡") {
       lines.push("現時点の安心材料");
@@ -10822,10 +10912,12 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
       lines.push("こんな変化があれば受診を検討");
       structured.consultChangeBullets.forEach((b) => lines.push(b));
     } else if (level === "🔴") {
+      lines.push(structured.reassuranceCommon);
+      lines.push("");
       lines.push("今回受診をおすすめしている理由");
       buildRedVisitReasonsBullets(state).forEach((b) => lines.push(b));
       lines.push("");
-      lines.push("これらがあるため、一度医療機関で確認しておくと安心です。");
+      lines.push("・様子を見る選択もありますが、このケースではリスクがあります。");
     }
   }
 
@@ -11671,6 +11763,8 @@ async function buildLocalSummaryFallback(level, history, state) {
     const redClosing = await generateLastBlockWithLLM("🔴", state, historyText);
     return sanitizeSummaryBullets(
       [
+        `🔴 ここまでの情報を整理します\n${buildSummaryIntroTemplate()}`,
+        "",
         memoWithJudgment,
         redActionsBlock,
         "🏥 受診先の候補",
@@ -12446,6 +12540,18 @@ async function generateSummaryForConfirmation(conversationId) {
   aiResponse = correctKanjiAndTypos(aiResponse);
   aiResponse = enforceSummaryIntroTemplate(aiResponse);
   aiResponse = await enforceSummaryStructureStrict(aiResponse, level, history, state);
+  if (level === "🟢" || level === "🟡") {
+    aiResponse = await ensureImmediateActionsBlock(
+      aiResponse,
+      level,
+      state,
+      historyTextForOtc,
+      immediateActionPlan
+    );
+  }
+  if (level === "🔴") {
+    aiResponse = await ensureHospitalMemoBlock(aiResponse, state, historyTextForOtc);
+  }
   aiResponse = stripInfectionOnlineClinicGuidance(aiResponse, state);
   aiResponse = stripHospitalMapLinks(aiResponse);
   aiResponse = stripMcForRed(aiResponse, level);
@@ -12554,6 +12660,9 @@ async function generateSummaryForConfirmation(conversationId) {
     }
     if (level === "🔴") {
       const minimalRed = [
+        "🔴 ここまでの情報を整理します",
+        buildSummaryIntroTemplate(),
+        "",
         "📝 今の状態について",
         stateBlock || "症状の状態を確認しました。",
         ...(aboutRedMemo ? ["", aboutRedMemo] : []),
@@ -13840,6 +13949,22 @@ app.post("/api/chat", async (req, res) => {
         conversationHistory[conversationId],
         conversationState[conversationId]
       );
+      if (level === "🟢" || level === "🟡") {
+        aiResponse = await ensureImmediateActionsBlock(
+          aiResponse,
+          level,
+          conversationState[conversationId],
+          historyTextForOtc,
+          immediateActionPlan
+        );
+      }
+      if (level === "🔴") {
+        aiResponse = await ensureHospitalMemoBlock(
+          aiResponse,
+          conversationState[conversationId],
+          historyTextForOtc
+        );
+      }
       aiResponse = stripInfectionOnlineClinicGuidance(
         aiResponse,
         conversationState[conversationId]
@@ -14468,10 +14593,11 @@ app.post("/api/hospital-details", async (req, res) => {
 function getSummarySectionSpecsByJudgement(judgement) {
   if (judgement === "🔴") {
     return [
-      { id: 1, title: "📝 今の状態について", patterns: [/^📝\s*今の状態について/, /^📝\s*いまの状態を整理します（メモ）/, /^📝\s*いまの状態を整理します/] },
-      { id: 2, title: "✅ 今すぐやること", patterns: [/^✅\s*今すぐやること（これだけでOK）/, /^✅\s*今すぐやること/] },
-      { id: 3, title: "🏥 受診先の候補", patterns: [/^🏥\s*受診先の候補/, /^🏥\s*Kairoの判断/] },
-      { id: 4, title: "💬 最後に", patterns: [/^💬\s*最後に/] },
+      { id: 1, title: "🔴 ここまでの情報を整理します", patterns: [/^🔴\s*ここまでの情報を整理します/] },
+      { id: 2, title: "📝 今の状態について", patterns: [/^📝\s*今の状態について/, /^📝\s*いまの状態を整理します（メモ）/, /^📝\s*いまの状態を整理します/] },
+      { id: 3, title: "✅ 今すぐやること", patterns: [/^✅\s*今すぐやること（これだけでOK）/, /^✅\s*今すぐやること/] },
+      { id: 4, title: "🏥 受診先の候補", patterns: [/^🏥\s*受診先の候補/, /^🏥\s*Kairoの判断/] },
+      { id: 5, title: "💬 最後に", patterns: [/^💬\s*最後に/] },
     ];
   }
   if (judgement === "🟡") {

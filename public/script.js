@@ -422,6 +422,7 @@ function parseAIMessage(text) {
     // 様子見/市販薬の場合（緊急度は 🟢 / 🟡 で先頭行が変わる）
     { icon: '🟢', name: 'ここまでの情報を整理します' },
     { icon: '🟡', name: 'ここまでの情報を整理します' },
+    { icon: '🔴', name: 'ここまでの情報を整理します' },
     { icon: '🤝', name: '今の状態について' },
     { icon: '✅', name: '今すぐやること' },
     { icon: '⏳', name: '今後の見通し' },
@@ -460,6 +461,9 @@ function parseAIMessage(text) {
     let foundHeader = null;
     for (const pattern of headerPatterns) {
       if (!line.includes(pattern.icon)) continue;
+      if (pattern.icon === '🔴') {
+        if (!/^\s*🔴\s*ここまでの情報を整理します/.test(line)) continue;
+      }
       if (pattern.icon === '🏥') {
         const name = (line.match(new RegExp(`${pattern.icon}\\s*(.+)`)) || [])[1]?.trim() || '';
         if (!/受診先の候補|Kairoの判断/.test(name)) continue;
@@ -587,6 +591,13 @@ function setConcreteModalBody(textOrStructured) {
   }
 }
 
+const GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK =
+  "今すぐ受診しても、得られる対応が自宅と大きく変わらない可能性が高いです。\n逆に動くと悪化しやすいので、休む方が合理的です。";
+
+/** 納得文の直後（改行のうえ）に必ず1文。①を第一優先（②③は仕様書・将来差し替え用） */
+const GREEN_YELLOW_MODAL_SYMPTOM_COMMONNESS_PRIMARY =
+  "このような症状は、多くの人にも見られる比較的よくあるものです。";
+
 function renderStructuredStateModal(body, { structured, message, triageLevel }) {
   const s = structured;
   if (!s) {
@@ -598,11 +609,18 @@ function renderStructuredStateModal(body, { structured, message, triageLevel }) 
   lines.push("🟢 よくある原因");
   (s.common || []).forEach((c) => lines.push(c.startsWith("・") ? c : `・${c}`));
   lines.push("");
+  if (triageLevel === "🟢" || triageLevel === "🟡") {
+    lines.push("👉 今回の症状ここに当てはまる可能性が高い");
+    lines.push("");
+  }
   lines.push("🟡 状況によっては確認が必要");
   (s.conditional || []).forEach((c) => lines.push(c.startsWith("・") ? c : `・${c}`));
   lines.push("");
-  lines.push(s.reassuranceCommon || "");
   if (triageLevel === "🟢" || triageLevel === "🟡") {
+    const conv = String(s.acceptanceConviction || "").trim() || GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK;
+    lines.push(conv);
+    lines.push("");
+    lines.push(GREEN_YELLOW_MODAL_SYMPTOM_COMMONNESS_PRIMARY);
     lines.push("");
     lines.push("現時点の安心材料");
     (s.reassuranceBullets || []).forEach((b) => lines.push(b));
@@ -610,11 +628,12 @@ function renderStructuredStateModal(body, { structured, message, triageLevel }) 
     lines.push("こんな変化があれば受診を検討");
     (s.consultChangeBullets || []).forEach((b) => lines.push(b));
   } else if (triageLevel === "🔴") {
+    lines.push(s.reassuranceCommon || "");
     lines.push("");
     lines.push("今回受診をおすすめしている理由");
     (s.redVisitReasonsBullets || []).forEach((b) => lines.push(b));
     lines.push("");
-    lines.push("これらがあるため、一度医療機関で確認しておくと安心です。");
+    lines.push("・様子を見る選択もありますが、このケースではリスクがあります。");
   }
   const rareItems = s.rare_emergency || [];
   const hasRare = rareItems.length > 0;
@@ -791,6 +810,7 @@ async function showConcreteHospitalDetails() {
 function isDecisionCompleted(text) {
   // 判断を示すブロックが含まれているかチェック
   const decisionIndicators = [
+    '🔴 ここまでの情報を整理します',
     '🟢 ここまでの情報を整理します',
     '🤝 今の状態について',
     '✅ 今すぐやること',
@@ -1165,6 +1185,7 @@ function addSummaryBlock(messageDiv, fullText) {
   const hasSummaryInText =
     fullText.includes('🌱 最後に') ||
     fullText.includes('💬 最後に') ||
+    fullText.includes('🔴 ここまでの情報を整理します') ||
     fullText.includes('🟢 ここまでの情報を整理します') ||
     fullText.includes('🤝 今の状態について') ||
     fullText.includes('✅ 今すぐやること') ||
