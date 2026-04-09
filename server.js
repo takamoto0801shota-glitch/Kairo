@@ -7474,8 +7474,96 @@ function lightBulletCleanupForUserWords(raw) {
   return t.trim();
 }
 
-/** 箇条書きフィルタ：誤りや日本語として不自然な箇条を検出し、修正する（テンプレへの丸ごと置換はしない）。 */
-function sanitizeBulletPoints(bullets) {
+/**
+ * 確認文・まとめ：主症状の言い換えに過ぎない行（主訴の繰り返し）を分類して除外する。
+ * 痛みスコア・経過・付随・きっかけ等の具体情報を含む行は残す。
+ */
+function collectMainSymptomPhrasesForBulletFilter(state) {
+  const out = new Set();
+  const add = (s) => {
+    let t = String(s || "").trim().replace(/[。．]+$/g, "").trim();
+    if (!t || t === "症状" || t === "現在の症状") return;
+    if (t.length > 100) t = t.slice(0, 100);
+    out.add(t);
+  };
+  if (!state) return out;
+  add(state.primarySymptom);
+  add(state?.judgmentSnapshot?.main_symptom);
+  add(compactMainSymptomNounForRed(state));
+  add(toMainSymptomForDiseaseSearch(state));
+  const first = getFirstUserMessageTextForState(state);
+  if (first) {
+    add(toMainSymptomLabelForSafety(first));
+    const head = first.split(/[。！？\n]/)[0].trim();
+    if (head && head.length <= 48) add(head);
+  }
+  return out;
+}
+
+function isMainSymptomOnlyBulletLine(state, bulletLine) {
+  const inner = String(bulletLine || "").replace(/^・\s*/, "").trim();
+  if (!inner || inner.length > 100) return false;
+  if (
+    /\d+\s*\/\s*10|痛みは\s*\d|経過|日前|時間前|数時間|さっき|続い|悪化|体温|微熱|平熱|38|39|37|日常生活|影響|きっかけ|原因|付随|吐き気|嘔吐|発熱|咳|鼻|めまい|しびれ|ズキズキ|キリキリ|の可能性/.test(
+      inner
+    )
+  ) {
+    return false;
+  }
+  const loose = normalizeLooseJapanese(inner);
+  if (!loose || loose.length < 2) return false;
+  for (const ph of collectMainSymptomPhrasesForBulletFilter(state)) {
+    const pLoose = normalizeLooseJapanese(ph);
+    if (!pLoose || pLoose.length < 2) continue;
+    if (loose === pLoose) return true;
+    if (pLoose.length >= 4 && (loose === pLoose || (loose.length <= pLoose.length + 8 && pLoose.includes(loose)))) {
+      return true;
+    }
+    if (loose.length >= 4 && loose.length <= pLoose.length + 8 && loose.includes(pLoose)) return true;
+  }
+  const dis = toMainSymptomForDiseaseSearch(state);
+  const labelForInner = toMainSymptomLabelForSafety(inner);
+  if (
+    dis &&
+    labelForInner === dis &&
+    dis !== "症状" &&
+    dis !== "体調不良" &&
+    inner.length <= 40 &&
+    !/\d|続い|時間|日前|悪化|痛みは|\/10|体温|発熱|咳|鼻|めまい|しびれ|日常生活|影響|きっかけ|原因|付随|吐き気|嘔吐|ズキ|キリ|の可能性|ような/.test(
+      inner
+    )
+  ) {
+    return true;
+  }
+
+  const canonical = dis;
+  const onlyMainPatterns = {
+    頭痛: /^頭痛(がある|が出ている)?$/,
+    腹痛: /^腹痛(がある|が出ている)?$/,
+    喉の痛み: /^(喉の痛み|のどの痛み)(がある|が出ている)?$/,
+    唇の痛み: /^唇の痛み(がある|が出ている)?$/,
+    発熱: /^発熱(がある|が出ている)?$/,
+    皮膚症状: /^皮膚症状(がある|が出ている)?$/,
+    体調不良: /^体調不良(がある|が出ている)?$/,
+  };
+  const re = onlyMainPatterns[canonical];
+  if (re && re.test(inner.replace(/\s+/g, ""))) return true;
+  return false;
+}
+
+function stripMainSymptomOnlyBullets(state, bullets) {
+  if (!state || !Array.isArray(bullets)) return Array.isArray(bullets) ? bullets : [];
+  return bullets.filter((b) => !isMainSymptomOnlyBulletLine(state, b));
+}
+
+function isRawValueMainSymptomOnlyEcho(state, value) {
+  const v = String(value || "").trim();
+  if (!v || v.length > 120) return false;
+  return isMainSymptomOnlyBulletLine(state, `・${v}`);
+}
+
+/** 箇条書きフィルタ：誤りや日本語として不自然な箇条を検出し、修正する（テンプレへの丸ごと置換はしない）。第2引数 state があるとき主症状の重言行を除去。 */
+function sanitizeBulletPoints(bullets, state) {
   if (!Array.isArray(bullets)) return [];
   const cleaned = bullets
     .map((b) => {
@@ -7525,7 +7613,8 @@ function sanitizeBulletPoints(bullets) {
     .filter(Boolean);
   const bySlot = dedupeBulletsOneLinePerInferenceSlot(cleaned);
   const bySubsume = dedupeBulletsBySubsumption(bySlot);
-  return dedupeBulletsSequentialSimilarity(bySubsume);
+  const deduped = dedupeBulletsSequentialSimilarity(bySubsume);
+  return state ? stripMainSymptomOnlyBullets(state, deduped) : deduped;
 }
 
 /**
@@ -7726,7 +7815,7 @@ function injectDisplayOnlyNoOtherSymptomsBullet(bullets, state) {
   }
   if (insertAt >= 0) out.splice(insertAt, 0, line);
   else out.push(line);
-  return sanitizeBulletPoints(out);
+  return sanitizeBulletPoints(out, state);
 }
 
 const BULLET_INFER_SLOT_KEYS = {
@@ -7955,7 +8044,7 @@ function mergeConfirmationExtraFactsIntoStateBulletsCache(state) {
       ? state.stateAboutBulletsCache.slice()
       : buildStateFactsBulletsLegacy(state, { forSummary: true });
   if (!Array.isArray(base)) base = [];
-  const sanitizedBase = sanitizeBulletPoints(base);
+  const sanitizedBase = sanitizeBulletPoints(base, state);
   const deduped = [];
   const seenKeys = new Set();
   for (const line of sanitizedBase) {
@@ -7973,7 +8062,7 @@ function mergeConfirmationExtraFactsIntoStateBulletsCache(state) {
       deduped.push(line);
     }
   }
-  state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(sanitizeBulletPoints(deduped), state);
+  state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(sanitizeBulletPoints(deduped, state), state);
 }
 
 /** 箇条書きに載せない「空・ない・わからない」等（付随の表示専用「ない」は別ルート） */
@@ -8229,7 +8318,7 @@ function heuristicSupplementBulletsFromUserUtterances(bullets, userLines) {
 
 /** 追補行を箇条書きキャッシュへマージ（重複・同趣旨は弾く）。 */
 function mergeMissingBulletLinesIntoStateAboutCache(state, base, missingLines) {
-  const deduped = sanitizeBulletPoints(Array.isArray(base) ? base.slice() : []);
+  const deduped = sanitizeBulletPoints(Array.isArray(base) ? base.slice() : [], state);
   const seenKeys = new Set();
   for (const line of deduped) {
     const k = normalizeBulletKeyForDedupe(line);
@@ -8250,7 +8339,7 @@ function mergeMissingBulletLinesIntoStateAboutCache(state, base, missingLines) {
     deduped.push(line);
     added++;
   }
-  state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(sanitizeBulletPoints(deduped).slice(0, 14), state);
+  state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(sanitizeBulletPoints(deduped, state).slice(0, 14), state);
   return added;
 }
 
@@ -8268,7 +8357,7 @@ async function supplementStateBulletsFromUncoveredUserUtterances(state) {
   if (!Array.isArray(base)) base = [];
   const userLines = collectUserUtterancesForBulletCoverage(state);
   if (userLines.length === 0) {
-    state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(sanitizeBulletPoints(base), state);
+    state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(sanitizeBulletPoints(base, state), state);
     return { added: 0 };
   }
   const missing = heuristicSupplementBulletsFromUserUtterances(base, userLines);
@@ -8381,6 +8470,7 @@ function mergeRawSlotInputsIntoBullets(state, bullets) {
     const value = m[2].trim();
     if (/^会話内自由記述/.test(label)) continue;
     if (isRawSlotValueExcludedFromBulletCoverage(label, value)) continue;
+    if (isRawValueMainSymptomOnlyEcho(state, value)) continue;
     if (!bulletLinesCoverSlotText(out, value)) {
       const line = coerceSlotLabelAndValueToBulletLine(label, value);
       if (line) out.push(line);
@@ -8401,17 +8491,19 @@ function validateBulletCoverageFromRaw(state, bullets) {
     const value = m[2].trim();
     if (/^会話内自由記述/.test(label)) continue;
     if (isRawSlotValueExcludedFromBulletCoverage(label, value)) continue;
+    if (isRawValueMainSymptomOnlyEcho(state, value)) continue;
     if (!bulletLinesCoverSlotText(bullets, value)) missing.push(value);
   }
   const unique = [...new Set(missing)];
   return { ok: unique.length === 0, missing: unique };
 }
 
-function appendMissingRawValuesAsBullets(bullets, missingValues) {
+function appendMissingRawValuesAsBullets(bullets, missingValues, state) {
   const out = Array.isArray(bullets) ? bullets.slice() : [];
   for (const v of missingValues || []) {
     const val = String(v || "").trim();
     if (!val) continue;
+    if (state && isRawValueMainSymptomOnlyEcho(state, val)) continue;
     if (bulletLinesCoverSlotText(out, val)) continue;
     out.push(`・${coerceStateAboutBulletFragmentToSentenceInner(val, null)}`);
   }
@@ -8431,16 +8523,16 @@ function enforceConfirmationBulletsCompletenessCore(state) {
       ? state.stateAboutBulletsCache.slice()
       : buildStateFactsBulletsLegacy(state, { forSummary: true });
   if (!Array.isArray(base)) base = [];
-  base = sanitizeBulletPoints(base);
+  base = sanitizeBulletPoints(base, state);
   base = injectMissingSlotBulletsFromState(base, state, cat, { maxOut: 14 }) || base;
-  base = sanitizeBulletPoints(base);
+  base = sanitizeBulletPoints(base, state);
   base = mergeRawSlotInputsIntoBullets(state, base);
-  base = sanitizeBulletPoints(base);
+  base = sanitizeBulletPoints(base, state);
 
   let check = validateBulletCoverageFromRaw(state, base);
   if (!check.ok) {
-    base = appendMissingRawValuesAsBullets(base, check.missing);
-    base = sanitizeBulletPoints(base);
+    base = appendMissingRawValuesAsBullets(base, check.missing, state);
+    base = sanitizeBulletPoints(base, state);
   }
   check = validateBulletCoverageFromRaw(state, base);
   if (!check.ok) {
@@ -8451,16 +8543,16 @@ function enforceConfirmationBulletsCompletenessCore(state) {
       base = state.stateAboutBulletsCache.slice();
     }
     base = mergeRawSlotInputsIntoBullets(state, base);
-    base = sanitizeBulletPoints(base);
+    base = sanitizeBulletPoints(base, state);
     check = validateBulletCoverageFromRaw(state, base);
     if (!check.ok) {
-      base = appendMissingRawValuesAsBullets(base, check.missing);
-      base = sanitizeBulletPoints(base);
+      base = appendMissingRawValuesAsBullets(base, check.missing, state);
+      base = sanitizeBulletPoints(base, state);
     }
   }
 
   state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
-    sanitizeBulletPoints(base).slice(0, 18),
+    sanitizeBulletPoints(base, state).slice(0, 18),
     state
   );
   let finalCheck = validateBulletCoverageFromRaw(state, state.stateAboutBulletsCache);
@@ -8469,9 +8561,9 @@ function enforceConfirmationBulletsCompletenessCore(state) {
       conversationId: state.conversationId,
       missingCount: finalCheck.missing.length,
     });
-    const patched = appendMissingRawValuesAsBullets(state.stateAboutBulletsCache.slice(), finalCheck.missing);
+    const patched = appendMissingRawValuesAsBullets(state.stateAboutBulletsCache.slice(), finalCheck.missing, state);
     state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
-      sanitizeBulletPoints(patched).slice(0, 18),
+      sanitizeBulletPoints(patched, state).slice(0, 18),
       state
     );
     finalCheck = validateBulletCoverageFromRaw(state, state.stateAboutBulletsCache);
@@ -8483,7 +8575,8 @@ function enforceConfirmationBulletsCompletenessCore(state) {
     }
   }
   state.stateAboutBulletsCache = sanitizeBulletPoints(
-    finalizeStateAboutBulletLinesForSpec(state.stateAboutBulletsCache)
+    finalizeStateAboutBulletLinesForSpec(state.stateAboutBulletsCache),
+    state
   );
   return state.stateAboutBulletsCache.slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS);
 }
@@ -8542,7 +8635,7 @@ async function polishConfirmationBulletsWithLlm(state) {
       .slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS);
     if (out.length === 0) return;
     state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
-      sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(out)),
+      sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(out), state),
       state
     );
   } catch (e) {
@@ -8696,7 +8789,7 @@ function buildStateFactsBulletsLegacy(state, opts = {}) {
   // 追加事実（確認で得た情報）は mergeConfirmationExtraFactsIntoStateBulletsCache で取り込む。legacy 単体では追加しない。
 
   const rawBullets = lines.slice(0, 6);
-  let bullets = sanitizeBulletPoints(rawBullets);
+  let bullets = sanitizeBulletPoints(rawBullets, state);
   bullets = injectDisplayOnlyNoOtherSymptomsBullet(bullets, state);
   if (bullets.length === 0) return [];
   if (opts?.forSummary) return bullets;
@@ -14009,32 +14102,23 @@ app.post("/api/chat", async (req, res) => {
           conversationState[conversationId].slotFilled[type] = true;
         }
         const measuredTemp = extractBodyTemperatureCelsius(String(message || ""));
-        const preserveRawForMeasured =
-          measuredTemp != null && (type === "associated_symptoms" || type === "daily_impact");
-        const valueForDisplay = preserveRawForMeasured
-          ? String(message || "").trim() || lastOptionsSnapshot[selectedIndex]
-          : classified.useCanonicalSlotText === true
-            ? lastOptionsSnapshot[selectedIndex]
-            : String(message || "").trim() || lastOptionsSnapshot[selectedIndex];
         if (measuredTemp != null) {
           conversationState[conversationId].extractedBodyTemperatureC = measuredTemp;
         }
-        conversationState[conversationId].slotAnswers[type] =
-          valueForDisplay || lastOptionsSnapshot[selectedIndex];
+        /** 確認文・まとめはユーザーの言葉を優先。選択肢へのスナップは緊急度（score・slotNormalized の index）のみに使い、表示用 slot には載せない。 */
+        const trimmedMessage = String(message || "").trim();
+        const valueForDisplay = trimmedMessage || lastOptionsSnapshot[selectedIndex];
+        conversationState[conversationId].slotAnswers[type] = valueForDisplay;
         if (type === "duration" && selectedIndex !== null && selectedIndex !== undefined) {
           conversationState[conversationId].durationMeta = {
             selectedIndex,
-            raw_text: lastOptionsSnapshot[selectedIndex] || "",
+            raw_text: valueForDisplay || "",
             normalized: selectedIndex === 2 ? "day_or_more" : selectedIndex === 1 ? "hours" : "short",
           };
         }
-        let normalized = buildNormalizedAnswer(
-          type,
-          lastOptionsSnapshot[selectedIndex],
-          selectedIndex
-        );
+        let normalized = buildNormalizedAnswer(type, valueForDisplay, selectedIndex);
         if (!normalized) {
-          normalized = { slotId: type, rawAnswer: lastOptionsSnapshot[selectedIndex], riskLevel: RISK_LEVELS.MEDIUM };
+          normalized = { slotId: type, rawAnswer: valueForDisplay, riskLevel: RISK_LEVELS.MEDIUM };
         }
         conversationState[conversationId].slotNormalized[type] = normalized;
         conversationState[conversationId].lastNormalizedAnswer = normalized;
@@ -14042,7 +14126,7 @@ app.post("/api/chat", async (req, res) => {
           conversationState[conversationId],
           type,
           "question_response",
-          valueForDisplay || lastOptionsSnapshot[selectedIndex]
+          valueForDisplay
         );
         if (type === "cause_category") {
           const freeText = classified.usedFreeText ? message : "";
