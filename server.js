@@ -5686,6 +5686,9 @@ function isDurationDayOrMore(state) {
   ).trim();
   const selectedIndex = state?.durationMeta?.selectedIndex;
   if (selectedIndex === 2) return true;
+  if (state?.slotNormalized?.duration?.riskLevel === RISK_LEVELS.HIGH) return true;
+  const n = parseDaysAgoFromDurationString(durationRaw);
+  if (n !== null && n >= 1) return true;
   return /(昨日|一日前|数日|ずっと|前から|一昨日|三日前|二日前|数日前|\d+日前|一日以上)/.test(durationRaw);
 }
 
@@ -5721,6 +5724,9 @@ function getSlotOrderWithConditional(state) {
       base[idx4] = "associated_symptoms";
       base[idx5] = "daily_impact";
     }
+  }
+  if (category === "INFECTION" && isThroatInfectionSession(state)) {
+    base = base.filter((k) => k !== "daily_impact");
   }
   return base;
 }
@@ -5924,12 +5930,39 @@ function extractDurationFromText(text) {
     return { raw_text: raw, normalized: "short", selectedIndex: 0 };
   }
 
-  // (2) 時間
+  // (1.5) N日前・昨日（数字／漢数字）。誤って「1番」扱いされないよう先に確定
+  const daysAgoEarly = parseDaysAgoFromDurationString(rawText);
+  if (daysAgoEarly !== null && daysAgoEarly >= 1) {
+    const raw =
+      (rawText.match(/\d+\s*日\s*前|\d+\s*日前|[一二三四五六七八九十百]+日\s*前|[一二三四五六七八九十]+日前/) || [])[0] ||
+      (normalized.match(/\d+\s*日\s*前|\d+\s*日前|[一二三四五六七八九十百]+日\s*前|[一二三四五六七八九十]+日前/) || [])[0] ||
+      (daysAgoEarly === 1 ? "昨日" : `${daysAgoEarly}日前`);
+    return { raw_text: raw, normalized: `${daysAgoEarly}d_ago`, selectedIndex: 2 };
+  }
+
+  // (2) 時間（半角数字・漢数字「一時間前」など）
+  const hKanjiM = normalized.match(/([一二三四五六七八九十百〇]+)時間(?:前)?/);
+  if (hKanjiM) {
+    const hValue = parseKanjiNumberSmall(hKanjiM[1]);
+    if (Number.isFinite(hValue) && hValue >= 1) {
+      const raw =
+        (rawText.match(/[一二三四五六七八九十百〇]+時間(?:前)?/) || [])[0] || `${hValue}時間前`;
+      if (hValue >= 24) {
+        const dApprox = Math.max(1, Math.round(hValue / 24));
+        return { raw_text: raw, normalized: `${dApprox}d_ago`, selectedIndex: 2 };
+      }
+      return { raw_text: raw, normalized: `${hValue}h_ago`, selectedIndex: 1 };
+    }
+  }
   const hRaw = rawText.match(/(\d+\s*時間(?:前)?)/);
   const hNorm = normalized.match(/(\d+)\s*時間前/);
   if (hRaw || hNorm) {
     const raw = hRaw ? hRaw[1] : `${hNorm[1]}時間前`;
     const hValue = Number((hNorm && hNorm[1]) || (hRaw && hRaw[1].match(/(\d+)/)?.[1]) || NaN);
+    if (Number.isFinite(hValue) && hValue >= 24) {
+      const dApprox = Math.max(1, Math.round(hValue / 24));
+      return { raw_text: raw, normalized: `${dApprox}d_ago`, selectedIndex: 2 };
+    }
     return { raw_text: raw, normalized: Number.isFinite(hValue) ? `${hValue}h_ago` : "hours", selectedIndex: 1 };
   }
   if (/(数時間|今朝|昨夜)/.test(normalized)) {
@@ -6114,7 +6147,100 @@ function shouldSuppressIndexByNumberForAnswer(answer) {
   if (/\d+\.\d/.test(t)) return true;
   if (/\d{2,}\s*[度℃]/.test(raw)) return true;
   if (/^3[5-9]\.\d|^4[0-2]\.\d/.test(t)) return true;
+  // 「1日前」「1時間前」などに含まれる数字で 1〜3番を選ばない（経過スロットの誤認防止）
+  if (isDurationSlotNumericNoise(raw)) return true;
   return false;
+}
+
+/** 経過の「N日前」「N時間前」表現に含まれる数字か（選択肢番号の 1/2/3 ではない） */
+function isDurationDayNumericNoise(raw) {
+  const s = String(raw || "").replace(/\s+/g, "");
+  if (/(?:昨日|一昨日|おととい|一日前|二日前|三日前|数日前)/.test(s)) return true;
+  if (/\d{1,3}日\s*前|\d{1,3}日前/.test(s)) return true;
+  if (/[一二三四五六七八九十百]+日\s*前|[一二三四五六七八九十]+日前/.test(s)) return true;
+  return false;
+}
+
+function isDurationSlotNumericNoise(raw) {
+  const s = String(raw || "").replace(/\s+/g, "");
+  if (isDurationDayNumericNoise(s)) return true;
+  if (/\d{1,3}時間(?:前)?/.test(s)) return true;
+  if (/[一二三四五六七八九十百〇]+時間/.test(s)) return true;
+  return false;
+}
+
+/** 漢数字を整数に（経過「N日前」用・ざっくり 1〜99） */
+function parseKanjiNumberSmall(s) {
+  const d = { 〇: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  const t = String(s || "").trim();
+  if (!t) return null;
+  if (/^\d+$/.test(t)) return Number(t);
+  if (t.length === 1) return d[t] !== undefined ? d[t] : null;
+  if (t === "十") return 10;
+  if (t.length === 2 && t[0] === "十") return 10 + (d[t[1]] ?? 0);
+  if (t.length === 2 && t[1] === "十") return (d[t[0]] ?? 0) * 10;
+  if (t.length === 3 && t[1] === "十") return (d[t[0]] ?? 0) * 10 + (d[t[2]] ?? 0);
+  return null;
+}
+
+/**
+ * 「何日前」相当を数値日数に（1以上なら一日以上前クラス）。
+ * 選択肢マッチ・③.５挿入・RED抑制の整合に使う。
+ */
+function parseDaysAgoFromDurationString(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const normalized = normalizeUserText(raw).replace(/\s+/g, "");
+  if (/(昨日|きのう)/.test(normalized)) return 1;
+  if (/(一昨日|おととい)/.test(normalized)) return 2;
+  let m = normalized.match(/(\d{1,3})日\s*前/);
+  if (m) return Number(m[1]);
+  m = normalized.match(/(\d{1,3})日前/);
+  if (m) return Number(m[1]);
+  m = raw.match(/([一二三四五六七八九十百〇]+)\s*日\s*前/);
+  if (m) {
+    const n = parseKanjiNumberSmall(m[1]);
+    if (n !== null && n >= 1) return n;
+  }
+  if (/([一二三四五六七八九十]+)日前/.test(normalized)) {
+    const km = normalized.match(/([一二三四五六七八九十]+)日前/);
+    if (km) {
+      const n = parseKanjiNumberSmall(km[1]);
+      if (n !== null && n >= 1) return n;
+    }
+  }
+  return null;
+}
+
+/**
+ * 経過3択（さっき／数時間前／一日以上前）へのマッピング用: 0=極短 1=時間 2=一日以上
+ */
+function parseDurationDayTierFromText(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const normalized = normalizeUserText(raw).replace(/\s+/g, "");
+  if (/(さっき|今さっき|たった今|数分|数十分)/.test(normalized)) return 0;
+  const daysAgo = parseDaysAgoFromDurationString(raw);
+  if (daysAgo !== null && daysAgo >= 1) return 2;
+  if (/(一日以上前|半日以上|数日|ずっと|前から|先週|先月|一週間|〇日前)/.test(normalized)) return 2;
+  if (/(昨日|一昨日|おととい)/.test(normalized)) return 2;
+  if (/[一二三四五六七八九十百]+日前/.test(normalized)) return 2;
+  const hKanji = normalized.match(/([一二三四五六七八九十百〇]+)時間/);
+  if (hKanji) {
+    const h = parseKanjiNumberSmall(hKanji[1]);
+    if (Number.isFinite(h) && h >= 1) {
+      if (h >= 24) return 2;
+      return 1;
+    }
+  }
+  const hm = normalized.match(/(\d{1,3})\s*時間/);
+  if (hm) {
+    const h = Number(hm[1]);
+    if (Number.isFinite(h) && h >= 24) return 2;
+    return 1;
+  }
+  if (/(数時間|今朝|昨夜|半日)/.test(normalized)) return 1;
+  return null;
 }
 
 /**
@@ -9143,7 +9269,7 @@ function buildGreenYellowStateAboutBlock(state, level) {
     `${comboInner}状態です。`,
     ...patternLines,
     "👉 今すぐ受診が必要な状態ではありません",
-    "👉 まずは休んで様子を見る判断で問題ありません",
+    "👉 まずは休んで様子を見てください",
   ].join("\n");
 }
 
@@ -9157,7 +9283,7 @@ async function buildGreenYellowStateAboutBlockAsync(state, level) {
     `${comboInner}状態です。`,
     ...patternLines,
     "👉 今すぐ受診が必要な状態ではありません",
-    "👉 まずは休んで様子を見る判断で問題ありません",
+    "👉 まずは休んで様子を見てください",
   ].join("\n");
 }
 
@@ -9663,33 +9789,98 @@ function buildReassuranceBulletsForPatterns(state) {
   return bullets.slice(0, 3);
 }
 
-function buildConsultChangeBulletsForPatterns(category) {
-  if (category === "GI") {
-    return [
-      "・痛みが急に強くなる",
-      "・歩行や姿勢維持がつらくなる",
-      "・発熱や繰り返す嘔吐が加わる",
-    ];
+/** 「今の状態について」由来の事実配列と結合テキスト（🤝/📝モーダル用） */
+function collectModalUserFactsAndSummary(state, summaryFacts = [], summarySection = "") {
+  const bulletLines = extractBulletLinesFromText(summarySection || "");
+  const rawFacts = [
+    ...(Array.isArray(summaryFacts) ? summaryFacts : []),
+    ...bulletLines,
+    ...(state ? collectSlotFactsForDiseaseSearch(state) : []),
+  ]
+    .filter(Boolean)
+    .map((l) => String(l).replace(/^[・\s]+/, "").replace(/^→\s*/, "").trim())
+    .filter((l) => l.length > 0)
+    .filter((l) => l.length <= 80);
+  const userSummary = Array.from(new Set(rawFacts)).slice(0, 12).join("\n");
+  return { rawFacts, userSummary };
+}
+
+/** 🟡：「なぜ注意が必要か」用。スロット＋まとめからフォールバック箇条書き（`・要約 → 理由`） */
+function buildYellowCautionBulletsFallback(state, userSummary, mainSymptom) {
+  const bullets = [];
+  const val = (key, fb) => getSlotStatusValue(state, key, state?.slotAnswers?.[fb] || "");
+  const worsening = val("worsening", "worsening_trend");
+  if (worsening && /悪化|悪くなっ|ひどくなっ|強くなっ/.test(worsening)) {
+    const w = lightBulletCleanupForUserWords(String(worsening).trim());
+    if (w) bullets.push(`・${w} → 経過が悪化方向に見えるため、判断の見通しを慎重にとる必要がある`);
   }
-  if (category === "INFECTION") {
-    return [
-      "・息苦しさや胸の痛みが出る",
-      "・高熱が続く",
-      "・水分が取りづらくなる",
-    ];
+  const associated = val("associated", "associated_symptoms");
+  if (associated && !/^(なし|特にない|これ以外は特にない)/.test(String(associated).trim())) {
+    const a = String(associated).trim().slice(0, 50);
+    bullets.push(`・付随として「${a}」→ 症状の組み合わせが増えると、見極めの幅が広がるため注意が必要`);
   }
-  if (category === "SKIN") {
-    return [
-      "・赤みや腫れが急に広がる",
-      "・強い痛みや熱感が目立ってくる",
-      "・発熱を伴う",
-    ];
+  const impact = val("impact", "daily_impact");
+  if (impact && /(動けない|つらい|困難|支障)/.test(impact)) {
+    bullets.push(`・日常生活への影響が大きい → 体調の負担が重い状態で、経過の変化を逃さないよう注意が必要`);
   }
-  return [
-    "・痛みが急に強くなる",
-    "・しびれや視界の違和感が新たに出る",
-    "・日常動作が急に難しくなる",
-  ];
+  const summaryLines = String(userSummary || "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(0, 4);
+  for (const line of summaryLines) {
+    if (bullets.length >= 3) break;
+    if (line.length < 8) continue;
+    const short = line.length > 60 ? `${line.slice(0, 57)}…` : line;
+    bullets.push(`・${short} → まとめの情報から、注意して見るべき点が残っている`);
+    if (bullets.length >= 2) break;
+  }
+  if (bullets.length === 0) {
+    bullets.push(
+      `・${mainSymptom || "症状"}の経過が変わる可能性がある → 状態の変化を見逃さないよう注意が必要`
+    );
+  }
+  return bullets.slice(0, 3);
+}
+
+/** 🟡：`cautionWhyBullets` を LLM で生成（失敗時はフォールバック） */
+async function generateYellowCautionBulletsFromSummary(mainSymptom, userSummary, state) {
+  const fallback = () => buildYellowCautionBulletsFallback(state, userSummary, mainSymptom);
+  if (!userSummary || !String(userSummary).trim()) {
+    return fallback();
+  }
+  try {
+    const prompt = [
+      "あなたは医療情報を要約するアシスタントです。",
+      "厳守：",
+      "- 出力は必ずJSONのみ：{\"bullets\":[\"・...\",\"・...\"]}",
+      "- bullets は2〜3件。各項目は「・<今の状態の要約> → <なぜ注意が必要か（短い理由）>」形式。",
+      "- 素材は「今の状態について」のユーザー言動のみ。ユーザーの言っていないことは書かない。",
+      "- 診断を断定しない。煽らない。恐怖を煽る表現は禁止。",
+      "- 禁止：「→」右側に痛みスロット由来の表現は使わない（3/10・〇/10・やや強い・中程度・軽い等）。",
+    ].join("\n");
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: prompt },
+        { role: "user", content: `主症状: ${mainSymptom}\n\n【今の状態について（ユーザー言動）】\n${userSummary}` },
+      ],
+      temperature: 0.2,
+      max_tokens: 600,
+    });
+    const raw = completion?.choices?.[0]?.message?.content || "";
+    const parsed = parseJsonObjectFromText(raw);
+    const arr = Array.isArray(parsed?.bullets) ? parsed.bullets : [];
+    const sanitized = arr
+      .map((x) => String(x || "").trim())
+      .filter((t) => t && /^・/.test(t))
+      .filter((t) => !/\d+\s*\/\s*10/.test(t))
+      .slice(0, 3);
+    if (sanitized.length >= 2) return sanitized;
+  } catch (_) {
+    /* fallback below */
+  }
+  return fallback();
 }
 
 /** 本文・モーダル外：数値 /10 を出さず痛みの程度を短く言い換え（原因モーダル LLM の禁止とは別） */
@@ -9814,7 +10005,6 @@ function buildConcreteStatePatternMessage(state, summaryFacts = [], summarySecti
       ].slice(0, 2)
     : baseTemplates;
   const reassurance = buildReassuranceBulletsForPatterns(state);
-  const consultChanges = buildConsultChangeBulletsForPatterns(category);
   const level = state?.decisionLevel || finalizeRiskLevel(state);
   const isGreenOrYellow = level === "🟢" || level === "🟡";
 
@@ -9825,12 +10015,16 @@ function buildConcreteStatePatternMessage(state, summaryFacts = [], summarySecti
     lines.push("");
   }
   if (isGreenOrYellow) {
-    lines.push(getGreenYellowModalReassuranceHeading(level));
-    reassurance.forEach((line) => lines.push(line));
+    lines.push(getGreenYellowModalMiddleBlockHeading(level));
+    if (level === "🟢") {
+      reassurance.forEach((line) => lines.push(line));
+    } else {
+      const { userSummary } = collectModalUserFactsAndSummary(state, facts, summarySection);
+      buildYellowCautionBulletsFallback(state, userSummary, toMainSymptomForDiseaseSearch(state)).forEach((line) =>
+        lines.push(line)
+      );
+    }
     lines.push("このような症状では、強い緊急サインは今のところはっきりしていません。");
-    lines.push("");
-    lines.push("こんな変化があれば受診を検討");
-    consultChanges.slice(0, 3).forEach((line) => lines.push(line));
   } else if (level === "🔴") {
     lines.push("今回受診をおすすめしている理由");
     buildRedVisitReasonsBullets(state).forEach((line) => lines.push(line));
@@ -10319,7 +10513,7 @@ function getModalCommonNonInfectionFallbackPair(mainSymptom) {
   return fallbacks[mainSymptom] || fallbacks.頭痛;
 }
 
-/** 🟢/🟡モーダル：🟡ブロックと安心材料見出し（🟢「現時点の安心材料」／🟡「今すぐ受診が必要ではない理由」）の間に出す納得文（LLM・失敗時フォールバック） */
+/** 🟢/🟡モーダル：🟡ブロックと中間見出し（🟢「現時点の安心材料」／🟡「なぜ注意が必要か」）のあとに出す納得文（LLM・失敗時フォールバック） */
 const GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK = [
   "今すぐ受診しても、得られる対応は自宅と大きく変わりません。",
   "逆に動くと悪化しやすいので、休む方が合理的です。",
@@ -10351,10 +10545,6 @@ function enforceAcceptanceConvictionTwoSentences(text) {
   if (out.length >= 35 && out.length <= 450) return out;
   return fallback;
 }
-
-/** 納得文の直後（改行のうえ）に必ず1文。①を第一優先（②③は仕様書・将来差し替え用） */
-const GREEN_YELLOW_MODAL_SYMPTOM_COMMONNESS_PRIMARY =
-  "このような症状は、多くの人にも見られる比較的よくあるものです。";
 
 async function generateGreenYellowModalAcceptanceText(mainSymptom = "", userSummary = "") {
   if (!process.env.OPENAI_API_KEY) return GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK;
@@ -10416,22 +10606,11 @@ async function buildDiseaseSafetyFilteredMessage(
     .trim()
     .slice(0, 6000);
 
-  const bulletLines = extractBulletLinesFromText(summarySection || "");
-  const rawFacts = [
-    ...(Array.isArray(summaryFacts) ? summaryFacts : []),
-    ...bulletLines,
-    ...(state ? collectSlotFactsForDiseaseSearch(state) : []),
-  ]
-    .filter(Boolean)
-    .map((l) => String(l).replace(/^[・\s]+/, "").replace(/^→\s*/, "").trim())
-    .filter((l) => l.length > 0)
-    .filter((l) => l.length <= 80);
-  const userSummary = Array.from(new Set(rawFacts)).slice(0, 12).join("\n");
+  const { rawFacts, userSummary } = collectModalUserFactsAndSummary(state, summaryFacts, summarySection);
 
   const fallbackPair = getDiseaseFallbackPair(mainSymptom);
   const category = state ? (state.triageCategory || resolveQuestionCategoryFromState(state)) : "PAIN";
   const reassurance = state ? buildReassuranceBulletsForPatterns(state) : ["・強い緊急サインは今のところはっきりしていません"];
-  const consultChanges = buildConsultChangeBulletsForPatterns(category);
 
   const tryExtract = async () => {
     const prompt = [
@@ -10684,14 +10863,22 @@ async function buildDiseaseSafetyFilteredMessage(
 
   const redVisitReasonsBullets = level === "🔴" && state ? buildRedVisitReasonsBullets(state) : [];
 
+  let reassuranceBullets = [];
+  let cautionWhyBullets = [];
+  if (level === "🟢") {
+    reassuranceBullets = reassurance.slice(0, 3);
+  } else if (level === "🟡") {
+    cautionWhyBullets = await generateYellowCautionBulletsFromSummary(mainSymptom, userSummary, state);
+  }
+
   return {
     common,
     conditional,
     rare_emergency,
     reassuranceCommon,
     acceptanceConviction,
-    reassuranceBullets: reassurance.slice(0, 3),
-    consultChangeBullets: consultChanges.slice(0, 3),
+    reassuranceBullets,
+    cautionWhyBullets,
     redVisitReasonsBullets,
     triageLevel: level,
   };
@@ -10757,12 +10944,16 @@ async function buildDiseaseFocusedModalMessage(searchResults = [], mainSymptom =
         lines.push("");
       });
       if (level === "🟢" || level === "🟡") {
-        const category = state ? (state.triageCategory || resolveQuestionCategoryFromState(state)) : "PAIN";
-        lines.push(getGreenYellowModalReassuranceHeading(level));
-        (state ? buildReassuranceBulletsForPatterns(state) : ["・強い緊急サインは今のところはっきりしていません"]).slice(0, 3).forEach((b) => lines.push(b));
-        lines.push("");
-        lines.push("こんな変化があれば受診を検討");
-        buildConsultChangeBulletsForPatterns(category).slice(0, 3).forEach((b) => lines.push(b));
+        lines.push(getGreenYellowModalMiddleBlockHeading(level));
+        if (level === "🟢") {
+          (state ? buildReassuranceBulletsForPatterns(state) : ["・強い緊急サインは今のところはっきりしていません"])
+            .slice(0, 3)
+            .forEach((b) => lines.push(b));
+        } else {
+          const { userSummary } = collectModalUserFactsAndSummary(state, [], "");
+          const caution = await generateYellowCautionBulletsFromSummary(mainSymptom, userSummary, state);
+          caution.forEach((b) => lines.push(b));
+        }
       } else if (level === "🔴") {
         lines.push("今回受診をおすすめしている理由");
         buildRedVisitReasonsBullets(state).forEach((b) => lines.push(b));
@@ -10820,12 +11011,15 @@ function buildDiseaseFocusedModalFallback(mainSymptom, level, state = null) {
     lines.push("");
   });
   if (level === "🟢" || level === "🟡") {
-    const category = state ? (state.triageCategory || resolveQuestionCategoryFromState(state)) : "PAIN";
-    lines.push(getGreenYellowModalReassuranceHeading(level));
-    (state ? buildReassuranceBulletsForPatterns(state) : ["・強い緊急サインは今のところはっきりしていません"]).slice(0, 3).forEach((b) => lines.push(b));
-    lines.push("");
-    lines.push("こんな変化があれば受診を検討");
-    buildConsultChangeBulletsForPatterns(category).slice(0, 3).forEach((b) => lines.push(b));
+    lines.push(getGreenYellowModalMiddleBlockHeading(level));
+    if (level === "🟢") {
+      (state ? buildReassuranceBulletsForPatterns(state) : ["・強い緊急サインは今のところはっきりしていません"])
+        .slice(0, 3)
+        .forEach((b) => lines.push(b));
+    } else {
+      const { userSummary } = collectModalUserFactsAndSummary(state, [], "");
+      buildYellowCautionBulletsFallback(state, userSummary, mainSymptom).forEach((b) => lines.push(b));
+    }
   } else if (level === "🔴") {
     lines.push("今回受診をおすすめしている理由");
     buildRedVisitReasonsBullets(state).forEach((b) => lines.push(b));
@@ -10940,10 +11134,14 @@ function buildEvidenceDrivenConcreteMessage(options = {}) {
   ];
 
   if (level === "🟢" || level === "🟡") {
-    lines.push("", getGreenYellowModalReassuranceHeading(level));
-    buildReassuranceBulletsForPatterns(state).slice(0, 3).forEach((b) => lines.push(b));
-    lines.push("", "こんな変化があれば受診を検討");
-    buildConsultChangeBulletsForPatterns(category).slice(0, 3).forEach((b) => lines.push(b));
+    lines.push("", getGreenYellowModalMiddleBlockHeading(level));
+    if (level === "🟢") {
+      buildReassuranceBulletsForPatterns(state).slice(0, 3).forEach((b) => lines.push(b));
+    } else {
+      buildYellowCautionBulletsFallback(state, "", toMainSymptomForDiseaseSearch(state)).forEach((b) =>
+        lines.push(b)
+      );
+    }
   } else if (level === "🔴") {
     lines.push("", "今回受診をおすすめしている理由");
     buildRedVisitReasonsBullets(state).forEach((b) => lines.push(b));
@@ -11046,8 +11244,8 @@ function enforceConcreteModalStructure(message, options = {}) {
 
   const sectionHeaders = new Set([
     "現時点の安心材料",
+    "なぜ注意が必要か",
     "今すぐ受診が必要ではない理由",
-    "こんな変化があれば受診を検討",
     "今回受診をおすすめしている理由",
   ]);
   const patternBlocks = [];
@@ -11129,12 +11327,16 @@ function enforceConcreteModalStructure(message, options = {}) {
   });
 
   if (level === "🟢" || level === "🟡") {
-    out.push("", getGreenYellowModalReassuranceHeading(level));
-    const reassurance = buildReassuranceBulletsForPatterns(state).slice(0, 3);
-    reassurance.forEach((line) => out.push(line));
-    out.push("", "こんな変化があれば受診を検討");
-    const consult = buildConsultChangeBulletsForPatterns(category).slice(0, 3);
-    consult.forEach((line) => out.push(line));
+    out.push("", getGreenYellowModalMiddleBlockHeading(level));
+    if (level === "🟢") {
+      buildReassuranceBulletsForPatterns(state)
+        .slice(0, 3)
+        .forEach((line) => out.push(line));
+    } else {
+      buildYellowCautionBulletsFallback(state, "", toMainSymptomForDiseaseSearch(state)).forEach((line) =>
+        out.push(line)
+      );
+    }
   } else if (level === "🔴") {
     out.push("", "今回受診をおすすめしている理由");
     buildRedVisitReasonsBullets(state).forEach((line) => out.push(line));
@@ -11165,12 +11367,19 @@ function dedupeDiseaseSearchResults(results = []) {
   return out.sort((a, b) => (a.trusted === b.trusted ? 0 : a.trusted ? -1 : 1));
 }
 
-/** 🤝/📝モーダル：🟢/🟡のとき、よくある原因と🟡ブロックの間に挿入する固定1行（KAIRO_SPEC） */
-const GREEN_YELLOW_STATE_MODAL_BRIDGE_LINE = "👉 今回の症状ここに当てはまる可能性が高い";
+/**
+ * 🤝/📝モーダル：🟢/🟡のとき、よくある原因と🟡ブロックの間に挿入する1行（KAIRO_SPEC）。
+ * 埋め込みラベルは質問導入の〇〇と同じく主症状を短く簡潔にしたもの（`toMainSymptomForDiseaseSearch` と整合）。
+ */
+function buildGreenYellowStateModalBridgeLine(mainSymptom) {
+  const label = String(mainSymptom || "").trim() || "症状";
+  return `👉 今回の状態は、よくある${label}のパターンに当てはまっています`;
+}
 
-/** 🟢/🟡モーダル：`structured.reassuranceBullets` の見出し（中身は同一） */
-function getGreenYellowModalReassuranceHeading(level) {
-  return level === "🟡" ? "今すぐ受診が必要ではない理由" : "現時点の安心材料";
+/** 🤝/📝モーダル：🟢は安心材料／🟡は注意理由（本文は `reassuranceBullets` と `cautionWhyBullets` で別フィールド） */
+function getGreenYellowModalMiddleBlockHeading(level) {
+  if (level === "🟡") return "なぜ注意が必要か";
+  return "現時点の安心材料";
 }
 
 async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], summarySection = "") {
@@ -11243,29 +11452,29 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
     lines.push("🟢 よくある原因");
     structured.common.forEach((c) => lines.push(c.startsWith("・") ? c : `・${c}`));
     if (level === "🟢" || level === "🟡") {
-      lines.push(GREEN_YELLOW_STATE_MODAL_BRIDGE_LINE);
+      lines.push(buildGreenYellowStateModalBridgeLine(mainSymptom));
       lines.push("");
     }
     lines.push("🟡 状況によっては確認が必要");
     structured.conditional.forEach((c) => lines.push(c.startsWith("・") ? c : `・${c}`));
     lines.push("");
     if (level === "🟢" || level === "🟡") {
+      lines.push(getGreenYellowModalMiddleBlockHeading(level));
+      if (level === "🟢") {
+        (structured.reassuranceBullets || []).forEach((b) => lines.push(b));
+      } else {
+        (structured.cautionWhyBullets || []).forEach((b) => lines.push(b));
+      }
+      lines.push("");
       lines.push(
         String(structured.acceptanceConviction || "").trim() || GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK
       );
-      lines.push(GREEN_YELLOW_MODAL_SYMPTOM_COMMONNESS_PRIMARY);
       lines.push("");
     }
     lines.push("🔴 すぐ受診が必要なサイン（折りたたみ・初期非表示）");
     structured.rare_emergency.forEach((r) => lines.push(r.startsWith("・") ? r : `・${r}`));
     lines.push("");
-    if (level === "🟢" || level === "🟡") {
-      lines.push(getGreenYellowModalReassuranceHeading(level));
-      structured.reassuranceBullets.forEach((b) => lines.push(b));
-      lines.push("");
-      lines.push("こんな変化があれば受診を検討");
-      structured.consultChangeBullets.forEach((b) => lines.push(b));
-    } else if (level === "🔴") {
+    if (level === "🔴") {
       lines.push(structured.reassuranceCommon);
       lines.push("");
       lines.push("今回受診をおすすめしている理由");
@@ -11297,6 +11506,7 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
     message,
     structured: structured ? { ...structured, triageLevel: level } : null,
     triageLevel: level,
+    mainSymptom,
     query: `${queryJP} || ${queryEN}`,
     queryJP,
     queryEN,
@@ -11339,7 +11549,7 @@ function compactConcreteMessageForQuery(detailMessage) {
     .filter((line) => line.length > 0)
     .filter(
       (line) =>
-        !/^(あなたの状態の理解を深める|今の状態は、次のようなパターンと似ています。|現時点の安心材料|今すぐ受診が必要ではない理由|こんな変化があれば受診を検討|今回受診をおすすめしている理由|■|🟢 よくある原因|🟡 状況によっては確認が必要|🔴 すぐ受診が必要なサイン)/.test(
+        !/^(あなたの状態の理解を深める|今の状態は、次のようなパターンと似ています。|現時点の安心材料|なぜ注意が必要か|今すぐ受診が必要ではない理由|今回受診をおすすめしている理由|■|🟢 よくある原因|🟡 状況によっては確認が必要|🔴 すぐ受診が必要なサイン)/.test(
           line
         )
     )
@@ -12268,10 +12478,17 @@ function hasFinalQuestionPrefix(text) {
   return firstLine.startsWith("最後に") || firstLine.startsWith("最後の質問");
 }
 
-function matchAnswerToOptionWithMeta(answer, options) {
+function matchAnswerToOptionWithMeta(answer, options, questionType = null) {
   const normalizedAnswer = normalizeAnswerText(answer);
   if (!normalizedAnswer) {
     return { index: null, canonicalize: false };
+  }
+
+  if (questionType === "duration" && options.length === 3) {
+    const tier = parseDurationDayTierFromText(answer);
+    if (tier !== null) {
+      return { index: tier, canonicalize: true };
+    }
   }
 
   if (options.some((opt) => (opt || "").includes("思い当たる"))) {
@@ -12384,8 +12601,8 @@ function matchAnswerToOptionWithMeta(answer, options) {
   return { index: null, canonicalize: false };
 }
 
-function matchAnswerToOption(answer, options) {
-  return matchAnswerToOptionWithMeta(answer, options).index;
+function matchAnswerToOption(answer, options, type) {
+  return matchAnswerToOptionWithMeta(answer, options, type).index;
 }
 
 function mapFreeTextToOptionIndex(answer, options, type) {
@@ -12399,6 +12616,10 @@ function mapFreeTextToOptionIndex(answer, options, type) {
 
   // カテゴリ差し替え3択（slot4/5/6）の意味マッピング
   if (options.length === 3) {
+    if (type === "duration") {
+      const tier = parseDurationDayTierFromText(text);
+      if (tier !== null) return tier;
+    }
     // SKIN: 見た目
     if (indexOf("水ぶくれ・ただれ・できもの") >= 0) {
       if (/水ぶくれ|ただれ|できもの/.test(text)) return 2;
@@ -12551,7 +12772,7 @@ function hasConcreteCauseDetail(text) {
 }
 
 function classifyAnswerToOption(answer, options, type) {
-  const meta = matchAnswerToOptionWithMeta(answer, options);
+  const meta = matchAnswerToOptionWithMeta(answer, options, type);
   if (meta.index !== null) {
     return {
       index: meta.index,
@@ -13800,6 +14021,13 @@ app.post("/api/chat", async (req, res) => {
         }
         conversationState[conversationId].slotAnswers[type] =
           valueForDisplay || lastOptionsSnapshot[selectedIndex];
+        if (type === "duration" && selectedIndex !== null && selectedIndex !== undefined) {
+          conversationState[conversationId].durationMeta = {
+            selectedIndex,
+            raw_text: lastOptionsSnapshot[selectedIndex] || "",
+            normalized: selectedIndex === 2 ? "day_or_more" : selectedIndex === 1 ? "hours" : "short",
+          };
+        }
         let normalized = buildNormalizedAnswer(
           type,
           lastOptionsSnapshot[selectedIndex],
@@ -14916,7 +15144,7 @@ app.post("/api/state-patterns", async (req, res) => {
   try {
     const { conversationId, summaryFacts, summarySection } = req.body || {};
     const state = conversationId ? getOrInitConversationState(conversationId) : initConversationState();
-    const { message, structured, triageLevel, query, queryJP, queryEN, sourceNames } =
+    const { message, structured, triageLevel, mainSymptom, query, queryJP, queryEN, sourceNames } =
       await buildConcreteStateDetailsFromSearch(
         state,
         Array.isArray(summaryFacts) ? summaryFacts : [],
@@ -14929,6 +15157,7 @@ app.post("/api/state-patterns", async (req, res) => {
       message,
       structured: structured || undefined,
       triageLevel: triageLevel || undefined,
+      mainSymptom: mainSymptom || undefined,
       sourcePolicy: [
         "公的機関",
         "大学病院",
@@ -14951,7 +15180,11 @@ app.post("/api/state-patterns", async (req, res) => {
     const cid = (req.body && req.body.conversationId) || null;
     const errState = cid ? getOrInitConversationState(cid) : null;
     const errLevel = errState ? errState.decisionLevel || finalizeRiskLevel(errState) : "🟢";
-    const reassuranceHead = getGreenYellowModalReassuranceHeading(errLevel);
+    const middleHead = getGreenYellowModalMiddleBlockHeading(errLevel);
+    const middleBullet =
+      errLevel === "🟡"
+        ? "・経過や付随症状が変わると判断が変わる → 注意して見る必要がある"
+        : "・強い緊急サインが直ちに重なっている情報は今のところ見えていません";
     return res.status(200).json({
       message: [
         "今の状態は、次のようなパターンと似ています。",
@@ -14961,13 +15194,8 @@ app.post("/api/state-patterns", async (req, res) => {
         "強さが上がるか、同じ強さのまま続くかが、次の判断ポイントです。",
         "新しい症状が加わらないかを、短い間隔で確認していくのが安全です。",
         "",
-        reassuranceHead,
-        "・強い緊急サインが直ちに重なっている情報は今のところ見えていません",
-        "",
-        "こんな変化があれば受診を検討",
-        "・痛みやつらさが短時間で強まる",
-        "・新しい強い症状が加わる",
-        "・数時間たっても改善の動きが見えない",
+        middleHead,
+        middleBullet,
       ].join("\n"),
       triageLevel: errLevel,
       sourcePolicy: [],

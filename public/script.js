@@ -594,16 +594,19 @@ function setConcreteModalBody(textOrStructured) {
 const GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK =
   "今すぐ受診しても、得られる対応は自宅と大きく変わりません。\n逆に動くと悪化しやすいので、休む方が合理的です。";
 
-/** 納得文の直後（改行のうえ）に必ず1文。①を第一優先（②③は仕様書・将来差し替え用） */
-const GREEN_YELLOW_MODAL_SYMPTOM_COMMONNESS_PRIMARY =
-  "このような症状は、多くの人にも見られる比較的よくあるものです。";
-
-/** 🟢/🟡モーダル：`reassuranceBullets` ブロック見出し（中身は同一） */
-function getGreenYellowModalReassuranceHeadingClient(triageLevel) {
-  return triageLevel === "🟡" ? "今すぐ受診が必要ではない理由" : "現時点の安心材料";
+/** 🟢/🟡モーダル：🟢は安心材料／🟡は注意理由（本文は `reassuranceBullets` / `cautionWhyBullets`） */
+function getGreenYellowModalMiddleBlockHeadingClient(triageLevel) {
+  if (triageLevel === "🟡") return "なぜ注意が必要か";
+  return "現時点の安心材料";
 }
 
-function renderStructuredStateModal(body, { structured, message, triageLevel }) {
+/** サーバ `buildGreenYellowStateModalBridgeLine` と同文言（`mainSymptom` は API 応答で同期） */
+function buildGreenYellowStateModalBridgeLineClient(mainSymptom) {
+  const label = String(mainSymptom || "").trim() || "症状";
+  return `👉 今回の状態は、よくある${label}のパターンに当てはまっています`;
+}
+
+function renderStructuredStateModal(body, { structured, message, triageLevel, mainSymptom }) {
   const s = structured;
   if (!s) {
     body.textContent = message || "";
@@ -614,22 +617,22 @@ function renderStructuredStateModal(body, { structured, message, triageLevel }) 
   lines.push("🟢 よくある原因");
   (s.common || []).forEach((c) => lines.push(c.startsWith("・") ? c : `・${c}`));
   if (triageLevel === "🟢" || triageLevel === "🟡") {
-    lines.push("👉 今回の症状ここに当てはまる可能性が高い");
+    lines.push(buildGreenYellowStateModalBridgeLineClient(mainSymptom));
     lines.push("");
   }
   lines.push("🟡 状況によっては確認が必要");
   (s.conditional || []).forEach((c) => lines.push(c.startsWith("・") ? c : `・${c}`));
   lines.push("");
   if (triageLevel === "🟢" || triageLevel === "🟡") {
+    lines.push(getGreenYellowModalMiddleBlockHeadingClient(triageLevel));
+    if (triageLevel === "🟢") {
+      (s.reassuranceBullets || []).forEach((b) => lines.push(b));
+    } else {
+      (s.cautionWhyBullets || []).forEach((b) => lines.push(b));
+    }
+    lines.push("");
     const conv = String(s.acceptanceConviction || "").trim() || GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK;
     lines.push(conv);
-    lines.push(GREEN_YELLOW_MODAL_SYMPTOM_COMMONNESS_PRIMARY);
-    lines.push("");
-    lines.push(getGreenYellowModalReassuranceHeadingClient(triageLevel));
-    (s.reassuranceBullets || []).forEach((b) => lines.push(b));
-    lines.push("");
-    lines.push("こんな変化があれば受診を検討");
-    (s.consultChangeBullets || []).forEach((b) => lines.push(b));
   } else if (triageLevel === "🔴") {
     lines.push(s.reassuranceCommon || "");
     lines.push("");
@@ -700,6 +703,7 @@ async function fetchStatePatterns(blockContent) {
     message: data?.message || "このような症状では、情報を追加で整理すると判断の見通しが立てやすくなります。",
     structured: data?.structured || null,
     triageLevel: data?.triageLevel || null,
+    mainSymptom: data?.mainSymptom || null,
   };
 }
 
@@ -711,14 +715,23 @@ async function showConcreteStateDetails(blockContent) {
   try {
     const data = await fetchStatePatterns(blockContent);
     if (data.structured) {
-      setConcreteModalBody({ message: data.message, structured: data.structured, triageLevel: data.triageLevel });
+      setConcreteModalBody({
+        message: data.message,
+        structured: data.structured,
+        triageLevel: data.triageLevel,
+        mainSymptom: data.mainSymptom,
+      });
     } else {
       setConcreteModalBody(data.message);
     }
   } catch (error) {
     console.error("具体化モーダル生成エラー:", error);
-    const reassuranceHeading =
-      appState.riskLevel === "YELLOW" ? "今すぐ受診が必要ではない理由" : "現時点の安心材料";
+    const middleHeading =
+      appState.riskLevel === "YELLOW" ? "なぜ注意が必要か" : "現時点の安心材料";
+    const middleBullet =
+      appState.riskLevel === "YELLOW"
+        ? "・経過や付随症状が変わると判断が変わる → 注意して見る必要がある"
+        : "・今わかっている範囲では、強い緊急サインははっきりしていません";
     setConcreteModalBody(
       [
         "あなたの状態の理解を深める",
@@ -728,13 +741,8 @@ async function showConcreteStateDetails(blockContent) {
         "■ 一時的な体調変化のパターン",
         "このような症状では、日内の負荷や睡眠、食事などで一時的に不調が強まることがあります。",
         "",
-        reassuranceHeading,
-        "・今わかっている範囲では、強い緊急サインははっきりしていません",
-        "",
-        "こんな変化があれば受診を検討",
-        "・痛みやつらさが急に強くなる",
-        "・動きづらさがはっきり増える",
-        "・新しい強い症状が加わる",
+        middleHeading,
+        middleBullet,
       ].join("\n")
     );
   } finally {
