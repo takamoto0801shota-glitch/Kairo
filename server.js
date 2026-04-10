@@ -5857,6 +5857,13 @@ function extractSeverityFromText(text) {
   };
 }
 
+/** 痛み方スロット用：単に「重い」「響く」等だけでは誤爆しやすいので、症状・患部の文脈があるときのみ true。 */
+function hasSymptomContextForPainQualityPhrase(normalized) {
+  return /(痛|痛み|頭痛|腹痛|歯痛|腰痛|のど|喉|咽頭|症状|違和感|しびれ|めまい|咳|熱|だる|吐き気|腫|脹|張り|刺す|締め|鈍い|響く|打つ|叩|ズキ|キリ|ヒリ|チク|ジン|ピリ|ヒリ|ひり|耳鳴|関節|膝|肘|肩|背中|胸|腹|歯|唇|目|皮膚)/.test(
+    normalized
+  );
+}
+
 /** ②痛み方・質（ズキズキ等）のみ。痛みの変化・トレンド（段々／悪化傾向）は③.５ worsening_trend で扱う。 */
 function extractWorseningFromText(text) {
   const normalized = normalizeUserText(text);
@@ -5890,6 +5897,7 @@ function extractWorseningFromText(text) {
   ];
   const quality = qualityWords.find((w) => normalized.includes(w)) || null;
   if (!quality) return null;
+  if (!hasSymptomContextForPainQualityPhrase(normalized)) return null;
 
   return { trend: null, quality, raw: quality, selectedIndex: null };
 }
@@ -6332,7 +6340,13 @@ function extractCauseCategory(text) {
   if (m) {
     return { raw: ((mRaw && mRaw[1]) || m[1] || rawText).trim(), selectedIndex: 1 };
   }
-  if (/(かも|と思う|かもしれない)/.test(normalized) && normalized.length <= 30) {
+  if (
+    /(かも|と思う|かもしれない)/.test(normalized) &&
+    normalized.length <= 36 &&
+    /(痛|熱|だる|咳|症状|頭|腹|歯|のど|喉|吐き気|寒|しびれ|めまい|体|身体|胸|お腹|胃|関節|肌|唇|目|耳|鼻|風邪|倦怠|不調|違和)/.test(
+      normalized
+    )
+  ) {
     return { raw: rawText || normalized.trim(), selectedIndex: 2 };
   }
   return null;
@@ -6656,6 +6670,58 @@ function mustAskPainScoreBeforeOtherSlots(state) {
   return !isPainScoreSlotAnswered(state);
 }
 
+/**
+ * 自発補充で入れた raw が、現在の抽出器でも再現できるか（誤認で埋めたスロットを解除する）。
+ * 明示質問で答えたスロット（askedSlots）は再検証しない。
+ */
+function spontaneousFillMatchesStoredExtractor(slotKey, rawAnswer, state) {
+  const raw = String(rawAnswer || "").trim();
+  if (!raw) return false;
+  try {
+    switch (slotKey) {
+      case "duration":
+        return !!extractDurationFromText(raw);
+      case "worsening":
+        return !!extractWorseningFromText(raw);
+      case "worsening_trend":
+        return !!extractWorseningTrendFromText(raw);
+      case "daily_impact":
+        return !!(extractImpactFromText(raw) || extractTemperatureForDailyImpact(raw));
+      case "cause_category":
+        return !!extractCauseCategory(raw);
+      case "associated_symptoms":
+        return !!extractAssociatedSymptoms(raw);
+      default:
+        return true;
+    }
+  } catch (_) {
+    return false;
+  }
+}
+
+function clearNonPainSlot(state, slotKey) {
+  if (!state || !slotKey || slotKey === "pain_score") return;
+  state.slotFilled[slotKey] = false;
+  if (state.slotAnswers) state.slotAnswers[slotKey] = "";
+  if (state.slotNormalized) state.slotNormalized[slotKey] = null;
+  const statusKey = SLOT_STATUS_KEY_MAP[slotKey];
+  if (statusKey && state.slotStatus?.[statusKey]) {
+    state.slotStatus[statusKey].filled = false;
+    state.slotStatus[statusKey].value = null;
+  }
+  if (slotKey === "associated_symptoms") {
+    state.associatedSymptomsFromFirstMessage = false;
+    state.associatedSymptoms = [];
+  }
+  if (slotKey === "duration") {
+    state.durationMeta = null;
+  }
+  if (slotKey === "worsening") {
+    state.worseningMeta = null;
+  }
+  state.confidence = computeConfidenceFromSlots(state.slotFilled, state);
+}
+
 /** slotFilled と slotAnswers/slotStatus の整合性を保ち、不正な埋まりを解除する */
 function ensureSlotFilledConsistency(state) {
   if (!state || !state.slotFilled) return;
@@ -6698,6 +6764,14 @@ function ensureSlotFilledConsistency(state) {
         state.slotStatus[statusKey].filled = false;
         state.slotStatus[statusKey].value = null;
       }
+    } else if (
+      state.slotFilled[slotKey] &&
+      isValid &&
+      hasValue(rawAnswer) &&
+      !state.askedSlots?.[slotKey] &&
+      !spontaneousFillMatchesStoredExtractor(slotKey, rawAnswer, state)
+    ) {
+      clearNonPainSlot(state, slotKey);
     }
   }
 }
@@ -7490,7 +7564,7 @@ function collectMainSymptomPhrasesForBulletFilter(state) {
   add(state.primarySymptom);
   add(state?.judgmentSnapshot?.main_symptom);
   add(compactMainSymptomNounForRed(state));
-  add(toMainSymptomForDiseaseSearch(state));
+  add(getSyncedMainSymptomDisplayLabel(state));
   const first = getFirstUserMessageTextForState(state);
   if (first) {
     add(toMainSymptomLabelForSafety(first));
@@ -7521,13 +7595,13 @@ function isMainSymptomOnlyBulletLine(state, bulletLine) {
     }
     if (loose.length >= 4 && loose.length <= pLoose.length + 8 && loose.includes(pLoose)) return true;
   }
-  const dis = toMainSymptomForDiseaseSearch(state);
+  const synced = getSyncedMainSymptomDisplayLabel(state);
   const labelForInner = toMainSymptomLabelForSafety(inner);
   if (
-    dis &&
-    labelForInner === dis &&
-    dis !== "症状" &&
-    dis !== "体調不良" &&
+    synced &&
+    labelForInner === synced &&
+    synced !== "症状" &&
+    synced !== "体調不良" &&
     inner.length <= 40 &&
     !/\d|続い|時間|日前|悪化|痛みは|\/10|体温|発熱|咳|鼻|めまい|しびれ|日常生活|影響|きっかけ|原因|付随|吐き気|嘔吐|ズキ|キリ|の可能性|ような/.test(
       inner
@@ -7536,7 +7610,7 @@ function isMainSymptomOnlyBulletLine(state, bulletLine) {
     return true;
   }
 
-  const canonical = dis;
+  const canonical = synced;
   const onlyMainPatterns = {
     頭痛: /^頭痛(がある|が出ている)?$/,
     腹痛: /^腹痛(がある|が出ている)?$/,
@@ -8599,8 +8673,11 @@ async function polishConfirmationBulletsWithLlm(state) {
       "【文体】敬語（です・ます・ございます・でした・ました等）は使わない。常体・言い切りで短く（体言止め、〜だ、〜ある、〜の可能性 など）。",
       "【禁止表現】「が出ている」は使わない（言い換え・省略で除去）。",
       "【必須】次の事実を落とさないこと。数値（痛みの/10 等）・経過の日数・ユーザーが述べた症状・原因の可能性の内容は維持または言い換えのみ。",
+      "【必須】ユーザーの意図・主張を取り違えない。推測で足りない情報を補わない。言い換えは原文の意味を変えない範囲に限定する。",
       "【禁止】新しい症状・病名の推定・受診判断・入力にない事実の追加。",
-      "【形式】各行は「・」で始まる1行。行数は入力と同程度（最大14行）。重複行は統合してよい。",
+      "【禁止・サボり対策】複数行を1行に寄せて曖昧な要約にする・行数を不当に減らすこと。根拠テキストのスロット別の事実は、可能な限り別行で区別して残す。",
+      "【禁止】「不調」「症状がある」「状態が気になる」など具体性を失う言い換えだけに置き換えること。元の箇条書きより情報量を落としてはいけない。",
+      "【形式】各行は「・」で始まる1行。行数は入力と同程度（最大14行）。完全に同一趣旨の重複のみ統合してよい。",
       '厳密なJSON: {"bullets":["・...","・...",...]} のみ。説明文は禁止。',
     ].join("\n");
     const completion = await openai.chat.completions.create({
@@ -8610,7 +8687,7 @@ async function polishConfirmationBulletsWithLlm(state) {
         {
           role: "user",
           content: [
-            "次の箇条書きは自動生成のため、日本語としてかなりぎこちない。根拠テキストの事実は変えず、文体だけきれいに整えてください。",
+            "次の箇条書きは自動生成のため、日本語としてかなりぎこちない。根拠テキストの事実は変えず、文体だけきれいに整えてください。行をまとめすぎず、スロットごとの内容は落とさないこと。",
             "",
             `【根拠テキスト（スロット・自由記述）】\n${String(raw || "").slice(0, 6000)}`,
             "",
@@ -8618,12 +8695,13 @@ async function polishConfirmationBulletsWithLlm(state) {
           ].join("\n"),
         },
       ],
-      temperature: 0.35,
-      max_tokens: 1000,
+      temperature: 0.2,
+      max_tokens: 1200,
     });
     const text = completion?.choices?.[0]?.message?.content || "";
     const parsed = parseJsonObjectFromText(text);
     if (!parsed || !Array.isArray(parsed.bullets) || parsed.bullets.length === 0) return;
+    const prePolish = bulletsIn.slice();
     const out = parsed.bullets
       .map((s) => {
         const t = String(s || "").trim();
@@ -8634,8 +8712,28 @@ async function polishConfirmationBulletsWithLlm(state) {
       .filter(Boolean)
       .slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS);
     if (out.length === 0) return;
+    let merged = sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(out), state);
+    merged = mergeRawSlotInputsIntoBullets(state, merged);
+    merged = sanitizeBulletPoints(merged, state);
+    let cov = validateBulletCoverageFromRaw(state, merged);
+    if (!cov.ok && cov.missing?.length) {
+      merged = appendMissingRawValuesAsBullets(merged, cov.missing, state);
+      merged = sanitizeBulletPoints(merged, state);
+      cov = validateBulletCoverageFromRaw(state, merged);
+    }
+    if (!cov.ok) {
+      console.warn("[KAIRO] polishConfirmationBulletsWithLlm: raw coverage failed after polish; reverting to pre-polish", {
+        conversationId: state.conversationId,
+        missingSample: (cov.missing || []).slice(0, 5),
+      });
+      state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
+        sanitizeBulletPoints(prePolish, state),
+        state
+      );
+      return;
+    }
     state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
-      sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(out), state),
+      sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(merged), state).slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS),
       state
     );
   } catch (e) {
@@ -8858,6 +8956,14 @@ function greenYellowPatternNounForTemporary(state) {
   return "体調不良";
 }
 
+/**
+ * 初回安全文の〇〇・🟢🟡②「一時的な〇〇」・🤝/📝 モーダル橋渡し「よくある〇〇」・API `mainSymptom`（表示同期用）の単一ソース（KAIRO_SPEC 14.4・§🤝/📝）。
+ * 疾患検索は `toMainSymptomForDiseaseSearch` を別途使う（カテゴリ最適化のため表示ラベルと分岐しうる）。
+ */
+function getSyncedMainSymptomDisplayLabel(state) {
+  return greenYellowPatternNounForTemporary(state);
+}
+
 function stripBulletLead(line) {
   return String(line || "").replace(/^・\s*/, "").trim();
 }
@@ -8900,6 +9006,8 @@ function applyKairoSpec647ComboShortLabelFilter(raw) {
   if (s.length > KAIRO_COMBO_SHORT_LABEL_MAX_CHARS) {
     s = `${s.slice(0, KAIRO_COMBO_SHORT_LABEL_MAX_CHARS - 1)}…`;
   }
+  if (/^奥に/.test(s) && !/目の奥/.test(s)) return "";
+  if (s === "にある" || /^にある…?$/.test(s)) return "";
   return s.trim();
 }
 
@@ -8913,7 +9021,9 @@ function finalizeComboLabelForCombinationLine(label) {
   const t = String(label || "").trim();
   if (!t) return "";
   const shortened = applyKairoSpec647ComboShortLabelFilter(t);
-  return shortened || t;
+  let out = shortened || t;
+  if (/^奥に/.test(out) && !/目の奥/.test(out)) return "";
+  return out;
 }
 
 /**
@@ -8981,7 +9091,7 @@ async function finalizeCombinationPartsWithLlm(state, rawParts) {
   return heuristic;
 }
 
-/** 組み合わせ行の逆優先度：きっかけ・痛み方はなるべく出さない（数値が高いほど先に採用） */
+/** 組み合わせ行の逆優先度：きっかけ・痛み方はなるべく出さない（数値が高いほど先に採用）。※きっかけ本文は `buildNaturalClauseFromComboParts` でスロットから別途注入も可 */
 const COMBO_INV_PRI_CAUSE = 8;
 const COMBO_INV_PRI_PAIN_TYPE = 10;
 const COMBO_INV_PRI_NORMAL = 88;
@@ -8989,6 +9099,9 @@ const COMBO_INV_PRI_NORMAL = 88;
 function inferComboBulletInverseKind(s) {
   const t = String(s || "");
   if (/^痛みは\s*\d+\s*\/\s*10/.test(t)) return "pain_score";
+  if (/^きっかけ|きっかけは|きっかけ・|思い当たる|刺激物|紫外線|乾燥|湿気|冷え込|日差し|寝不足|パソコン|画面を|長時間/.test(t)) {
+    return "cause";
+  }
   if (
     /可能性|きっかけ|負担の可能性|影響している|ストレス|睡眠不足|寝不足|スマホ|画面|食事|運動|きっかけは|思い当たる/.test(
       t
@@ -9328,39 +9441,160 @@ function shouldUseWindyColdOnsetPatternForStateAbout(state) {
   return associatedSymptomsImpliesCoughOrNasalForWindPattern(state);
 }
 
+/** 組み合わせ短語の粗い分類（①を一文に繋ぐため） */
+function classifyComboPartLabel(p) {
+  const s = String(p).trim();
+  if (!s) return "other";
+  if (inferComboBulletInverseKind(s) === "cause") return "cause";
+  if (/悪化していない|横ばい|変わらない|同じ/.test(s)) return "trend_stable";
+  if (/回復|改善|まし|楽にな/.test(s)) return "trend_recover";
+  if (/悪化傾向|悪化|ひどくなっ|強くなっ/.test(s)) return "trend_worse";
+  if (/日|週|時間|さっき|数時間|数十分|今朝|昨日|一昨日|続い|発症から時間が短い|症状が続い|短い経過|一時的な可能性/.test(s)) {
+    return "duration";
+  }
+  return "other";
+}
+
 /**
- * 🤝🟢🟡 ② 状態の意味（パターン化）の2行。🟢 と 🟡 で②本文のみ異なる（〇〇 は `greenYellowPatternNounForTemporary` 共通）。
+ * きっかけスロットを書き言葉に整えた短文（🟢🟡組み合わせ段落の先頭に「〜があり、」で接続する用）。
+ * LOW〜MEDIUM のときのみ（`comboSlotAllowsGreenYellowCombo` と一致）。
  */
-function buildGreenYellowStateAboutPatternLines(state, level) {
-  const lv = level === "🟡" || level === "🟢" ? level : finalizeRiskLevel(state);
-  if (shouldUseWindyColdOnsetPatternForStateAbout(state)) {
-    if (lv === "🟡") {
-      return [
-        "この組み合わせは、",
-        "風の初期症状としてよく見られる一方で、注意が必要なサインも含まれます。",
-      ];
+function getPolishedCauseForGreenYellowCombo(state) {
+  if (!state || !comboSlotAllowsGreenYellowCombo(state, "cause_category")) return "";
+  const raw = String(
+    state?.causeDetailText ||
+      getSlotStatusValue(state, "cause_category", state?.slotAnswers?.cause_category || "") ||
+      ""
+  ).trim();
+  if (!raw || isAbsentOrUnknownSlotBulletAnswer(raw)) return "";
+  let w = polishCausePhraseToWrittenJapanese(raw);
+  if (!w) return "";
+  if (w.length > 52) w = `${w.slice(0, 50)}…`;
+  return w;
+}
+
+function expandDurationPhraseForComboSentence(p) {
+  const s = String(p).trim();
+  const mNum = s.match(/^(\d+)日前$/);
+  if (mNum) return `${mNum[1]}日前から続いている`;
+  if (/^(一昨日|昨日|今朝)$/.test(s)) return `${s}から続いている`;
+  if (s === "症状が続いている") return "症状が続いている";
+  if (s === "発症から時間が短い") return "発症から時間が短い";
+  if (/（一時的な可能性）/.test(s)) return s;
+  if (/さっき|数時間前|数十分|今さっき/.test(s)) {
+    return /から/.test(s) ? s : `${s}から続いている`;
+  }
+  return s;
+}
+
+function expandTrendPhraseForComboSentence(kind, p) {
+  if (kind === "trend_recover") return "回復傾向にある";
+  if (kind === "trend_worse") return "悪化傾向にある";
+  if (kind === "trend_stable") return "大きく悪化していない";
+  return String(p).trim();
+}
+
+function mergeDurationAndTrendPhrases(durExpanded, trendExp) {
+  if (!durExpanded && !trendExp) return "";
+  if (durExpanded && !trendExp) return durExpanded;
+  if (!durExpanded && trendExp) return trendExp;
+  if (
+    durExpanded.endsWith("続いている") &&
+    /^回復傾向にある|悪化傾向にある|大きく悪化していない/.test(trendExp)
+  ) {
+    return durExpanded.replace(/続いている$/, "続いていて") + trendExp;
+  }
+  return `${durExpanded}うえで${trendExp}`;
+}
+
+/**
+ * 「＋」列挙の代わりに、組み合わせ短語から「〜ことから、」に繋がる一文の主部を組み立てる（🟢🟡①＋②一体化）。
+ * きっかけはスロット由来を整形して先頭に接続（parts 内のきっかけ短語は重複回避で除外）。
+ */
+function buildNaturalClauseFromComboParts(parts, state) {
+  let labels = (parts || []).map((p) => String(p).trim()).filter(Boolean);
+  const causeW = state ? getPolishedCauseForGreenYellowCombo(state) : "";
+  if (causeW) {
+    labels = labels.filter((p) => inferComboBulletInverseKind(p) !== "cause");
+  }
+
+  if (labels.length === 0 && !causeW) return "";
+
+  const items = labels.map((label) => ({ label, kind: classifyComboPartLabel(label) }));
+  const dur = items.find((x) => x.kind === "duration");
+  const trend = items.find(
+    (x) => x.kind === "trend_recover" || x.kind === "trend_worse" || x.kind === "trend_stable"
+  );
+  const used = new Set([dur?.label, trend?.label].filter(Boolean));
+  const others = items.filter((x) => !used.has(x.label) && x.kind !== "cause");
+
+  const durEx = dur ? expandDurationPhraseForComboSentence(dur.label) : "";
+  const trEx = trend ? expandTrendPhraseForComboSentence(trend.kind, trend.label) : "";
+  let core = mergeDurationAndTrendPhrases(durEx, trEx);
+
+  const otherBits = others
+    .filter((o) => o.kind !== "cause")
+    .map((o) => o.label)
+    .filter(Boolean);
+  if (otherBits.length) {
+    const extra = otherBits.join("、");
+    if (core) {
+      if (otherBits.length === 1 && otherBits[0].length <= 12) {
+        core = `${extra}があり、${core}`;
+      } else {
+        core = `${extra}が重なり、${core}`;
+      }
+    } else {
+      core = `${extra}が重なる`;
     }
-    return ["この組み合わせは、", "風の初期症状としてよく見られるパターンです。"];
   }
+
+  if (causeW) {
+    if (core) {
+      core = `${causeW}があり、${core}`;
+    } else {
+      core = `${causeW}が考えられる`;
+    }
+  }
+
+  if (!core) return labels.length ? labels.join("、") : "";
+  return core;
+}
+
+/**
+ * 🤝🟢🟡 ①の「＋」列挙と②パターン文を1段落に統合（KAIRO_SPEC・「〜ことから、一時的な〇〇として…」）。
+ */
+function buildGreenYellowComboIntegratedParagraph(state, level, parts) {
+  const lv = level === "🟡" || level === "🟢" ? level : finalizeRiskLevel(state);
+  const windy = shouldUseWindyColdOnsetPatternForStateAbout(state);
+  const clause = buildNaturalClauseFromComboParts(parts, state);
+
+  if (windy) {
+    const lead = clause ? `${clause}ことから、` : `これらの症状の組み合わせから、`;
+    if (lv === "🟡") {
+      return `${lead}風の初期症状としてよく見られる一方で、注意が必要なサインも含まれます。`;
+    }
+    return `${lead}風の初期症状としてよく見られるパターンです。`;
+  }
+
   const noun = greenYellowPatternNounForTemporary(state);
+  const lead = clause ? `${clause}ことから、` : `今の状態の組み合わせから、`;
   if (lv === "🟡") {
-    return [
-      "この組み合わせは、",
-      `一時的な${noun}としてよく見られる一方で、注意が必要なサインも含まれます。`,
-    ];
+    return `${lead}一時的な${noun}としてよく見られる一方で、注意が必要なサインも含まれます。`;
   }
-  return ["この組み合わせは、", `一時的な${noun}としてよく見られるパターンです。`];
+  return `${lead}一時的な${noun}としてよく見られるパターンです。`;
 }
 
 /** 🤝🟢🟡 専用：共感廃止・3 ブロック固定（KAIRO_SPEC）。短語はヒューリスティックのみ。 */
 function buildGreenYellowStateAboutBlock(state, level) {
   const rawParts = collectGreenYellowLowMediumCombinationParts(state);
-  const parts = rawParts.map((p) => finalizeComboLabelForCombinationLine(p)).filter(Boolean);
-  const comboInner = parts.map((p) => `「${p}」`).join("＋");
-  const patternLines = buildGreenYellowStateAboutPatternLines(state, level);
+  let parts = rawParts.map((p) => finalizeComboLabelForCombinationLine(p)).filter(Boolean);
+  if (parts.length < 2) {
+    parts = rawParts.map((p) => String(p || "").trim()).filter(Boolean);
+  }
+  const integrated = buildGreenYellowComboIntegratedParagraph(state, level, parts);
   return [
-    `${comboInner}状態です。`,
-    ...patternLines,
+    integrated,
     "👉 今すぐ受診が必要な状態ではありません",
     "👉 まずは休んで様子を見てください",
   ].join("\n");
@@ -9369,12 +9603,14 @@ function buildGreenYellowStateAboutBlock(state, level) {
 /** 🤝🟢🟡 同上。組み合わせ「〇〇」は LLM で削ぎ落とし（KAIRO_SPEC 605）。 */
 async function buildGreenYellowStateAboutBlockAsync(state, level) {
   const rawParts = collectGreenYellowLowMediumCombinationParts(state);
-  const parts = (await finalizeCombinationPartsWithLlm(state, rawParts)).filter(Boolean);
-  const comboInner = parts.map((p) => `「${p}」`).join("＋");
-  const patternLines = buildGreenYellowStateAboutPatternLines(state, level);
+  const finalized = await finalizeCombinationPartsWithLlm(state, rawParts);
+  let parts = finalized.map((p) => finalizeComboLabelForCombinationLine(p)).filter(Boolean);
+  if (parts.length < 2) {
+    parts = finalized.map((p) => String(p || "").trim()).filter(Boolean);
+  }
+  const integrated = buildGreenYellowComboIntegratedParagraph(state, level, parts);
   return [
-    `${comboInner}状態です。`,
-    ...patternLines,
+    integrated,
     "👉 今すぐ受診が必要な状態ではありません",
     "👉 まずは休んで様子を見てください",
   ].join("\n");
@@ -10113,7 +10349,7 @@ function buildConcreteStatePatternMessage(state, summaryFacts = [], summarySecti
       reassurance.forEach((line) => lines.push(line));
     } else {
       const { userSummary } = collectModalUserFactsAndSummary(state, facts, summarySection);
-      buildYellowCautionBulletsFallback(state, userSummary, toMainSymptomForDiseaseSearch(state)).forEach((line) =>
+      buildYellowCautionBulletsFallback(state, userSummary, getSyncedMainSymptomDisplayLabel(state)).forEach((line) =>
         lines.push(line)
       );
     }
@@ -10701,6 +10937,9 @@ async function buildDiseaseSafetyFilteredMessage(
 
   const { rawFacts, userSummary } = collectModalUserFactsAndSummary(state, summaryFacts, summarySection);
 
+  /** ユーザー向けの「〇〇」（初回安全文・橋渡しと同一）。検索用 mainSymptom とは別 */
+  const mainSymptomDisplay = state ? getSyncedMainSymptomDisplayLabel(state) : mainSymptom;
+
   const fallbackPair = getDiseaseFallbackPair(mainSymptom);
   const category = state ? (state.triageCategory || resolveQuestionCategoryFromState(state)) : "PAIN";
   const reassurance = state ? buildReassuranceBulletsForPatterns(state) : ["・強い緊急サインは今のところはっきりしていません"];
@@ -10948,7 +11187,7 @@ async function buildDiseaseSafetyFilteredMessage(
   let acceptanceConviction = "";
   if (level === "🟢" || level === "🟡") {
     try {
-      acceptanceConviction = await generateGreenYellowModalAcceptanceText(mainSymptom, userSummary);
+      acceptanceConviction = await generateGreenYellowModalAcceptanceText(mainSymptomDisplay, userSummary);
     } catch (_) {
       acceptanceConviction = GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK;
     }
@@ -10961,7 +11200,7 @@ async function buildDiseaseSafetyFilteredMessage(
   if (level === "🟢") {
     reassuranceBullets = reassurance.slice(0, 3);
   } else if (level === "🟡") {
-    cautionWhyBullets = await generateYellowCautionBulletsFromSummary(mainSymptom, userSummary, state);
+    cautionWhyBullets = await generateYellowCautionBulletsFromSummary(mainSymptomDisplay, userSummary, state);
   }
 
   return {
@@ -11111,7 +11350,8 @@ function buildDiseaseFocusedModalFallback(mainSymptom, level, state = null) {
         .forEach((b) => lines.push(b));
     } else {
       const { userSummary } = collectModalUserFactsAndSummary(state, [], "");
-      buildYellowCautionBulletsFallback(state, userSummary, mainSymptom).forEach((b) => lines.push(b));
+      const displayLabel = state ? getSyncedMainSymptomDisplayLabel(state) : mainSymptom;
+      buildYellowCautionBulletsFallback(state, userSummary, displayLabel).forEach((b) => lines.push(b));
     }
   } else if (level === "🔴") {
     lines.push("今回受診をおすすめしている理由");
@@ -11231,7 +11471,7 @@ function buildEvidenceDrivenConcreteMessage(options = {}) {
     if (level === "🟢") {
       buildReassuranceBulletsForPatterns(state).slice(0, 3).forEach((b) => lines.push(b));
     } else {
-      buildYellowCautionBulletsFallback(state, "", toMainSymptomForDiseaseSearch(state)).forEach((b) =>
+      buildYellowCautionBulletsFallback(state, "", getSyncedMainSymptomDisplayLabel(state)).forEach((b) =>
         lines.push(b)
       );
     }
@@ -11426,7 +11666,7 @@ function enforceConcreteModalStructure(message, options = {}) {
         .slice(0, 3)
         .forEach((line) => out.push(line));
     } else {
-      buildYellowCautionBulletsFallback(state, "", toMainSymptomForDiseaseSearch(state)).forEach((line) =>
+      buildYellowCautionBulletsFallback(state, "", getSyncedMainSymptomDisplayLabel(state)).forEach((line) =>
         out.push(line)
       );
     }
@@ -11462,10 +11702,10 @@ function dedupeDiseaseSearchResults(results = []) {
 
 /**
  * 🤝/📝モーダル：🟢/🟡のとき、よくある原因と🟡ブロックの間に挿入する1行（KAIRO_SPEC）。
- * 埋め込みラベルは質問導入の〇〇と同じく主症状を短く簡潔にしたもの（`toMainSymptomForDiseaseSearch` と整合）。
+ * 〇〇は `getSyncedMainSymptomDisplayLabel(state)`（初回安全文・②と同一。検索用 `toMainSymptomForDiseaseSearch` とは別）。
  */
-function buildGreenYellowStateModalBridgeLine(mainSymptom) {
-  const label = String(mainSymptom || "").trim() || "症状";
+function buildGreenYellowStateModalBridgeLine(state) {
+  const label = String(getSyncedMainSymptomDisplayLabel(state) || "").trim() || "症状";
   return `👉 今回の状態は、よくある${label}のパターンに当てはまっています`;
 }
 
@@ -11476,14 +11716,15 @@ function getGreenYellowModalMiddleBlockHeading(level) {
 }
 
 async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], summarySection = "") {
-  const mainSymptom = toMainSymptomForDiseaseSearch(state);
+  const mainSymptomForSearch = toMainSymptomForDiseaseSearch(state);
+  const mainSymptomDisplay = getSyncedMainSymptomDisplayLabel(state);
   const extraTerms = collectConcreteSymptomTerms(state, summaryFacts, summarySection);
   const slotFacts = [
     ...collectSlotFactsForDiseaseSearch(state),
     ...(Array.isArray(summaryFacts) ? summaryFacts.filter(Boolean) : []),
     ...extraTerms,
   ].filter((v, i, arr) => arr.indexOf(v) === i).slice(0, 10);
-  const { queryJP, queryEN, ja, en } = buildDiseaseSearchQueries(mainSymptom, slotFacts);
+  const { queryJP, queryEN, ja, en } = buildDiseaseSearchQueries(mainSymptomForSearch, slotFacts);
 
   const allQueries = [
     ...(ja || [queryJP]).map((q) => ({ q, lang: "ja" })),
@@ -11495,12 +11736,12 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
     searchResults.flatMap((r) => (r.status === "fulfilled" && Array.isArray(r.value) ? r.value : []))
   );
   if (allResults.length === 0) {
-    const mainEn = MAIN_SYMPTOM_TO_EN_DISEASE[mainSymptom] || "symptoms";
+    const mainEn = MAIN_SYMPTOM_TO_EN_DISEASE[mainSymptomForSearch] || "symptoms";
     const retryQueries = [
-      { q: `${mainSymptom} 病名 症状`.replace(/\s{2,}/g, " ").trim().slice(0, 120), lang: "ja" },
+      { q: `${mainSymptomForSearch} 病名 症状`.replace(/\s{2,}/g, " ").trim().slice(0, 120), lang: "ja" },
       { q: `${mainEn} conditions`.trim(), lang: "en" },
-      { q: `${mainSymptom} 疾患`.replace(/\s{2,}/g, " ").trim().slice(0, 80), lang: "ja" },
-      { q: `${mainSymptom} 症状 説明`.replace(/\s{2,}/g, " ").trim().slice(0, 100), lang: "ja" },
+      { q: `${mainSymptomForSearch} 疾患`.replace(/\s{2,}/g, " ").trim().slice(0, 80), lang: "ja" },
+      { q: `${mainSymptomForSearch} 症状 説明`.replace(/\s{2,}/g, " ").trim().slice(0, 100), lang: "ja" },
       { q: `${mainEn} causes`.trim(), lang: "en" },
       { q: `${mainEn} symptoms treatment`.trim(), lang: "en" },
     ];
@@ -11513,9 +11754,9 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
     allResults = dedupeDiseaseSearchResults([...allResults, ...retryItems]);
   }
   if (allResults.length === 0) {
-    const mainEn = MAIN_SYMPTOM_TO_EN_DISEASE[mainSymptom] || "symptoms";
+    const mainEn = MAIN_SYMPTOM_TO_EN_DISEASE[mainSymptomForSearch] || "symptoms";
     const [broadJa, broadEn] = await Promise.all([
-      fetchGoogleCustomSearchResults(`${mainSymptom} 医療`, "ja", 2, true),
+      fetchGoogleCustomSearchResults(`${mainSymptomForSearch} 医療`, "ja", 2, true),
       fetchGoogleCustomSearchResults(`${mainEn} medical`, "en", 2, true),
     ]);
     allResults = dedupeDiseaseSearchResults([...(broadJa || []), ...(broadEn || [])]);
@@ -11529,7 +11770,7 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
   try {
     structured = await buildDiseaseSafetyFilteredMessage(
       allResults,
-      mainSymptom,
+      mainSymptomForSearch,
       level,
       state,
       summaryFacts,
@@ -11545,7 +11786,7 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
     lines.push("🟢 よくある原因");
     structured.common.forEach((c) => lines.push(c.startsWith("・") ? c : `・${c}`));
     if (level === "🟢" || level === "🟡") {
-      lines.push(buildGreenYellowStateModalBridgeLine(mainSymptom));
+      lines.push(buildGreenYellowStateModalBridgeLine(state));
       lines.push("");
     }
     lines.push("🟡 状況によっては確認が必要");
@@ -11579,7 +11820,7 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
 
   let message = lines.length > 0
     ? lines.join("\n").trim()
-    : await buildDiseaseFocusedModalMessage(allResults, mainSymptom, level, state);
+    : await buildDiseaseFocusedModalMessage(allResults, mainSymptomForSearch, level, state);
 
   message = String(message || "")
     .replace(/このような症状では/g, "今回の経過では")
@@ -11592,14 +11833,14 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
     .trim();
 
   if (IS_DEBUG) {
-    message += `\n\n[debug]\n主症状: ${mainSymptom}\nqueryJP: ${queryJP}\nqueryEN: ${queryEN}\nsource: ${sourceNames.join(" / ")}`;
+    message += `\n\n[debug]\n主症状(表示同期): ${mainSymptomDisplay}\n主症状(検索): ${mainSymptomForSearch}\nqueryJP: ${queryJP}\nqueryEN: ${queryEN}\nsource: ${sourceNames.join(" / ")}`;
   }
 
   return {
     message,
     structured: structured ? { ...structured, triageLevel: level } : null,
     triageLevel: level,
-    mainSymptom,
+    mainSymptom: mainSymptomDisplay,
     query: `${queryJP} || ${queryEN}`,
     queryJP,
     queryEN,
@@ -13641,6 +13882,7 @@ app.post("/api/chat", async (req, res) => {
     ensureSlotFilledConsistency(conversationState[conversationId]);
     const filledBeforeTurn = countFilledSlots(conversationState[conversationId].slotFilled, conversationState[conversationId]);
     applySpontaneousSlotFill(conversationState[conversationId], message, { isFirstMessage: userMessageCountBefore === 0 });
+    ensureSlotFilledConsistency(conversationState[conversationId]);
     const isFirstUserMessage = userMessageCountBefore === 0;
     const triageCompleted = filledBeforeTurn >= getRequiredSlotCount(state) || !!state.decisionLevel;
     const summaryGenerated = !!(
@@ -14459,7 +14701,7 @@ app.post("/api/chat", async (req, res) => {
       };
       res.locals.isFixedQuestion = true;
     }
-    const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n判断スロット埋まり数: ${slotsFilledCount}/${requiredCount}\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n緊急度判定は「危険フラグ優先モデル」を使用する（Phase1: 即時RED条件 / Phase2: 重症指数）。\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が${requiredCount}以上、または判断スロットが${requiredCount}つ全て埋まった時点で必ず判定・まとめへ移行する。\n※内部計算はユーザーに表示しないこと。最終判断はまとめ直前の1回のみ実行すること。`;
+    const scoreContext = `現在の回答数: ${conversationState[conversationId].questionCount}\n判断スロット埋まり数: ${slotsFilledCount}/${requiredCount}\n未充足スロット: ${missingSlots.join(",")}\n確信度: ${confidence}%\n緊急度判定は「危険フラグ優先モデル」を使用する（Phase1: 即時RED条件 / Phase2: 重症指数）。\n重要: 次の質問は未充足スロットのみから1つ選ぶこと。既に埋まったスロットの質問は禁止。質問回数が${requiredCount}以上、または判断スロットが${requiredCount}つ全て埋まった時点で必ず判定・まとめへ移行する。\n※ユーザーの発言にそのスロットへの明確な答えが無いのに埋まっている、と感じたら未充足スロットとして質問を続ける（推測でスロットを満たさない）。\n※内部計算はユーザーに表示しないこと。最終判断はまとめ直前の1回のみ実行すること。`;
     const stLate = conversationState[conversationId];
     const histLate = conversationHistory[conversationId] || [];
     reconcilePostSummaryStateIfNeeded(stLate, histLate, clientMeta, false);

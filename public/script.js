@@ -600,7 +600,7 @@ function getGreenYellowModalMiddleBlockHeadingClient(triageLevel) {
   return "現時点の安心材料";
 }
 
-/** サーバ `buildGreenYellowStateModalBridgeLine` と同文言（`mainSymptom` は API 応答で同期） */
+/** サーバ `buildGreenYellowStateModalBridgeLine` と同文言（`mainSymptom` は `getSyncedMainSymptomDisplayLabel` と API で同期） */
 function buildGreenYellowStateModalBridgeLineClient(mainSymptom) {
   const label = String(mainSymptom || "").trim() || "症状";
   return `👉 今回の状態は、よくある${label}のパターンに当てはまっています`;
