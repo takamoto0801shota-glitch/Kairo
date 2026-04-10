@@ -541,7 +541,7 @@ function ensureConcreteModal() {
   overlay.innerHTML = `
     <div class="concrete-modal-card" role="dialog" aria-modal="true" aria-labelledby="concreteModalTitle">
       <div class="concrete-modal-header">
-        <div id="concreteModalTitle" class="concrete-modal-title">あなたの状態の理解を深める</div>
+        <div id="concreteModalTitle" class="concrete-modal-title">原因・きっかけの例（参考）</div>
         <button id="concreteModalClose" class="concrete-modal-close" type="button" aria-label="閉じる">✕</button>
       </div>
       <div id="concreteModalBody" class="concrete-modal-body">整理中です…</div>
@@ -577,6 +577,10 @@ function setConcreteModalBody(textOrStructured) {
   if (!body) return;
   body.innerHTML = "";
   if (typeof textOrStructured === "string") {
+    const titleEl = document.getElementById("concreteModalTitle");
+    if (titleEl && /原因・きっかけ/.test(textOrStructured)) {
+      titleEl.textContent = "原因・きっかけの例（参考）";
+    }
     const pre = document.createElement("pre");
     pre.style.whiteSpace = "pre-wrap";
     pre.style.fontFamily = "inherit";
@@ -603,7 +607,7 @@ function getGreenYellowModalMiddleBlockHeadingClient(triageLevel) {
 /** サーバ `buildGreenYellowStateModalBridgeLine` と同文言（`mainSymptom` は `getSyncedMainSymptomDisplayLabel` と API で同期） */
 function buildGreenYellowStateModalBridgeLineClient(mainSymptom) {
   const label = String(mainSymptom || "").trim() || "症状";
-  return `👉 今回の状態は、よくある${label}のパターンに当てはまっています`;
+  return `👉 「${label}」と関連しやすい原因・きっかけの例です（診断名ではありません）`;
 }
 
 function renderStructuredStateModal(body, { structured, message, triageLevel, mainSymptom }) {
@@ -612,8 +616,11 @@ function renderStructuredStateModal(body, { structured, message, triageLevel, ma
     body.textContent = message || "";
     return;
   }
+  const titleEl = document.getElementById("concreteModalTitle");
+  if (titleEl) titleEl.textContent = "原因・きっかけの例（参考）";
   const showRareByDefault = triageLevel === "🔴";
   const lines = [];
+  lines.push("原因・きっかけの例（一般医学的な整理・参考）", "");
   lines.push("🟢 よくある原因");
   (s.common || []).forEach((c) => lines.push(c.startsWith("・") ? c : `・${c}`));
   if (triageLevel === "🟢" || triageLevel === "🟡") {
@@ -734,12 +741,12 @@ async function showConcreteStateDetails(blockContent) {
         : "・今わかっている範囲では、強い緊急サインははっきりしていません";
     setConcreteModalBody(
       [
-        "あなたの状態の理解を深める",
+        "原因・きっかけの例（一般医学的な整理・参考）",
         "",
-        "今の状態は、次のようなパターンと似ています。",
+        "よくある原因の例（参考）",
         "",
-        "■ 一時的な体調変化のパターン",
-        "このような症状では、日内の負荷や睡眠、食事などで一時的に不調が強まることがあります。",
+        "・生活リズムの乱れや睡眠不足 → 自律神経のバランスが崩れやすくなるとされ、不調の出やすさに関与することがあります。",
+        "・ストレスや疲労の蓄積 → 筋肉の緊張や神経の過敏化が関与しうるとされています。",
         "",
         middleHeading,
         middleBullet,
