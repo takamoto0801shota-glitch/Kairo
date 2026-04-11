@@ -9147,7 +9147,7 @@ async function finalizeCombinationPartsWithLlm(state, rawParts) {
   return heuristic;
 }
 
-/** 組み合わせ行の逆優先度：きっかけ・痛み方はなるべく出さない（数値が高いほど先に採用）。※きっかけ本文は `buildNaturalClauseFromComboParts` でスロットから別途注入も可 */
+/** 組み合わせ行の逆優先度：きっかけ・痛み方はなるべく出さない（数値が高いほど先に採用）。※きっかけ本文は `buildGreenYellowComboPlusClause` で先頭項として注入も可 */
 const COMBO_INV_PRI_CAUSE = 8;
 const COMBO_INV_PRI_PAIN_TYPE = 10;
 const COMBO_INV_PRI_NORMAL = 88;
@@ -9166,7 +9166,7 @@ function inferComboBulletInverseKind(s) {
     return "cause";
   }
   if (
-    /のような痛み|する痛み|タイプの痛み|痛み方|締め付けられる|ズキズキ|キリキリ|ヒリヒリ|チクチク|ジンジン|ドクドク/.test(
+    /のような痛み|する痛み|タイプの痛み|痛み方|締め付けられる|ズキズキ|キリキリ|ヒリヒリ|チクチク|ジンジン|ドクドク|グングン|ガンガン/.test(
       t
     )
   ) {
@@ -9497,22 +9497,8 @@ function shouldUseWindyColdOnsetPatternForStateAbout(state) {
   return associatedSymptomsImpliesCoughOrNasalForWindPattern(state);
 }
 
-/** 組み合わせ短語の粗い分類（①を一文に繋ぐため） */
-function classifyComboPartLabel(p) {
-  const s = String(p).trim();
-  if (!s) return "other";
-  if (inferComboBulletInverseKind(s) === "cause") return "cause";
-  if (/悪化していない|横ばい|変わらない|同じ/.test(s)) return "trend_stable";
-  if (/回復|改善|まし|楽にな/.test(s)) return "trend_recover";
-  if (/悪化傾向|悪化|ひどくなっ|強くなっ/.test(s)) return "trend_worse";
-  if (/日|週|時間|さっき|数時間|数十分|今朝|昨日|一昨日|続い|発症から時間が短い|症状が続い|短い経過|一時的な可能性/.test(s)) {
-    return "duration";
-  }
-  return "other";
-}
-
 /**
- * きっかけスロットを書き言葉に整えた短文（🟢🟡組み合わせ段落の先頭に「〜があり、」で接続する用）。
+ * きっかけスロットを書き言葉に整えた短文（🟢🟡「〇〇＋〇〇」列の先頭項に使う）。
  * LOW〜MEDIUM のときのみ（`comboSlotAllowsGreenYellowCombo` と一致）。
  */
 function getPolishedCauseForGreenYellowCombo(state) {
@@ -9529,101 +9515,32 @@ function getPolishedCauseForGreenYellowCombo(state) {
   return w;
 }
 
-function expandDurationPhraseForComboSentence(p) {
-  const s = String(p).trim();
-  const mNum = s.match(/^(\d+)日前$/);
-  if (mNum) return `${mNum[1]}日前から続いている`;
-  if (/^(一昨日|昨日|今朝)$/.test(s)) return `${s}から続いている`;
-  if (s === "症状が続いている") return "症状が続いている";
-  if (s === "発症から時間が短い") return "発症から時間が短い";
-  if (/（一時的な可能性）/.test(s)) return s;
-  if (/さっき|数時間前|数十分|今さっき/.test(s)) {
-    return /から/.test(s) ? s : `${s}から続いている`;
-  }
-  return s;
-}
-
-function expandTrendPhraseForComboSentence(kind, p) {
-  if (kind === "trend_recover") return "回復傾向にある";
-  if (kind === "trend_worse") return "悪化傾向にある";
-  if (kind === "trend_stable") return "大きく悪化していない";
-  return String(p).trim();
-}
-
-function mergeDurationAndTrendPhrases(durExpanded, trendExp) {
-  if (!durExpanded && !trendExp) return "";
-  if (durExpanded && !trendExp) return durExpanded;
-  if (!durExpanded && trendExp) return trendExp;
-  if (
-    durExpanded.endsWith("続いている") &&
-    /^回復傾向にある|悪化傾向にある|大きく悪化していない/.test(trendExp)
-  ) {
-    return durExpanded.replace(/続いている$/, "続いていて") + trendExp;
-  }
-  return `${durExpanded}うえで${trendExp}`;
-}
-
 /**
- * 「＋」列挙の代わりに、組み合わせ短語から「〜ことから、」に繋がる一文の主部を組み立てる（🟢🟡①＋②一体化）。
- * きっかけはスロット由来を整形して先頭に接続（parts 内のきっかけ短語は重複回避で除外）。
+ * 🟢🟡 ①：選んだ短語を **「〇〇＋〇〇＋…」** で列挙し、**「〜ことから、」** に繋ぐ主部を返す。
+ * きっかけは `polishCausePhraseToWrittenJapanese` 済みを**先頭**に付与（parts 内のきっかけ相当短語は重複回避で除外）。
  */
-function buildNaturalClauseFromComboParts(parts, state) {
+function buildGreenYellowComboPlusClause(state, parts) {
   let labels = (parts || []).map((p) => String(p).trim()).filter(Boolean);
   const causeW = state ? getPolishedCauseForGreenYellowCombo(state) : "";
   if (causeW) {
     labels = labels.filter((p) => inferComboBulletInverseKind(p) !== "cause");
   }
-
-  if (labels.length === 0 && !causeW) return "";
-
-  const items = labels.map((label) => ({ label, kind: classifyComboPartLabel(label) }));
-  const dur = items.find((x) => x.kind === "duration");
-  const trend = items.find(
-    (x) => x.kind === "trend_recover" || x.kind === "trend_worse" || x.kind === "trend_stable"
-  );
-  const used = new Set([dur?.label, trend?.label].filter(Boolean));
-  const others = items.filter((x) => !used.has(x.label) && x.kind !== "cause");
-
-  const durEx = dur ? expandDurationPhraseForComboSentence(dur.label) : "";
-  const trEx = trend ? expandTrendPhraseForComboSentence(trend.kind, trend.label) : "";
-  let core = mergeDurationAndTrendPhrases(durEx, trEx);
-
-  const otherBits = others
-    .filter((o) => o.kind !== "cause")
-    .map((o) => o.label)
-    .filter(Boolean);
-  if (otherBits.length) {
-    const extra = otherBits.join("、");
-    if (core) {
-      if (otherBits.length === 1 && otherBits[0].length <= 12) {
-        core = `${extra}があり、${core}`;
-      } else {
-        core = `${extra}が重なり、${core}`;
-      }
-    } else {
-      core = `${extra}が重なる`;
-    }
+  const chunks = [];
+  if (causeW) chunks.push(causeW);
+  for (const l of labels) {
+    if (l && !chunks.includes(l)) chunks.push(l);
   }
-
-  if (causeW) {
-    if (core) {
-      core = `${causeW}があり、${core}`;
-    } else {
-      core = `${causeW}が考えられる`;
-    }
-  }
-
-  if (!core) return labels.length ? labels.join("、") : "";
-  return core;
+  if (chunks.length === 0) return "";
+  return `「${chunks.join("＋")}」`;
 }
 
 /**
- * 🤝🟢🟡 ①の「＋」列挙と②パターン文を1段落に統合（KAIRO_SPEC・「〜ことから、一時的な〇〇として…」）。
+ * 🤝🟢🟡 ①の「〇〇＋〇〇」列挙と②パターン文を1段落に統合（KAIRO_SPEC・「〜ことから、一時的な〇〇として…」）。
  */
 function buildGreenYellowComboIntegratedParagraph(state, level, parts) {
   const lv = level === "🟡" || level === "🟢" ? level : finalizeRiskLevel(state);
   const windy = shouldUseWindyColdOnsetPatternForStateAbout(state);
-  const clause = buildNaturalClauseFromComboParts(parts, state);
+  const clause = buildGreenYellowComboPlusClause(state, parts);
 
   if (windy) {
     const lead = clause ? `${clause}ことから、` : `これらの症状の組み合わせから、`;
