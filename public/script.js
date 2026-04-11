@@ -5,6 +5,11 @@ const STATE_PATTERNS_URL = "/api/state-patterns";
 const ACTION_DETAILS_URL = "/api/action-details";
 const HOSPITAL_DETAILS_URL = "/api/hospital-details";
 
+/** 🤝/📝「具体的に」モーダル見出し（KAIRO_SPEC・`concreteModalTitle`） */
+const CONCRETE_STATE_MODAL_TITLE = "あなたの状態の理解を深める";
+const CONCRETE_HOSPITAL_MODAL_TITLE = "🏥 受診先の候補";
+const CONCRETE_ACTION_MODAL_TITLE = "いまの行動の具体例";
+
 // Conversation history keys
 const HISTORY_KEY = "kairo_chat_history";
 const CONVERSATION_ID_KEY = "kairo_conversation_id";
@@ -541,7 +546,7 @@ function ensureConcreteModal() {
   overlay.innerHTML = `
     <div class="concrete-modal-card" role="dialog" aria-modal="true" aria-labelledby="concreteModalTitle">
       <div class="concrete-modal-header">
-        <div id="concreteModalTitle" class="concrete-modal-title">原因・きっかけの例（参考）</div>
+        <div id="concreteModalTitle" class="concrete-modal-title">${CONCRETE_STATE_MODAL_TITLE}</div>
         <button id="concreteModalClose" class="concrete-modal-close" type="button" aria-label="閉じる">✕</button>
       </div>
       <div id="concreteModalBody" class="concrete-modal-body">整理中です…</div>
@@ -572,15 +577,17 @@ function closeConcreteModal() {
   overlay.classList.remove("is-open");
 }
 
-function setConcreteModalBody(textOrStructured) {
+/**
+ * @param {string|object} textOrStructured プレーンテキスト、または `{ structured, ... }`
+ * @param {{ title?: string }} [options] モーダル見出し（未指定時は本文種別で既定）
+ */
+function setConcreteModalBody(textOrStructured, options = {}) {
   const body = document.getElementById("concreteModalBody");
   if (!body) return;
+  const titleEl = document.getElementById("concreteModalTitle");
   body.innerHTML = "";
   if (typeof textOrStructured === "string") {
-    const titleEl = document.getElementById("concreteModalTitle");
-    if (titleEl && /原因・きっかけ/.test(textOrStructured)) {
-      titleEl.textContent = "原因・きっかけの例（参考）";
-    }
+    if (titleEl && options.title) titleEl.textContent = options.title;
     const pre = document.createElement("pre");
     pre.style.whiteSpace = "pre-wrap";
     pre.style.fontFamily = "inherit";
@@ -590,6 +597,7 @@ function setConcreteModalBody(textOrStructured) {
     return;
   }
   if (textOrStructured && typeof textOrStructured === "object" && textOrStructured.structured) {
+    if (titleEl) titleEl.textContent = CONCRETE_STATE_MODAL_TITLE;
     renderStructuredStateModal(body, textOrStructured);
     return;
   }
@@ -607,20 +615,24 @@ function getGreenYellowModalMiddleBlockHeadingClient(triageLevel) {
 /** サーバ `buildGreenYellowStateModalBridgeLine` と同文言（`mainSymptom` は `getSyncedMainSymptomDisplayLabel` と API で同期） */
 function buildGreenYellowStateModalBridgeLineClient(mainSymptom) {
   const label = String(mainSymptom || "").trim() || "症状";
-  return `👉 「${label}」と関連しやすい原因・きっかけの例です（診断名ではありません）`;
+  return `👉 今回の状態は、よくある${label}のパターンに当てはまっています`;
 }
 
-function renderStructuredStateModal(body, { structured, message, triageLevel, mainSymptom }) {
+/** サーバ `pickGreenYellowModalRestClosingLine` と同文言（🟢/🟡モーダル末尾・ランダム二択） */
+function pickGreenYellowModalRestClosingLineClient() {
+  return Math.random() < 0.5
+    ? "👉 今は無理に動かず、しっかり休むことが最も適切な対応です。"
+    : "👉 今は無理に動かず、休息を優先させてください。";
+}
+
+function renderStructuredStateModal(body, { structured, message, triageLevel, mainSymptom, restClosingLine }) {
   const s = structured;
   if (!s) {
     body.textContent = message || "";
     return;
   }
-  const titleEl = document.getElementById("concreteModalTitle");
-  if (titleEl) titleEl.textContent = "原因・きっかけの例（参考）";
   const showRareByDefault = triageLevel === "🔴";
   const lines = [];
-  lines.push("原因・きっかけの例（一般医学的な整理・参考）", "");
   lines.push("🟢 よくある原因");
   (s.common || []).forEach((c) => lines.push(c.startsWith("・") ? c : `・${c}`));
   if (triageLevel === "🟢" || triageLevel === "🟡") {
@@ -686,6 +698,14 @@ function renderStructuredStateModal(body, { structured, message, triageLevel, ma
   } else {
     body.appendChild(pre);
   }
+  if (triageLevel === "🟢" || triageLevel === "🟡") {
+    const closing = document.createElement("div");
+    closing.style.marginTop = "12px";
+    closing.style.whiteSpace = "pre-wrap";
+    closing.textContent =
+      String(restClosingLine || "").trim() || pickGreenYellowModalRestClosingLineClient();
+    body.appendChild(closing);
+  }
 }
 
 async function fetchStatePatterns(blockContent) {
@@ -711,6 +731,7 @@ async function fetchStatePatterns(blockContent) {
     structured: data?.structured || null,
     triageLevel: data?.triageLevel || null,
     mainSymptom: data?.mainSymptom || null,
+    restClosingLine: data?.restClosingLine || null,
   };
 }
 
@@ -718,7 +739,7 @@ async function showConcreteStateDetails(blockContent) {
   if (appState.concreteModalBusy) return;
   appState.concreteModalBusy = true;
   openConcreteModal();
-  setConcreteModalBody("原因を整理しています…");
+  setConcreteModalBody("原因を整理しています…", { title: CONCRETE_STATE_MODAL_TITLE });
   try {
     const data = await fetchStatePatterns(blockContent);
     if (data.structured) {
@@ -727,9 +748,10 @@ async function showConcreteStateDetails(blockContent) {
         structured: data.structured,
         triageLevel: data.triageLevel,
         mainSymptom: data.mainSymptom,
+        restClosingLine: data.restClosingLine,
       });
     } else {
-      setConcreteModalBody(data.message);
+      setConcreteModalBody(data.message, { title: CONCRETE_STATE_MODAL_TITLE });
     }
   } catch (error) {
     console.error("具体化モーダル生成エラー:", error);
@@ -739,19 +761,21 @@ async function showConcreteStateDetails(blockContent) {
       appState.riskLevel === "YELLOW"
         ? "・経過や付随症状が変わると判断が変わる → 注意して見る必要がある"
         : "・今わかっている範囲では、強い緊急サインははっきりしていません";
-    setConcreteModalBody(
-      [
-        "原因・きっかけの例（一般医学的な整理・参考）",
-        "",
-        "よくある原因の例（参考）",
-        "",
-        "・生活リズムの乱れや睡眠不足 → 自律神経のバランスが崩れやすくなるとされ、不調の出やすさに関与することがあります。",
-        "・ストレスや疲労の蓄積 → 筋肉の緊張や神経の過敏化が関与しうるとされています。",
-        "",
-        middleHeading,
-        middleBullet,
-      ].join("\n")
-    );
+    const fallbackLines = [
+      "🟢 よくある原因",
+      "・生活リズムの乱れや睡眠不足 → 自律神経のバランスが崩れやすくなるとされ、不調の出やすさに関与することがあります。",
+      "・ストレスや疲労の蓄積 → 筋肉の緊張や神経の過敏化が関与しうるとされています。",
+      buildGreenYellowStateModalBridgeLineClient(null),
+      "",
+      "🟡 状況によっては確認が必要",
+      "",
+      middleHeading,
+      middleBullet,
+    ];
+    if (appState.riskLevel === "GREEN" || appState.riskLevel === "YELLOW") {
+      fallbackLines.push("", pickGreenYellowModalRestClosingLineClient());
+    }
+    setConcreteModalBody(fallbackLines.join("\n"), { title: CONCRETE_STATE_MODAL_TITLE });
   } finally {
     appState.concreteModalBusy = false;
   }
@@ -780,15 +804,17 @@ async function showConcreteActionDetails(blockContent) {
   if (appState.concreteModalBusy) return;
   appState.concreteModalBusy = true;
   openConcreteModal();
-  setConcreteModalBody("いまの行動を、検索情報をもとに具体化しています…");
+  setConcreteModalBody("いまの行動を、検索情報をもとに具体化しています…", {
+    title: CONCRETE_ACTION_MODAL_TITLE,
+  });
   try {
     const detailText = await fetchActionDetails(blockContent);
-    setConcreteModalBody(detailText);
+    setConcreteModalBody(detailText, { title: CONCRETE_ACTION_MODAL_TITLE });
   } catch (error) {
     console.error("行動具体化モーダル生成エラー:", error);
-    setConcreteModalBody(
-      "読み込みに失敗しました。しばらくしてからもう一度お試しください。"
-    );
+    setConcreteModalBody("読み込みに失敗しました。しばらくしてからもう一度お試しください。", {
+      title: CONCRETE_ACTION_MODAL_TITLE,
+    });
   } finally {
     appState.concreteModalBusy = false;
   }
@@ -814,13 +840,15 @@ async function showConcreteHospitalDetails() {
   if (appState.concreteModalBusy) return;
   appState.concreteModalBusy = true;
   openConcreteModal();
-  setConcreteModalBody("受診先の詳細を取得しています…");
+  setConcreteModalBody("受診先の詳細を取得しています…", { title: CONCRETE_HOSPITAL_MODAL_TITLE });
   try {
     const detailText = await fetchHospitalDetails();
-    setConcreteModalBody(detailText);
+    setConcreteModalBody(detailText, { title: CONCRETE_HOSPITAL_MODAL_TITLE });
   } catch (error) {
     console.error("受診先モーダル生成エラー:", error);
-    setConcreteModalBody("受診先の詳細を取得できませんでした。近くの医療機関を検索してご確認ください。");
+    setConcreteModalBody("受診先の詳細を取得できませんでした。近くの医療機関を検索してご確認ください。", {
+      title: CONCRETE_HOSPITAL_MODAL_TITLE,
+    });
   } finally {
     appState.concreteModalBusy = false;
   }

@@ -1592,9 +1592,46 @@ async function fetchPlaceDetails(placeId, { language = "en", includeOpeningHours
 
 const MIN_RATING_FOR_CARE_DISPLAY = 3.8;
 
+/** Google Places：飲食・ナイト系（受診先に不適切） */
+const GOOGLE_FOOD_OR_NIGHT_PLACE_TYPES = new Set([
+  "restaurant",
+  "meal_takeaway",
+  "meal_delivery",
+  "cafe",
+  "bar",
+  "bakery",
+  "food",
+  "night_club",
+]);
+
+/**
+ * レストラン・カフェ等の誤ヒットを除外（Places の types または名称）。
+ * 名称に clinic / medical / クリニック / 病院 等があれば除外しない。
+ */
+function isExcludedFoodOrNonMedicalPlace(candidate) {
+  if (!candidate) return true;
+  const name = String(candidate?.name || "");
+  if (/(クリニック|診療所|病院|医院|歯科|medical|clinic|hospital|doctor|dental|dentist)/i.test(name)) {
+    return false;
+  }
+  const types = [...(candidate?.types || []), ...(candidate?.details?.types || [])];
+  if (types.some((t) => GOOGLE_FOOD_OR_NIGHT_PLACE_TYPES.has(String(t)))) return true;
+  const hay = `${name} ${candidate?.vicinity || ""}`.toLowerCase();
+  if (
+    /\b(restaurant|café|cafe|kitchen|hawker|food hall|foodcourt|food court|grill|bistro|bakery|bar|pub)\b/i.test(
+      hay
+    )
+  ) {
+    return true;
+  }
+  if (/レストラン|カフェ|食堂|飲食|ホーカー|フードコート/.test(name)) return true;
+  return false;
+}
+
 /** Step2：強制フィルタ（veterinary, dental, pediatric, 動物病院・歯科・小児科を除外。allowDental=trueの時は歯科を許可） */
 function filterExcludedCareTypes(candidates, allowDental = false) {
   return (candidates || []).filter((c) => {
+    if (isExcludedFoodOrNonMedicalPlace(c)) return false;
     const types = c?.types || [];
     if (!allowDental && (types.includes("veterinary_care") || types.includes("dentist"))) return false;
     const hay = [c?.name || "", c?.vicinity || "", ...(c?.types || [])].join(" ").toLowerCase();
@@ -1827,8 +1864,8 @@ async function fetchCarePlacesForSingapore(location, state) {
   const alt4 = gpSorted[3] || japaneseSorted[2] || null;
   const alternatives = [alt1, alt2, alt3, alt4].filter(Boolean);
 
-  const result = [main, ...alternatives].filter(Boolean);
-  return result.map(({ _sgScore, ...rest }) => rest);
+  const result = [main, ...alternatives].filter(Boolean).map(({ _sgScore, ...rest }) => rest);
+  return ensureSingaporeJapaneseClinicSecondSlot(state, result);
 }
 
 /**
@@ -2002,6 +2039,48 @@ function isJapaneseClinicOrSupport(candidate) {
   if (/(japanese|日系|nihon|日本語対応|japanese support|japanese speaking|日本語)/i.test(text)) return true;
   const name = String(candidate?.name || "");
   return /(内科|クリニック|耳鼻科|小児科|メンタル)/.test(name);
+}
+
+/**
+ * 🇸🇬 日系クリニックを **主役GP（先頭）の直後** に並べる（本文・モーダル共通）。
+ * 先頭がGP以外のときは並べ替えしない。
+ */
+function reorderSingaporePlacesWithJapaneseSecond(places) {
+  const list = (places || []).filter((p) => p?.placeId);
+  if (list.length <= 1) return list;
+  const main = list[0];
+  const rest = list.slice(1);
+  const jpIdx = rest.findIndex((p) => isJapaneseClinicOrSupport(p));
+  if (jpIdx === -1) return list;
+  const jp = rest[jpIdx];
+  const restWithout = rest.filter((_, i) => i !== jpIdx);
+  return [main, jp, ...restWithout];
+}
+
+/**
+ * 🇸🇬 日系が先頭の次に無いときは Text Search で補完し、2番目に固定する（最大5件）。
+ */
+async function ensureSingaporeJapaneseClinicSecondSlot(state, placesIn) {
+  const dedupeByPlace = (arr) => {
+    const seen = new Set();
+    return (arr || []).filter((p) => {
+      if (!p?.placeId || seen.has(p.placeId)) return false;
+      seen.add(p.placeId);
+      return true;
+    });
+  };
+  let pool = dedupeByPlace(placesIn);
+  if (pool.length === 0) return pool;
+  pool = reorderSingaporePlacesWithJapaneseSecond(pool);
+  const hasSecondJp = pool.length > 1 && isJapaneseClinicOrSupport(pool[1]);
+  if (hasSecondJp) return pool.slice(0, 5);
+  const hasAnyJp = pool.some((p) => isJapaneseClinicOrSupport(p));
+  if (hasAnyJp) return reorderSingaporePlacesWithJapaneseSecond(pool).slice(0, 5);
+  const extra = await fetchJapaneseClinicSingaporeForRedModal(state);
+  const jp = extra.find((e) => e?.placeId && e.placeId !== pool[0]?.placeId);
+  if (!jp) return pool.slice(0, 5);
+  pool = [pool[0], jp, ...pool.slice(1).filter((p) => p.placeId !== jp.placeId)];
+  return pool.slice(0, 5);
 }
 
 /** 🇸🇬 保険表示（施設名の横）。Places APIでは保険情報取得不可のため傾向ベース */
@@ -2498,9 +2577,9 @@ function buildHospitalRecommendationDetail(state, locationContext, clinicCandida
   const meetsRating = filterByMinRating(filtered);
   let candidates;
   if (isSingapore) {
-    candidates = meetsRating.slice(0, 5);
+    candidates = reorderSingaporePlacesWithJapaneseSecond(meetsRating).slice(0, 5);
   } else {
-    const maxCandidates = 2;
+    const maxCandidates = 4;
     candidates = prioritizeCareCandidates(meetsRating, state).slice(0, maxCandidates);
   }
   const useHospital = (hospitalCandidates?.length || 0) > 0;
@@ -3025,8 +3104,10 @@ async function resolveCareCandidates(state, destination) {
     ? filterSingaporeExcluded(mergedBase, allowDental)
     : filterExcludedCareTypes(mergedBase, allowDental);
   const symptomFitted = isSingapore ? excludedFiltered : applySymptomFitFilter(excludedFiltered, plan);
-  const merged = isSingapore ? symptomFitted.slice(0, 10) : prioritizeCareCandidates(symptomFitted, state).slice(0, 10);
-  const maxReturn = isSingapore ? 5 : 2;
+  const merged = isSingapore
+    ? symptomFitted.slice(0, 10)
+    : prioritizeCareCandidates(symptomFitted, state).slice(0, 24);
+  const maxReturn = isSingapore ? 5 : 4;
   const enriched = [];
   for (const item of merged) {
     const details = await fetchPlaceDetails(item.placeId, { language: "ja" });
@@ -3041,7 +3122,7 @@ async function resolveCareCandidates(state, destination) {
       mapsUrl: details?.mapUrl || item.mapsUrl,
     });
   }
-  const meetsRating = filterByMinRating(enriched);
+  const meetsRating = filterByMinRating(enriched).filter((c) => !isExcludedFoodOrNonMedicalPlace(c));
   return meetsRating.slice(0, maxReturn);
 }
 
@@ -3052,9 +3133,10 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
   const mainSymptomText = detectCareMainSymptomText(state, historyText || "");
   const plan = buildCareSearchQueries(mainSymptomText, destination);
   const isSingapore = String(state?.locationContext?.country || "").trim() === "Singapore";
-  const maxDisplay = 2;
+  const maxDisplay = 4;
   const candidates = rawCandidates
     .filter((c) => String(c?.name || "").trim().length > 0)
+    .filter((c) => !isExcludedFoodOrNonMedicalPlace(c))
     .filter((c) => {
       const r = c?.rating ?? c?.details?.rating;
       return r != null && Number(r) > MIN_RATING_FOR_CARE_DISPLAY;
@@ -3086,6 +3168,7 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
 
   const list = Array.isArray(candidates) ? candidates : [];
   const lines = ["🏥 受診先の候補", ...(timeMessage ? [timeMessage] : []), "⸻"];
+  const circled = ["①", "②", "③", "④"];
 
   if (list.length > 0) {
     if (!isSingapore) {
@@ -3093,42 +3176,63 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
       lines.push("無理に専門科を選ばなくても大丈夫そうです。");
       lines.push("");
     }
-    const top = list[0];
-    const alt = list[1];
     const usedReasons = new Set();
     if (isSingapore) {
-      const insTop = getInsuranceLabel(top, true);
-      const insAlt = alt ? getInsuranceLabel(alt, true) : "";
       lines.push("まずはこちらで問題なさそうです");
-      lines.push(`① ${String(top?.name || "").trim()}${insTop ? " " + insTop : ""}`);
-      const topReasons = buildHospitalRecommendationReasons(top, plan, state, usedReasons);
-      topReasons.forEach((r) => lines.push(r));
-      if (alt) {
-        lines.push("");
-        lines.push(isJapaneseClinicOrSupport(alt) ? "英語での説明が不安な場合は、こちらも安心です" : "必要であれば、こちらも選択肢になります");
-        lines.push(`② ${String(alt?.name || "").trim()}${insAlt ? " " + insAlt : ""}`);
-        const altReasons = buildHospitalRecommendationReasons(alt, plan, state, usedReasons);
-        altReasons.forEach((r) => lines.push(r));
+      for (let i = 0; i < list.length; i++) {
+        const c = list[i];
+        const num = circled[i] || `${i + 1}.`;
+        if (i > 0) {
+          lines.push("");
+          lines.push(
+            i === 1
+              ? isJapaneseClinicOrSupport(c)
+                ? "英語での説明が不安な場合は、こちらも安心です"
+                : "必要であれば、こちらも選択肢になります"
+              : "もう1つ、候補としてはこちらです"
+          );
+        }
+        const ins = getInsuranceLabel(c, true);
+        lines.push(`${num} ${String(c?.name || "").trim()}${ins ? " " + ins : ""}`);
+        buildHospitalRecommendationReasons(c, plan, state, usedReasons).forEach((r) => lines.push(r));
       }
       lines.push("");
-      lines.push(alt ? "まずは近くのGPで問題ない内容なので、行きやすい方を選べば大丈夫そうです。" : "必要に応じて、相談する形で問題なさそうです。");
+      lines.push(
+        list.length >= 2
+          ? "まずは近くのGPで問題ない内容なので、行きやすい方を選べば大丈夫そうです。"
+          : "必要に応じて、相談する形で問題なさそうです。"
+      );
     } else {
       lines.push("まずはこちらがおすすめです");
-      lines.push(`① ${String(top?.name || "").trim()}`);
-      buildHospitalRecommendationReasons(top, plan, state, usedReasons).forEach((r) => lines.push(r));
-      if (alt) {
-        lines.push("");
-        lines.push("必要であれば、こちらも選択肢になります");
-        lines.push(`② ${String(alt?.name || "").trim()}`);
-        buildHospitalRecommendationReasons(alt, plan, state, usedReasons).forEach((r) => lines.push(r));
+      for (let i = 0; i < list.length; i++) {
+        const c = list[i];
+        const num = circled[i] || `${i + 1}.`;
+        if (i > 0) {
+          lines.push("");
+          lines.push(i === 1 ? "必要であれば、こちらも選択肢になります" : "もう1つ、候補としてはこちらです");
+        }
+        lines.push(`${num} ${String(c?.name || "").trim()}`);
+        buildHospitalRecommendationReasons(c, plan, state, usedReasons).forEach((r) => lines.push(r));
       }
       lines.push("");
-      lines.push(list.length >= 2 ? "どちらでも対応できる内容なので、行きやすい方を選んで大丈夫そうです。" : "必要に応じて、相談する形で問題なさそうです。");
+      lines.push(
+        list.length >= 2
+          ? "どちらでも対応できる内容なので、行きやすい方を選んで大丈夫そうです。"
+          : "必要に応じて、相談する形で問題なさそうです。"
+      );
     }
   } else {
     lines.push("位置情報から近くの医療機関を検索しましたが、見つかりませんでした。");
   }
   return lines.join("\n");
+}
+
+/** 受診先モーダル本文：連続する空行を最大1つに抑え、読みやすくする（\n\n\n…→\n\n） */
+function normalizeHospitalModalText(text) {
+  return String(text || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 /** 🏥受診先モーダル用：SGは主役GP＋サブ主役日系＋サブサブ。他国は1件メイン＋補助2件 */
@@ -3162,7 +3266,8 @@ async function buildHospitalDetailsModalContent(state) {
   }
 
   if (isSingapore) {
-    return buildSingaporeModalContent(places, plan, state);
+    const orderedPlaces = await ensureSingaporeJapaneseClinicSecondSlot(state, places);
+    return buildSingaporeModalContent(orderedPlaces, plan, state);
   }
 
   const lines = [
@@ -3170,37 +3275,36 @@ async function buildHospitalDetailsModalContent(state) {
     "この症状で無理なく相談できる場所をこちらで整理しました。",
     "",
     "今回の状態であれば、まずはこの1件を選べば大丈夫そうです。",
-    "",
   ];
 
   const main = places[0];
   const mainDetails = await fetchPlaceDetails(main.placeId, { language: "ja" });
   const mainName = mainDetails?.name || main.name || "";
+  lines.push("");
   lines.push("【まずはこちら】");
   lines.push(mainName);
-  lines.push("");
   const mainEnriched = { ...main, details: mainDetails || main.details };
   buildMainFacilityReasons(mainEnriched, plan, state).forEach((r) => lines.push(r));
   lines.push("");
   lines.push("無理に探さなくても、この施設で十分対応できる内容です。");
-  lines.push("");
 
   const auxPlaces = places.slice(1, 3);
   if (auxPlaces.length > 0) {
-    lines.push("もし時間帯や場所の都合が合わない場合は、こちらも選択肢になります。");
     lines.push("");
+    lines.push("もし時間帯や場所の都合が合わない場合は、こちらも選択肢になります。");
     for (let i = 0; i < auxPlaces.length; i++) {
       const aux = auxPlaces[i];
       const auxDetails = await fetchPlaceDetails(aux.placeId, { language: "ja" });
       const auxName = auxDetails?.name || aux.name || "";
       const auxEnriched = { ...aux, details: auxDetails || aux.details };
+      lines.push("");
       lines.push(auxName);
       lines.push(buildAuxiliaryReason(auxEnriched, plan, state, i));
-      lines.push("");
     }
   }
+  lines.push("");
   lines.push("まずは上の施設を選んでおけば問題なさそうです。");
-  return lines.join("\n");
+  return normalizeHospitalModalText(lines.join("\n"));
 }
 
 /** 🇸🇬 モーダル：①主役GP ②（任意）GP ③日系（🔴時は必ず表示・距離は問わない）④補助。🟢🟡は従来に近いが日系は一覧から探索 */
@@ -3244,10 +3348,8 @@ async function buildSingaporeModalContent(places, plan, state) {
   const insMain = getInsuranceLabel(main, true);
   lines.push("【まずはこちら（いちばんスムーズです）】");
   lines.push(mainName + (insMain ? " " + insMain : ""));
-  lines.push("");
   const mainEnriched = { ...main, details: mainDetails || main.details };
   buildMainFacilityReasons(mainEnriched, plan, state).forEach((r) => lines.push(r));
-  lines.push("");
   lines.push("");
 
   if (isRed) {
@@ -3259,7 +3361,6 @@ async function buildSingaporeModalContent(places, plan, state) {
       lines.push("（②）近く・都合に合わせて、こちらのGPも一般的な選択肢です。");
       lines.push(n2 + (ins2 ? " " + ins2 : ""));
       lines.push(buildAuxiliaryReason({ ...secondGp, details: d2 || secondGp.details }, plan, state, 0));
-      lines.push("");
       lines.push("");
     }
 
@@ -3274,7 +3375,6 @@ async function buildSingaporeModalContent(places, plan, state) {
       lines.push("・日本語で症状をそのまま伝えられる");
       lines.push("・海外でも安心して相談しやすい環境");
       lines.push("");
-      lines.push("");
     }
 
     const usedIds = new Set([main.placeId, secondGp?.placeId, japanese?.placeId].filter(Boolean));
@@ -3282,19 +3382,19 @@ async function buildSingaporeModalContent(places, plan, state) {
     const subSubPlaces = rest.slice(0, 2);
     if (subSubPlaces.length > 0) {
       lines.push("もし上記が難しい場合は、こちらも選択肢になります。");
-      lines.push("");
       for (let i = 0; i < subSubPlaces.length; i++) {
         const aux = subSubPlaces[i];
         const auxDetails = await fetchPlaceDetails(aux.placeId, { language: "ja" });
         const auxName = auxDetails?.name || aux.name || "";
         const insAux = getInsuranceLabel(aux, true);
+        lines.push("");
         lines.push(auxName + (insAux ? " " + insAux : ""));
         lines.push(buildAuxiliaryReason({ ...aux, details: auxDetails || aux.details }, plan, state, i));
-        lines.push("");
       }
     }
+    lines.push("");
     lines.push("基本的には、最初に紹介したGPを選んでおけば問題ない流れです。");
-    return lines.join("\n");
+    return normalizeHospitalModalText(lines.join("\n"));
   }
 
   const sub = pool.slice(1).find(isJapaneseClinicOrSupport);
@@ -3307,27 +3407,26 @@ async function buildSingaporeModalContent(places, plan, state) {
     lines.push("・日本語で症状をそのまま伝えられる");
     lines.push("・海外でも安心して相談しやすい環境");
     lines.push("");
-    lines.push("");
   }
 
   const used = new Set([main.placeId, sub?.placeId].filter(Boolean));
   const subSubPlaces = pool.filter((p) => !used.has(p.placeId)).slice(0, 2);
   if (subSubPlaces.length > 0) {
     lines.push("もし上記が難しい場合は、こちらも選択肢になります。");
-    lines.push("");
     for (let i = 0; i < subSubPlaces.length; i++) {
       const aux = subSubPlaces[i];
       const auxDetails = await fetchPlaceDetails(aux.placeId, { language: "ja" });
       const auxName = auxDetails?.name || aux.name || "";
       const insAux = getInsuranceLabel(aux, true);
+      lines.push("");
       lines.push(auxName + (insAux ? " " + insAux : ""));
       lines.push(buildAuxiliaryReason(aux, plan, state, i));
-      lines.push("");
     }
   }
 
+  lines.push("");
   lines.push("基本的には、最初に紹介したGPを選んでおけば問題ない流れです。");
-  return lines.join("\n");
+  return normalizeHospitalModalText(lines.join("\n"));
 }
 
 const RED_GP_JUDGMENT_SENTENCES = [
@@ -7604,6 +7703,32 @@ function lightBulletCleanupForUserWords(raw) {
   return t.trim();
 }
 
+/** 程度・弱気の表現（箇条書きで落とさない／網羅・ヒューリスティック用） */
+const BULLET_DEGREE_HEDGE_PATTERN = /(やや|少し|すこし|わずか|多少|ちょっと|かなり|相当|非常に|若干|まあまあ|軽く|だいぶ|ひどく)/;
+
+function bulletTextContainsDegreeHedge(text) {
+  return BULLET_DEGREE_HEDGE_PATTERN.test(String(text || ""));
+}
+
+/**
+ * 同一スロット回答に「、」「・」等で並んだ複数の事実があるとき、箇条書きを分けて載せるため分割する。
+ * 痛みスコア（/10）・数値のみの列などは分割しない。
+ */
+function splitSlotAnswerIntoBulletChunks(text) {
+  const t = String(text || "").trim();
+  if (!t) return [];
+  if (t.length < 8) return [t];
+  if (/\d+\s*\/\s*10/.test(t)) return [t];
+  if (/[・•]/.test(t)) {
+    const byDot = t.split(/[・•]+/).map((x) => x.trim()).filter((x) => x.length >= 2);
+    if (byDot.length >= 2) return byDot;
+  }
+  if (!/[、,]/.test(t)) return [t];
+  const parts = t.split(/[、,]+/).map((x) => x.trim()).filter((x) => x.length >= 2);
+  if (parts.length < 2) return [t];
+  return parts;
+}
+
 /**
  * 確認文・まとめ：主症状の言い換えに過ぎない行（主訴の繰り返し）を分類して除外する。
  * 痛みスコア・経過・付随・きっかけ等の具体情報を含む行は残す。
@@ -7633,6 +7758,7 @@ function collectMainSymptomPhrasesForBulletFilter(state) {
 function isMainSymptomOnlyBulletLine(state, bulletLine) {
   const inner = String(bulletLine || "").replace(/^・\s*/, "").trim();
   if (!inner || inner.length > 100) return false;
+  if (bulletTextContainsDegreeHedge(inner)) return false;
   if (
     /\d+\s*\/\s*10|痛みは\s*\d|経過|日前|時間前|数時間|さっき|続い|悪化|体温|微熱|平熱|38|39|37|日常生活|影響|きっかけ|原因|付随|吐き気|嘔吐|発熱|咳|鼻|めまい|しびれ|ズキズキ|キリキリ|の可能性/.test(
       inner
@@ -7924,16 +8050,19 @@ function isDisplayOnlyNoOtherSymptomsSlotCondition(state) {
 }
 
 /**
- * 最終箇条書きにのみ「・吐き気や発熱などの他の症状は今のところ見られていない」を挿入（原因行の直前を優先）。
+ * 最終箇条書きにのみ「・他の症状はない」を挿入（原因行の直前を優先）。
  */
 function injectDisplayOnlyNoOtherSymptomsBullet(bullets, state) {
   if (!Array.isArray(bullets) || !state) return bullets;
   if (!isDisplayOnlyNoOtherSymptomsSlotCondition(state)) return bullets.slice();
-  const line = "・吐き気や発熱などの他の症状は今のところ見られていない";
+  const line = "・他の症状はない";
   const norm = (b) => String(b).replace(/^・/, "").trim();
-  const noOtherLine =
-    "吐き気や発熱などの他の症状は今のところ見られていない";
-  if (bullets.some((b) => norm(b) === noOtherLine)) return bullets.slice();
+  const noOtherNorms = new Set([
+    "他の症状はない",
+    "吐き気や発熱などの他の症状は今のところ見られていない",
+    "他の症状は今のところ見られていない",
+  ]);
+  if (bullets.some((b) => noOtherNorms.has(norm(b)))) return bullets.slice();
   const out = bullets.slice();
   let insertAt = -1;
   for (let i = 0; i < out.length; i++) {
@@ -7970,28 +8099,28 @@ function inferBulletSlotKeyForDedupe(line) {
   if (!s) return "__empty__";
 
   if (/^痛みは\s*\d|^痛みは.*\/10|^痛みは(軽|中|やや|強め|強い|弱い)/.test(s)) {
-    return BULLET_INFER_SLOT_KEYS.PAIN_SCORE;
+    return `${BULLET_INFER_SLOT_KEYS.PAIN_SCORE}:${normalizeBulletKeyForDedupe(s)}`;
   }
   if (/の可能性$|きっかけの可能性|がきっかけ/.test(s)) {
-    return BULLET_INFER_SLOT_KEYS.CAUSE;
+    return `${BULLET_INFER_SLOT_KEYS.CAUSE}:${normalizeBulletKeyForDedupe(s)}`;
   }
-  if (/他の症状は今のところ見られていない|吐き気や発熱などの他の症状は/.test(s)) {
+  if (/他の症状はない|他の症状は今のところ見られていない|吐き気や発熱などの他の症状は/.test(s)) {
     return BULLET_INFER_SLOT_KEYS.NO_OTHER;
   }
   if (/日常生活|見た目|体温|身体への影響/.test(s)) {
-    return BULLET_INFER_SLOT_KEYS.IMPACT;
+    return `${BULLET_INFER_SLOT_KEYS.IMPACT}:${normalizeBulletKeyForDedupe(s)}`;
   }
 
   if (/^症状は/.test(s)) {
     if (/(から続い|から始ま|続いている|始まっている)/.test(s)) {
-      return BULLET_INFER_SLOT_KEYS.DURATION;
+      return `${BULLET_INFER_SLOT_KEYS.DURATION}:${normalizeBulletKeyForDedupe(s)}`;
     }
     if (/\d|時間|分|日|週|月|昨日|一昨日|今朝|昨夜|さっき|今さっき|先週|先月|前から|数分|数十分|数時間/.test(s)) {
-      return BULLET_INFER_SLOT_KEYS.DURATION;
+      return `${BULLET_INFER_SLOT_KEYS.DURATION}:${normalizeBulletKeyForDedupe(s)}`;
     }
   }
   if (!/^症状は/.test(s) && /(から続い|から始ま|続いている|始まっている)/.test(s) && !/の可能性/.test(s) && s.length >= 4) {
-    return BULLET_INFER_SLOT_KEYS.DURATION;
+    return `${BULLET_INFER_SLOT_KEYS.DURATION}:${normalizeBulletKeyForDedupe(s)}`;
   }
 
   if (
@@ -8001,7 +8130,7 @@ function inferBulletSlotKeyForDedupe(line) {
       !/^症状は/.test(s) &&
       s.length >= 6)
   ) {
-    return BULLET_INFER_SLOT_KEYS.TREND;
+    return `${BULLET_INFER_SLOT_KEYS.TREND}:${normalizeBulletKeyForDedupe(s)}`;
   }
 
   if (
@@ -8009,7 +8138,7 @@ function inferBulletSlotKeyForDedupe(line) {
     /(痛み|頭痛|歯痛|腹痛|が出ている)/.test(s) &&
     !/^症状は/.test(s)
   ) {
-    return BULLET_INFER_SLOT_KEYS.MAIN_QUALITY;
+    return `${BULLET_INFER_SLOT_KEYS.MAIN_QUALITY}:${normalizeBulletKeyForDedupe(s)}`;
   }
 
   if (/吐き気|嘔吐|発熱|咳|鼻|めまい|しびれ|微熱|寒意|だるさ/.test(s) && !/の可能性$/.test(s)) {
@@ -8431,13 +8560,15 @@ function heuristicSupplementBulletsFromUserUtterances(bullets, userLines) {
       .filter(Boolean);
     for (const rawSeg of segs) {
       const seg = rawSeg.replace(/[、,]+/g, " ").replace(/\s+/g, " ").trim();
-      if (seg.length < 10) continue;
+      const segHasHedge = bulletTextContainsDegreeHedge(rawSeg);
+      if (seg.length < 10 && !segHasHedge) continue;
+      if (seg.length < 6) continue;
       if (/^(はい|うん|ええ|OK|ok|オッケー|おっけー)/i.test(seg)) continue;
       if (isConfirmationOnlyAnswer(seg)) continue;
       if (bulletLinesCoverSlotText(base, seg)) continue;
       if (out.some((o) => bulletLinesCoverSlotText([`・${o}`], seg))) continue;
       const polished = polishUserSlotForBulletLine(seg);
-      if (!polished || polished.length < 8) continue;
+      if (!polished || (polished.length < 8 && !segHasHedge)) continue;
       out.push(polished);
       base.push(`・${polished}`);
       if (out.length >= 5) return out;
@@ -8519,14 +8650,22 @@ function polishUserSlotForBulletLine(raw) {
 
 /** 箇条書きに既に同趣旨の文が入っているか（重複注入防止） */
 function bulletLinesCoverSlotText(bullets, raw) {
-  const core = String(raw || "")
-    .trim()
+  const rawStr = String(raw || "").trim();
+  const core = rawStr
     .replace(/です$|ます$|かも$|かな$/g, "")
     .replace(/\s+/g, "");
   if (core.length < 3) return false;
   const joined = bullets.join(" ").replace(/\s+/g, "").replace(/・/g, "");
   const probe = core.slice(0, Math.min(28, core.length));
-  return joined.includes(probe);
+  if (!joined.includes(probe)) return false;
+  const hedgeMatches = rawStr.match(new RegExp(BULLET_DEGREE_HEDGE_PATTERN.source, "g"));
+  if (hedgeMatches) {
+    for (const h of hedgeMatches) {
+      const hn = String(h).replace(/\s+/g, "");
+      if (hn && !joined.includes(hn)) return false;
+    }
+  }
+  return true;
 }
 
 /** 経過：スロットが空なら会話の自由記述から抽出（初回「頭が痛くて、5日間続いている」等） */
@@ -8552,13 +8691,23 @@ function injectMissingSlotBulletsFromState(bullets, state, category, opts = {}) 
   const out = [...bullets];
   const toInsert = [];
   const duration = getDurationTextForBullets(state);
-  if (!isAbsentOrUnknownSlotBulletAnswer(duration) && !bulletLinesCoverSlotText(out, duration)) {
-    toInsert.push(`・${polishUserSlotForBulletLine(duration)}`);
+  if (!isAbsentOrUnknownSlotBulletAnswer(duration)) {
+    for (const chunk of splitSlotAnswerIntoBulletChunks(duration)) {
+      if (isAbsentOrUnknownSlotBulletAnswer(chunk)) continue;
+      if (!bulletLinesCoverSlotText(out, chunk)) {
+        toInsert.push(`・${polishUserSlotForBulletLine(chunk)}`);
+      }
+    }
   }
   if (isDurationNotJustNow(state)) {
     const trend = val("worsening_trend", answers.worsening_trend);
-    if (!isAbsentOrUnknownSlotBulletAnswer(trend) && !bulletLinesCoverSlotText(out, trend)) {
-      toInsert.push(`・${polishUserSlotForBulletLine(trend)}`);
+    if (!isAbsentOrUnknownSlotBulletAnswer(trend)) {
+      for (const chunk of splitSlotAnswerIntoBulletChunks(trend)) {
+        if (isAbsentOrUnknownSlotBulletAnswer(chunk)) continue;
+        if (!bulletLinesCoverSlotText(out, chunk)) {
+          toInsert.push(`・${polishUserSlotForBulletLine(chunk)}`);
+        }
+      }
     }
   }
   if (toInsert.length === 0) return out;
@@ -8601,9 +8750,12 @@ function mergeRawSlotInputsIntoBullets(state, bullets) {
     if (/^会話内自由記述/.test(label)) continue;
     if (isRawSlotValueExcludedFromBulletCoverage(label, value)) continue;
     if (isRawValueMainSymptomOnlyEcho(state, value)) continue;
-    if (!bulletLinesCoverSlotText(out, value)) {
-      const line = coerceSlotLabelAndValueToBulletLine(label, value);
-      if (line) out.push(line);
+    for (const chunk of splitSlotAnswerIntoBulletChunks(value)) {
+      if (isRawSlotValueExcludedFromBulletCoverage(label, chunk)) continue;
+      if (isRawValueMainSymptomOnlyEcho(state, chunk)) continue;
+      if (bulletLinesCoverSlotText(out, chunk)) continue;
+      const bl = coerceSlotLabelAndValueToBulletLine(label, chunk);
+      if (bl) out.push(bl);
     }
   }
   return out;
@@ -8622,7 +8774,11 @@ function validateBulletCoverageFromRaw(state, bullets) {
     if (/^会話内自由記述/.test(label)) continue;
     if (isRawSlotValueExcludedFromBulletCoverage(label, value)) continue;
     if (isRawValueMainSymptomOnlyEcho(state, value)) continue;
-    if (!bulletLinesCoverSlotText(bullets, value)) missing.push(value);
+    for (const chunk of splitSlotAnswerIntoBulletChunks(value)) {
+      if (isRawSlotValueExcludedFromBulletCoverage(label, chunk)) continue;
+      if (isRawValueMainSymptomOnlyEcho(state, chunk)) continue;
+      if (!bulletLinesCoverSlotText(bullets, chunk)) missing.push(chunk);
+    }
   }
   const unique = [...new Set(missing)];
   return { ok: unique.length === 0, missing: unique };
@@ -8730,8 +8886,10 @@ async function polishConfirmationBulletsWithLlm(state) {
       "【禁止表現】「が出ている」は使わない（言い換え・省略で除去）。",
       "【必須】次の事実を落とさないこと。数値（痛みの/10 等）・経過の日数・ユーザーが述べた症状・原因の可能性の内容は維持または言い換えのみ。",
       "【必須】ユーザーの意図・主張を取り違えない。推測で足りない情報を補わない。言い換えは原文の意味を変えない範囲に限定する。",
+      "【必須】程度・確度を表す語（やや、少し、わずか、多少、ちょっと、かなり、相当、非常に、若干、まあまあ、軽く、だいぶ など）は、根拠テキストや元の行にあれば必ず残す。削除や弱い抽象語への置き換えで落とさない。",
       "【禁止】新しい症状・病名の推定・受診判断・入力にない事実の追加。",
       "【禁止・サボり対策】複数行を1行に寄せて曖昧な要約にする・行数を不当に減らすこと。根拠テキストのスロット別の事実は、可能な限り別行で区別して残す。",
+      "【必須】同じ質問への回答に複数の事実（例：読点や中黒で並んだ内容）があるときは、まとめずに別々の「・」行に分ける。",
       "【禁止】「不調」「症状がある」「状態が気になる」など具体性を失う言い換えだけに置き換えること。元の箇条書きより情報量を落としてはいけない。",
       "【形式】各行は「・」で始まる1行。行数は入力と同程度（最大14行）。完全に同一趣旨の重複のみ統合してよい。",
       '厳密なJSON: {"bullets":["・...","・...",...]} のみ。説明文は禁止。',
@@ -8743,7 +8901,7 @@ async function polishConfirmationBulletsWithLlm(state) {
         {
           role: "user",
           content: [
-            "次の箇条書きは自動生成のため、日本語としてかなりぎこちない。根拠テキストの事実は変えず、文体だけきれいに整えてください。行をまとめすぎず、スロットごとの内容は落とさないこと。",
+            "次の箇条書きは自動生成のため、日本語としてかなりぎこちない。根拠テキストの事実は変えず、文体だけきれいに整えてください。行をまとめすぎず、スロットごとの内容は落とさないこと。やや・少しなど程度を表す語は根拠にあれば必ず残すこと。",
             "",
             `【根拠テキスト（スロット・自由記述）】\n${String(raw || "").slice(0, 6000)}`,
             "",
@@ -8861,29 +9019,34 @@ function buildStateFactsBulletsLegacy(state, opts = {}) {
   // 2) 症状の様子（スロット文を書き言葉に整えて載せる）
   const worsening = val("worsening", answers.worsening);
   if (worsening && !isUnknownLike(worsening)) {
-    const w = polishBulletColloquialSentence(
-      String(worsening).trim().replace(/です$|ます$/, "")
-    );
-    if (w.length >= 2) pushIfValid(`・${w}`);
+    for (const chunk of splitSlotAnswerIntoBulletChunks(String(worsening))) {
+      if (isUnknownLike(chunk)) continue;
+      const w = polishBulletColloquialSentence(
+        String(chunk).trim().replace(/です$|ます$/, "")
+      );
+      if (w.length >= 2) pushIfValid(`・${w}`);
+    }
   }
 
   // 3) 経過時間
   const duration = val("duration", answers.duration);
   if (duration && !isUnknownLike(duration)) {
-    const d = polishBulletColloquialSentence(
-      String(duration).trim().replace(/です$|ます$/, "")
-    );
-    if (d.length >= 1) pushIfValid(`・${d}`);
+    for (const chunk of splitSlotAnswerIntoBulletChunks(String(duration))) {
+      if (isUnknownLike(chunk)) continue;
+      const d = polishBulletColloquialSentence(String(chunk).trim().replace(/です$|ます$/, ""));
+      if (d.length >= 1) pushIfValid(`・${d}`);
+    }
   }
 
   // 3.5) 悪化傾向（さっき以外のみ）
   if (isDurationNotJustNow(state)) {
     const trend = val("worsening_trend", answers.worsening_trend);
     if (trend && !isUnknownLike(trend)) {
-      const t = polishBulletColloquialSentence(
-        String(trend).trim().replace(/です$|ます$/, "")
-      );
-      if (t.length >= 2) pushIfValid(`・${t}`);
+      for (const chunk of splitSlotAnswerIntoBulletChunks(String(trend))) {
+        if (isUnknownLike(chunk)) continue;
+        const t = polishBulletColloquialSentence(String(chunk).trim().replace(/です$|ます$/, ""));
+        if (t.length >= 2) pushIfValid(`・${t}`);
+      }
     }
   }
 
@@ -8893,28 +9056,29 @@ function buildStateFactsBulletsLegacy(state, opts = {}) {
     pickUserPreferredPhraseOverSlotLabel(state, impactSlot) || impactSlot;
   if (impact && !isUnknownLike(impact) && !shouldHide(impact)) {
     const category = state?.triageCategory || "PAIN";
-    const rawImpact = polishBulletColloquialSentence(
-      String(impact).trim().replace(/です$|ます$/, "")
-    );
-    if (category === "INFECTION") {
-      const temp = rawImpact;
-      const tNum = state?.extractedBodyTemperatureC ?? extractBodyTemperatureCelsius(temp);
-      if (tNum != null) {
-        const s = String(tNum);
-        const short = /\.0+$/.test(s) ? s.replace(/\.0+$/, "") : s;
-        pushIfValid(`・体温は${short}℃程度である`);
-      } else if (/平熱|37度未満/.test(temp)) {
-        pushIfValid("・体温は平熱に近い");
-      } else if (/37|微熱/.test(temp)) {
-        const m = temp.match(/(\d+\.?\d*)\s*度/);
-        pushIfValid(m ? `・体温は${m[1]}度である` : "・微熱（37度台）がある");
-      } else if (/38|高熱/.test(temp)) {
-        pushIfValid("・38度以上の発熱がある");
+    for (const chunk of splitSlotAnswerIntoBulletChunks(String(impact).trim())) {
+      if (isUnknownLike(chunk) || shouldHide(chunk)) continue;
+      const rawImpact = polishBulletColloquialSentence(String(chunk).trim().replace(/です$|ます$/, ""));
+      if (category === "INFECTION") {
+        const temp = rawImpact;
+        const tNum = state?.extractedBodyTemperatureC ?? extractBodyTemperatureCelsius(temp);
+        if (tNum != null) {
+          const s = String(tNum);
+          const short = /\.0+$/.test(s) ? s.replace(/\.0+$/, "") : s;
+          pushIfValid(`・体温は${short}℃程度である`);
+        } else if (/平熱|37度未満/.test(temp)) {
+          pushIfValid("・体温は平熱に近い");
+        } else if (/37|微熱/.test(temp)) {
+          const m = temp.match(/(\d+\.?\d*)\s*度/);
+          pushIfValid(m ? `・体温は${m[1]}度である` : "・微熱（37度台）がある");
+        } else if (/38|高熱/.test(temp)) {
+          pushIfValid("・38度以上の発熱がある");
+        } else {
+          pushIfValid(`・${temp}`);
+        }
       } else {
-        pushIfValid(`・${temp}`);
+        pushIfValid(`・${rawImpact}`);
       }
-    } else {
-      pushIfValid(`・${rawImpact}`);
     }
   }
 
@@ -8924,25 +9088,31 @@ function buildStateFactsBulletsLegacy(state, opts = {}) {
     const associated = pickUserPreferredPhraseOverSlotLabel(state, assocSlot) || assocSlot;
     const aNorm = String(associated || "").trim();
     if (isPainCategorySlot4NoneSelected(state) || isGiCategorySlot5NoneSelected(state)) {
-      // 「吐き気や発熱などの他の症状は…」は inject で付与（判定・LLM参照と分離）
+      // 「他の症状はない」は inject で付与（判定・LLM参照と分離）
     } else if (/(特にない|特になし|これ以外は特にない|特にありません|ないです)/.test(aNorm)) {
-      pushIfValid("・吐き気や発熱などの他の症状は今のところ見られていない");
+      pushIfValid("・他の症状はない");
     } else if (associated && !isUnknownLike(associated)) {
-      const a = polishBulletColloquialSentence(aNorm.replace(/です$|ます$/, ""));
-      if (a.length >= 2) pushIfValid(`・${a}`);
+      for (const chunk of splitSlotAnswerIntoBulletChunks(aNorm)) {
+        if (isUnknownLike(chunk)) continue;
+        const a = polishBulletColloquialSentence(chunk.replace(/です$|ます$/, ""));
+        if (a.length >= 2) pushIfValid(`・${a}`);
+      }
     }
   }
 
   // 6) きっかけ（口語→書き言葉に整えてから一行に。LLM 経路と同じ polish）
   const cause = val("cause_category", state?.causeDetailText || answers.cause_category);
   if (cause && !isUnknownLike(cause)) {
-    const polished = polishCausePhraseToWrittenJapanese(String(cause).trim());
-    if (polished) pushIfValid(`・${polished}`);
+    for (const chunk of splitSlotAnswerIntoBulletChunks(String(cause))) {
+      if (isUnknownLike(chunk)) continue;
+      const polished = polishCausePhraseToWrittenJapanese(String(chunk).trim());
+      if (polished) pushIfValid(`・${polished}`);
+    }
   }
 
   // 追加事実（確認で得た情報）は mergeConfirmationExtraFactsIntoStateBulletsCache で取り込む。legacy 単体では追加しない。
 
-  const rawBullets = lines.slice(0, 6);
+  const rawBullets = lines.slice(0, 18);
   let bullets = sanitizeBulletPoints(rawBullets, state);
   bullets = injectDisplayOnlyNoOtherSymptomsBullet(bullets, state);
   if (bullets.length === 0) return [];
@@ -9026,6 +9196,9 @@ function stripBulletLead(line) {
 
 /** 組み合わせ「〇〇」1つあたりの最大文字数（超過時は末尾を「…」で省略し、表示は最大この長さに収める） */
 const KAIRO_COMBO_SHORT_LABEL_MAX_CHARS = 8;
+/** LLM 短縮の目安（KAIRO_SPEC：各短語 3〜7 文字）。最終行は `applyKairoSpec647ComboShortLabelFilter` で上限 MAX まで整える */
+const KAIRO_COMBO_SHORT_LABEL_TARGET_MIN_CHARS = 3;
+const KAIRO_COMBO_SHORT_LABEL_TARGET_MAX_CHARS = 7;
 
 /**
  * KAIRO_SPEC.md 「短い語への要約」（§7.1.1・組み合わせ行・647 行付近）。
@@ -9083,7 +9256,7 @@ function finalizeComboLabelForCombinationLine(label) {
 }
 
 /**
- * 組み合わせ「〇〇」候補を LLM で削ぎ落とす（KAIRO_SPEC 605）。1回の API で複数ラベルをまとめて処理。
+ * 組み合わせ「〇〇」候補を LLM で削ぎ落とす（KAIRO_SPEC：各短語**目安 3〜7 文字**・上限は `KAIRO_COMBO_SHORT_LABEL_MAX_CHARS`）。1回の API で複数ラベルをまとめて処理。
  * 失敗時は null（呼び出し側でヒューリスティック finalize にフォールバック）。
  */
 async function shortenComboLabelsForCombinationLineWithLlm(state, rawParts) {
@@ -9096,7 +9269,7 @@ async function shortenComboLabelsForCombinationLineWithLlm(state, rawParts) {
       "あなたは医療チャット「今の状態について」の**組み合わせ行**用ラベル編集者です。出力はJSONのみ。",
       "各要素は、箇条書きやスロットから**機械的につながれた長い語**で、元から**かなりぎこちない**ことが多いです。",
       "だからこそ、**事実・数値・意味は変えずに**、組み合わせ行に並べる**短い名詞句**へそれぞれ削ぎ落としてください（例：ズキズキする痛み→ズキズキ、やや強いズキズキする頭痛→やや強い頭痛）。",
-      `【制約】各ラベルは最大${KAIRO_COMBO_SHORT_LABEL_MAX_CHARS}文字。超過は禁止（短く切る）。`,
+      `【文字数】各ラベルは**目安 ${KAIRO_COMBO_SHORT_LABEL_TARGET_MIN_CHARS}〜${KAIRO_COMBO_SHORT_LABEL_TARGET_MAX_CHARS}文字**（意味が通る最短の名詞句）。1〜2文字だけの出力は避ける。絶対上限は ${KAIRO_COMBO_SHORT_LABEL_MAX_CHARS} 文字まで（超過禁止）。`,
       "【禁止】新しい症状・病名推測・入力にない事実の追加。",
       `【形式】厳密なJSON: {"labels":["..."]} のみ。labels の要素数は必ず ${items.length} 個（上の候補と同じ順序）。`,
     ].join("\n");
@@ -9133,7 +9306,7 @@ async function shortenComboLabelsForCombinationLineWithLlm(state, rawParts) {
   }
 }
 
-/** 組み合わせパーツを LLM で短縮し、失敗時は従来の finalize のみ */
+/** 組み合わせパーツを LLM で短縮（各ラベル目安 3〜7 文字）、失敗時は `finalizeComboLabelForCombinationLine` のみ */
 async function finalizeCombinationPartsWithLlm(state, rawParts) {
   if (!Array.isArray(rawParts) || rawParts.length === 0) return [];
   const heuristic = rawParts.map((p) => finalizeComboLabelForCombinationLine(p)).filter(Boolean);
@@ -9544,21 +9717,26 @@ function buildGreenYellowComboIntegratedParagraph(state, level, parts) {
 
   if (windy) {
     const lead = clause ? `${clause}ことから、` : `これらの症状の組み合わせから、`;
-    if (lv === "🟡") {
-      return `${lead}風の初期症状としてよく見られる一方で、注意が必要なサインも含まれます。`;
-    }
-    return `${lead}風の初期症状としてよく見られるパターンです。`;
+    const tail =
+      lv === "🟡"
+        ? `風の初期症状としてよく見られる一方で、注意が必要なサインも含まれます。`
+        : `風の初期症状としてよく見られるパターンです。`;
+    return `${lead}\n${tail}`;
   }
 
   const noun = greenYellowPatternNounForTemporary(state);
   const lead = clause ? `${clause}ことから、` : `今の状態の組み合わせから、`;
-  if (lv === "🟡") {
-    return `${lead}一時的な${noun}としてよく見られる一方で、注意が必要なサインも含まれます。`;
-  }
-  return `${lead}一時的な${noun}としてよく見られるパターンです。`;
+  const tail =
+    lv === "🟡"
+      ? `一時的な${noun}としてよく見られる一方で、注意が必要なサインも含まれます。`
+      : `一時的な${noun}としてよく見られるパターンです。`;
+  return `${lead}\n${tail}`;
 }
 
-/** 🤝🟢🟡 専用：共感廃止・3 ブロック固定（KAIRO_SPEC）。短語はヒューリスティックのみ。 */
+/**
+ * 🤝🟢🟡 専用：共感廃止・3 ブロック固定（KAIRO_SPEC）。
+ * **フォールバック用**：`OPENAI_API_KEY` なし・LLM 失敗時など。本線は `buildGreenYellowStateAboutBlockAsync`（LLM 短縮 3〜7 文字目安）。
+ */
 function buildGreenYellowStateAboutBlock(state, level) {
   const rawParts = collectGreenYellowLowMediumCombinationParts(state);
   let parts = rawParts.map((p) => finalizeComboLabelForCombinationLine(p)).filter(Boolean);
@@ -10102,7 +10280,8 @@ function collectModalUserFactsAndSummary(state, summaryFacts = [], summarySectio
     .filter(Boolean)
     .map((l) => String(l).replace(/^[・\s]+/, "").replace(/^→\s*/, "").trim())
     .filter((l) => l.length > 0)
-    .filter((l) => l.length <= 80);
+    .filter((l) => l.length <= 80)
+    .filter((l) => !isPainStrengthSummaryLineForModal(l));
   const userSummary = Array.from(new Set(rawFacts)).slice(0, 12).join("\n");
   return { rawFacts, userSummary };
 }
@@ -10159,7 +10338,7 @@ async function generateYellowCautionBulletsFromSummary(mainSymptom, userSummary,
       "- bullets は2〜3件。各項目は「・<今の状態の要約> → <なぜ注意が必要か（短い理由）>」形式。",
       "- 素材は「今の状態について」のユーザー言動のみ。ユーザーの言っていないことは書かない。",
       "- 診断を断定しない。煽らない。恐怖を煽る表現は禁止。",
-      "- 禁止：「→」右側に痛みスロット由来の表現は使わない（3/10・〇/10・やや強い・中程度・軽い等）。",
+      "- 禁止：「→」右側に痛みスロット由来の表現は使わない（3/10・〇/10・やや強い・やや強め・痛みはやや強め・中程度の痛み・軽い等）。空の括弧（）禁止。",
     ].join("\n");
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -10177,7 +10356,8 @@ async function generateYellowCautionBulletsFromSummary(mainSymptom, userSummary,
       .map((x) => String(x || "").trim())
       .filter((t) => t && /^・/.test(t))
       .filter((t) => !/\d+\s*\/\s*10/.test(t))
-      .slice(0, 3);
+      .slice(0, 3)
+      .map(sanitizeModalCautionWhyBulletLine);
     if (sanitized.length >= 2) return sanitized;
   } catch (_) {
     /* fallback below */
@@ -10621,6 +10801,91 @@ function stripModalReasonNoisePhrases(text) {
   return t;
 }
 
+/** モーダル LLM 入力から痛みの強さスロット相当の行を除く（理由にスロット文言が混入するのを防ぐ） */
+function isPainStrengthSummaryLineForModal(line) {
+  const s = String(line || "").normalize("NFC").trim();
+  if (!s) return false;
+  if (/\d+\s*\/\s*10/.test(s)) return true;
+  if (/痛みスコア|痛みの強さ/.test(s) && /(\d|やや|中程度|強い|軽い|弱い)/.test(s)) return true;
+  if (/^痛みは/.test(s) && /(やや|中程度|軽い|強い|弱い|\/\s*10)/.test(s)) return true;
+  if (/^痛みは「/.test(s)) return true;
+  return false;
+}
+
+/** 同一フレーズの連続重複を畳む（LLM誤出力対策） */
+function collapseDuplicateJapanesePhrases(text) {
+  let t = String(text || "").trim();
+  for (let i = 0; i < 10; i++) {
+    const next = t.replace(/([^\s、。]{3,36})[\s、]*\1/g, "$1");
+    if (next === t) break;
+    t = next;
+  }
+  return t.replace(/\s{2,}/g, " ").trim();
+}
+
+const MODAL_REASON_FALLBACK_GENERIC = "複数の要因が関与しうるとされています。";
+
+/**
+ * モーダル「→」右：痛みの強さスロット相当の表現を除去（KAIRO_SPEC・理由欄禁止）。
+ * 空括弧・重複片・スコア表記の残骸を除去する。
+ */
+function stripPainSlotExpressionsFromModalReason(text) {
+  let t = String(text || "").trim();
+  if (!t) return t;
+
+  t = t.replace(/\d+\s*\/\s*10/g, "");
+  t = t.replace(/\d+\s*点\s*満点/g, "");
+  t = t.replace(/痛みは\s*\d+\s*\/\s*10\s*くらい/g, "");
+  t = t.replace(/痛みは\s*「[^」]*\d+\s*\/\s*10[^」]*」/g, "");
+  t = t.replace(/（\s*）/g, "");
+  t = t.replace(/\(\s*\)/g, "");
+  t = t.replace(/\s*）\s*(?=によって)/g, " ");
+  t = t.replace(/痛みはやや強め/g, " ");
+  t = t.replace(/やや強めの痛み/g, " ");
+  t = t.replace(/痛みは(?:やや強い|やや強め|中程度の痛み|中程度|軽い|強い|弱い)(?:[、。]?)/g, " ");
+  t = t.replace(/痛みが(?:やや強い|やや強め|中程度|軽い|強い|弱い)(?:[、。]?)/g, " ");
+  t = t.replace(/やや強い痛み|中程度の痛み|軽い痛み|強い痛み/g, " ");
+  t = t.replace(/痛みの強さ|痛みスコア|〇\/10/g, " ");
+  t = t.replace(/([一-龯ぁ-んァ-ヶ])）(?=[ぁ-んァ-ヶ一-龯])/g, "$1");
+  t = collapseDuplicateJapanesePhrases(t);
+  t = t.replace(/\s{2,}/g, " ").trim();
+  t = t.replace(/^[、,）\)\s]+/, "");
+  t = t.replace(/^によって[、,]?\s*/g, "");
+  t = t.replace(/が\s*）\s*し/g, "がし");
+  return t.trim();
+}
+
+/** 「→」右の理由を最終サニタイズ（痛みスロット禁止・ノイズ除去・短すぎるときはフォールバック） */
+function sanitizeModalArrowReasonTail(raw) {
+  let t = String(raw || "").trim();
+  t = normalizeModalDiseaseToken(t);
+  t = stripPainSlotExpressionsFromModalReason(t);
+  t = stripModalReasonNoisePhrases(t);
+  t = stripPainSlotExpressionsFromModalReason(t);
+  t = collapseDuplicateJapanesePhrases(t);
+  t = t.replace(/\s{2,}/g, " ").trim();
+  if (
+    !t ||
+    t.length < 5 ||
+    /\d+\s*\/\s*10/.test(t) ||
+    /痛みはやや|やや強め|痛みスコア|痛みは(?:やや|中程度|軽い|強い|弱い)|やや強い痛み|中程度の痛み/.test(t)
+  ) {
+    return MODAL_REASON_FALLBACK_GENERIC;
+  }
+  return t;
+}
+
+/** 🟡 cautionWhyBullets の1行：「→」右を `sanitizeModalArrowReasonTail` で検査 */
+function sanitizeModalCautionWhyBulletLine(line) {
+  const raw = String(line || "").trim();
+  if (!raw) return raw;
+  const arrowIdx = raw.indexOf(" → ");
+  if (arrowIdx === -1) return /^・/.test(raw) ? raw : `・${raw}`;
+  const left = raw.slice(0, arrowIdx).trim();
+  const right = sanitizeModalArrowReasonTail(raw.slice(arrowIdx + 3).trim());
+  return `${left} → ${right}`;
+}
+
 /**
  * 1行を最終表示用に整形（疾患名統一・理由ノイズ除去）。`・病名 → 理由` 形式を想定。
  */
@@ -10633,7 +10898,7 @@ function finalizeModalCauseDisplayLine(item) {
     return `・${normalizeModalDiseaseToken(body)}`;
   }
   const head = normalizeModalDiseaseToken(raw.slice(0, arrowIdx).replace(/^・\s*/, "").trim());
-  const tail = stripModalReasonNoisePhrases(normalizeModalDiseaseToken(raw.slice(arrowIdx + 3).trim()));
+  const tail = sanitizeModalArrowReasonTail(raw.slice(arrowIdx + 3).trim());
   return `・${head} → ${tail}`;
 }
 
@@ -11001,7 +11266,7 @@ async function buildDiseaseSafetyFilteredMessage(
       "- ユーザーが言っていない**具体的な固有名詞**（例：特定の製品名）は書かない。",
       "- conditional = 条件付きで考慮すべき状況（2〜4件）。各項目は「・<病名> → <関連した理由>」形式。**主症状に関連する病名のみ**使用。主症状と無関係な病名は絶対に含めない。理由はユーザー症状と関連付ける。検索結果＋ユーザー症状から要約。煽らない表現。固定テンプレート禁止。**感染症系（ウイルス・細菌・上気道炎・胃腸炎など）はここに分類する**（common に出さない）。",
       "- **common と conditional は重複禁止**：同じ疾患名・同義の原因名を両方に書かない。conditional は「追加で鑑別や受診判断が必要になりうるもの」に限定し、common に既に出した病名・ほぼ同じ内容は conditional に繰り返さない。",
-      "- 禁止（原因モーダル・common/conditional の「→」右側の理由のみ）：痛みの強さスロット由来の表現を絶対に使わない（3/10・〇/10・やや強い・中程度・軽い等。箇条書きの痛み行の言い換えも含めない）。本文のまとめや 🔴 の受診理由箇条書きには適用しない。",
+      "- 禁止（原因モーダル・common/conditional の「→」右側の理由のみ）：痛みの強さスロット由来の表現を絶対に使わない（3/10・〇/10・やや強い・やや強め・痛みはやや強め・中程度の痛み・軽い等。箇条書きの痛み行の言い換えも含めない）。**空の括弧（）や同じ短句の連続は禁止**。本文のまとめや 🔴 の受診理由箇条書きには適用しない。",
       "- 疾患名は**片頭痛**に統一し、**偏頭痛**という表記は使わない。理由文に**痛みは強めで**のような冗長な前置きを重ねない。",
       "- rare_emergency = 稀だが緊急性あり。**2件のみ**（強制）。検索結果＋ユーザー症状から要約。腫瘍・出血・致死・がん・破裂などの重篤疾患はここにのみ入れる。固定テンプレート禁止。",
       "- common/conditional に腫瘍・出血・致死・がん・破裂を含めない",
@@ -11065,20 +11330,13 @@ async function buildDiseaseSafetyFilteredMessage(
   conditional = infectionMoved.conditional;
 
   const userWords = rawFacts;
-  const stripPainScoreFromReason = (text) =>
-    String(text || "")
-      .replace(/\d+\s*\/\s*10/g, "")
-      .replace(/\d+\s*点\s*満点/g, "")
-      .replace(/痛みの強さ|痛みスコア|〇\/10/g, "")
-      .replace(/\s{2,}/g, " ")
-      .trim();
 
   common = common.map((item) => {
     const arrowIdx = item.indexOf(" → ");
     if (arrowIdx === -1) return finalizeModalCauseDisplayLine(item);
     const reason = item.slice(arrowIdx + 3).trim();
     let fixed = replaceUnsaidPhrasesInReason(reason, userWords);
-    fixed = stripPainScoreFromReason(fixed) || fixed;
+    fixed = sanitizeModalArrowReasonTail(fixed);
     return finalizeModalCauseDisplayLine(`${item.slice(0, arrowIdx + 3)}${fixed}`);
   });
 
@@ -11086,7 +11344,7 @@ async function buildDiseaseSafetyFilteredMessage(
   if (common.length < 2) {
     const buildFallbackLine = (d) => {
       const reason = d.desc.replace(/とされる状態です。?$/, "").trim();
-      const fixed = replaceUnsaidPhrasesInReason(reason, userWords);
+      const fixed = sanitizeModalArrowReasonTail(replaceUnsaidPhrasesInReason(reason, userWords));
       return `・${d.name} → ${fixed}`;
     };
     let pool = fallbackPair.map(buildFallbackLine).filter((line) => !isInfectionRelatedModalCauseLine(line));
@@ -11172,7 +11430,7 @@ async function buildDiseaseSafetyFilteredMessage(
     const arrowIdx = item.indexOf(" → ");
     if (arrowIdx === -1) return finalizeModalCauseDisplayLine(item);
     const reason = item.slice(arrowIdx + 3).trim();
-    const fixed = stripPainScoreFromReason(reason) || reason;
+    const fixed = sanitizeModalArrowReasonTail(reason);
     return finalizeModalCauseDisplayLine(`${item.slice(0, arrowIdx + 3)}${fixed}`);
   });
 
@@ -11257,11 +11515,14 @@ async function buildDiseaseSafetyFilteredMessage(
       .map((x) => String(x || "").trim())
       .filter((t) => t && /^・/.test(t))
       .filter((t) => !/\d+\s*\/\s*10/.test(t))
-      .slice(0, 3);
+      .slice(0, 3)
+      .map(sanitizeModalCautionWhyBulletLine);
     cautionWhyBullets =
       sanitized.length >= 2
         ? sanitized
-        : buildYellowCautionBulletsFallback(state, userSummary, mainSymptomDisplay);
+        : buildYellowCautionBulletsFallback(state, userSummary, mainSymptomDisplay).map(
+            sanitizeModalCautionWhyBulletLine
+          );
   }
 
   return {
@@ -11785,7 +12046,14 @@ function dedupeDiseaseSearchResults(results = []) {
  */
 function buildGreenYellowStateModalBridgeLine(state) {
   const label = String(getSyncedMainSymptomDisplayLabel(state) || "").trim() || "症状";
-  return `👉 「${label}」と関連しやすい原因・きっかけの例です（診断名ではありません）`;
+  return `👉 今回の状態は、よくある${label}のパターンに当てはまっています`;
+}
+
+/** 🤝/📝モーダル：🟢/🟡のとき本文末尾に付ける締め（ランダム二択） */
+function pickGreenYellowModalRestClosingLine() {
+  return Math.random() < 0.5
+    ? "👉 今は無理に動かず、しっかり休むことが最も適切な対応です。"
+    : "👉 今は無理に動かず、休息を優先させてください。";
 }
 
 /** 🤝/📝モーダル：🟢は安心材料／🟡は注意理由（本文は `reassuranceBullets` と `cautionWhyBullets` で別フィールド） */
@@ -11863,7 +12131,6 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
 
   const lines = [];
   if (structured) {
-    lines.push("原因・きっかけの例（一般医学的な整理・参考）", "");
     lines.push("🟢 よくある原因");
     structured.common.forEach((c) => lines.push(c.startsWith("・") ? c : `・${c}`));
     if (level === "🟢" || level === "🟡") {
@@ -11913,6 +12180,12 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
     .join("\n")
     .trim();
 
+  let restClosingLine = null;
+  if ((level === "🟢" || level === "🟡") && String(message || "").trim()) {
+    restClosingLine = pickGreenYellowModalRestClosingLine();
+    message = `${String(message).trim()}\n\n${restClosingLine}`;
+  }
+
   if (IS_DEBUG) {
     message += `\n\n[debug]\n主症状(表示同期): ${mainSymptomDisplay}\n主症状(検索): ${mainSymptomForSearch}\nqueryJP: ${queryJP}\nqueryEN: ${queryEN}\nsource: ${sourceNames.join(" / ")}`;
   }
@@ -11922,6 +12195,7 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
     structured: structured ? { ...structured, triageLevel: level } : null,
     triageLevel: level,
     mainSymptom: mainSymptomDisplay,
+    restClosingLine: restClosingLine || undefined,
     query: `${queryJP} || ${queryEN}`,
     queryJP,
     queryEN,
@@ -15551,12 +15825,21 @@ app.post("/api/state-patterns", async (req, res) => {
   try {
     const { conversationId, summaryFacts, summarySection } = req.body || {};
     const state = conversationId ? getOrInitConversationState(conversationId) : initConversationState();
-    const { message, structured, triageLevel, mainSymptom, query, queryJP, queryEN, sourceNames } =
-      await buildConcreteStateDetailsFromSearch(
-        state,
-        Array.isArray(summaryFacts) ? summaryFacts : [],
-        summarySection || ""
-      );
+    const {
+      message,
+      structured,
+      triageLevel,
+      mainSymptom,
+      restClosingLine,
+      query,
+      queryJP,
+      queryEN,
+      sourceNames,
+    } = await buildConcreteStateDetailsFromSearch(
+      state,
+      Array.isArray(summaryFacts) ? summaryFacts : [],
+      summarySection || ""
+    );
     state.lastConcreteDetailsText = message;
     state.lastConcreteQueryJP = queryJP || null;
     state.lastConcreteQueryEN = queryEN || null;
@@ -15565,6 +15848,7 @@ app.post("/api/state-patterns", async (req, res) => {
       structured: structured || undefined,
       triageLevel: triageLevel || undefined,
       mainSymptom: mainSymptom || undefined,
+      restClosingLine: restClosingLine || undefined,
       sourcePolicy: [
         "公的機関",
         "大学病院",
@@ -15592,19 +15876,26 @@ app.post("/api/state-patterns", async (req, res) => {
       errLevel === "🟡"
         ? "・経過や付随症状が変わると判断が変わる → 注意して見る必要がある"
         : "・強い緊急サインが直ちに重なっている情報は今のところ見えていません";
+    let errMessage = [
+      "今の状態は、次のようなパターンと似ています。",
+      "",
+      "■ 現在の症状経過に近いパターン",
+      "症状の強さと経過時間をあわせて見ると、今の状態を理解しやすくなります。",
+      "強さが上がるか、同じ強さのまま続くかが、次の判断ポイントです。",
+      "新しい症状が加わらないかを、短い間隔で確認していくのが安全です。",
+      "",
+      middleHead,
+      middleBullet,
+    ].join("\n");
+    let errRestClosingLine = null;
+    if (errLevel === "🟢" || errLevel === "🟡") {
+      errRestClosingLine = pickGreenYellowModalRestClosingLine();
+      errMessage = `${errMessage}\n\n${errRestClosingLine}`;
+    }
     return res.status(200).json({
-      message: [
-        "今の状態は、次のようなパターンと似ています。",
-        "",
-        "■ 現在の症状経過に近いパターン",
-        "症状の強さと経過時間をあわせて見ると、今の状態を理解しやすくなります。",
-        "強さが上がるか、同じ強さのまま続くかが、次の判断ポイントです。",
-        "新しい症状が加わらないかを、短い間隔で確認していくのが安全です。",
-        "",
-        middleHead,
-        middleBullet,
-      ].join("\n"),
+      message: errMessage,
       triageLevel: errLevel,
+      restClosingLine: errRestClosingLine || undefined,
       sourcePolicy: [],
     });
   }
