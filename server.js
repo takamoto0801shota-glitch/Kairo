@@ -1178,6 +1178,74 @@ function splitByKnownHeaders(text, headers) {
   return blocks;
 }
 
+/**
+ * 同一見出しが複数回出たときは**先頭のブロックのみ**採用し、重複セクションを捨てる（LLMがまとめを二重出力したときの対策）。
+ * 仕様順への並べ替えは呼び出し側で `headers.map` により行う。
+ */
+function splitByKnownHeadersFirstWins(text, headers) {
+  const lines = String(text || "").split("\n");
+  const blocks = new Map();
+  let currentHeader = null;
+  let currentLines = [];
+  let skippingDuplicateSection = false;
+
+  const flush = () => {
+    if (!currentHeader) return;
+    blocks.set(currentHeader, [currentHeader, ...currentLines].join("\n").trim());
+  };
+
+  for (const line of lines) {
+    const matched = headers.find((h) => lineMatchesSummaryHeaderFlex(line, h));
+    if (matched) {
+      if (skippingDuplicateSection) {
+        if (blocks.has(matched)) {
+          currentHeader = null;
+          currentLines = [];
+          continue;
+        }
+        skippingDuplicateSection = false;
+        flush();
+        currentHeader = matched;
+        currentLines = [];
+        continue;
+      }
+      flush();
+      if (blocks.has(matched)) {
+        skippingDuplicateSection = true;
+        currentHeader = null;
+        currentLines = [];
+        continue;
+      }
+      currentHeader = matched;
+      currentLines = [];
+      continue;
+    }
+    if (skippingDuplicateSection) continue;
+    if (currentHeader) {
+      currentLines.push(line);
+    }
+  }
+  flush();
+  return blocks;
+}
+
+/** 重複ブロック除去＋仕様順（欠落があるときは元テキストを返し、呼び出し側のフォールバックに委ねる） */
+function dedupeSummaryBlocksByCanonicalOrder(text, level) {
+  if (!text) return text;
+  let normalizedText = normalizeHospitalMemoHeaderText(text);
+  normalizedText = stripEmergencyBlock(normalizedText);
+  const headers = getRequiredSummaryHeadersByLevel(level);
+  const cleaned = removeForbiddenSummaryBlocks(normalizedText, headers);
+  const blocks = splitByKnownHeadersFirstWins(cleaned, headers);
+  const hasAll = headers.every((h) => blocks.has(h));
+  if (!hasAll) return text;
+  return headers
+    .map((h) => blocks.get(h))
+    .join("\n\n")
+    .trim()
+    .replace(/\n{3,}/g, "\n\n");
+}
+
 const ALL_SUMMARY_HEADERS = [
   "🔴 ここまでの情報を整理します",
   "🟢 ここまでの情報を整理します",
@@ -1237,7 +1305,7 @@ async function enforceSummaryStructureStrict(text, level, history, state) {
   normalizedText = stripEmergencyBlock(normalizedText);
   const headers = getRequiredSummaryHeadersByLevel(level);
   const cleaned = removeForbiddenSummaryBlocks(normalizedText, headers);
-  const blocks = splitByKnownHeaders(cleaned, headers);
+  const blocks = splitByKnownHeadersFirstWins(cleaned, headers);
   const hasAll = headers.every((h) => blocks.has(h));
   if (!hasAll) {
     return await buildLocalSummaryFallback(level, history, state);
@@ -4034,30 +4102,58 @@ function pickActionsForBlock(plan, maxCount = 3) {
 }
 
 /**
- * ② 予想経過の「特例」：経過が「1時間以上前」の類（さっき・数分級以外）のとき true。
- * KAIRO_SPEC 10.1 ②：数日スケールの見通し文に切り替える。
+ * ② 予想経過・特例B：日単位以上（KAIRO_SPEC 10.1 ②）。`durationMeta.selectedIndex === 2` または文脈が「昨日」「数日」等。
  */
-function isExpectedCourseLongDurationVariant(state) {
+function isExpectedCourseDaysScaleVariant(state) {
   if (!state) return false;
   const idx = state.durationMeta?.selectedIndex;
-  if (idx === 1 || idx === 2) return true;
-  if (idx === 0) return false;
+  if (idx === 2) return true;
+  if (idx === 0 || idx === 1) return false;
   const durationRaw = String(
     getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "")
   ).trim();
   if (!durationRaw) return false;
   if (/(さっき|今さっき|たった今|数分|数十分)/.test(durationRaw)) return false;
-  return true;
+  return /(昨日|一昨日|\d+\s*日|日前|昨日から|先週|先月|数日|半日以上|一日|1日以上|週間|カ月)/.test(durationRaw);
+}
+
+/**
+ * ② 予想経過・特例A：数時間スケール（数時間前・一時間前・半日など）。`selectedIndex === 1`。
+ * 「数日かけて」は使わず「数時間ほどで」系にする。
+ */
+function isExpectedCourseHoursScaleVariant(state) {
+  if (!state) return false;
+  const idx = state.durationMeta?.selectedIndex;
+  if (idx === 1) return true;
+  if (idx === 0 || idx === 2) return false;
+  const durationRaw = String(
+    getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "")
+  ).trim();
+  if (!durationRaw) return false;
+  if (/(さっき|今さっき|たった今|数分|数十分)/.test(durationRaw)) return false;
+  if (/(昨日|一昨日|\d+\s*日|日前|昨日から|先週|先月|数日|半日以上|一日|1日以上|週間|カ月)/.test(durationRaw)) {
+    return false;
+  }
+  return /(数時間|１時間|1時間|一時間|時間前|半日)/.test(durationRaw);
 }
 
 /** ② 予想経過（安心設計） */
 function buildExpectedCourse(context = {}, state = null) {
-  if (state && isExpectedCourseLongDurationVariant(state)) {
+  if (state && isExpectedCourseDaysScaleVariant(state)) {
     const templates = [
-      "このまま安静にされていれば、数日かけて徐々に回復していくことが多いです。",
-      "このまま無理をせずお休みになられていれば、多くの場合は数日のうちに徐々に良くなっていきます。",
-      "安静を続けられていれば、数日ほどで落ち着いてくることが多いです。",
-      "急がず体を休めていらっしゃれば、だいたい数日かけて回復に向かうことが多いです。",
+      "このまま安静にしていれば、数日かけて徐々に回復していくことが多いです。",
+      "このまま無理をせず休んでいるなら、多くの場合は数日のうちに徐々に良くなっていきます。",
+      "安静を続けているなら、数日ほどで落ち着いてくることが多いです。",
+      "急がず体を休めているなら、だいたい数日かけて回復に向かうことが多いです。",
+    ];
+    return templates[Math.floor(Math.random() * templates.length)];
+  }
+  if (state && isExpectedCourseHoursScaleVariant(state)) {
+    const templates = [
+      "このまま安静にしていれば、数時間ほどで徐々に落ち着いていくことが多いです。",
+      "このまま無理をせず休んでいるなら、多くの場合は数時間のうちに様子が良くなっていくことが多いです。",
+      "安静を続けているなら、数時間ほどで変化が見えやすくなることが多いです。",
+      "急がず体を休めているなら、だいたい数時間ほどで回復に向かいやすいです。",
     ];
     return templates[Math.floor(Math.random() * templates.length)];
   }
@@ -4110,7 +4206,7 @@ async function refineDoActionsWithLLM(plan, state, level, options = {}) {
     }))
     .slice(0, forSummary ? 3 : 4);
 
-  const minRequired = forSummary ? 2 : 3;
+  const minRequired = forSummary ? 2 : 4;
   const ctx = plan?.currentStateContext || {};
   const mainSymptom = String(ctx?.mainSymptom || ctx?.location || "症状").trim();
 
@@ -4133,7 +4229,7 @@ async function refineDoActionsWithLLM(plan, state, level, options = {}) {
           "曖昧表現禁止（例：「安静に」だけは禁止）。「何をどのくらい」が分かる具体動作＋軽い理由をセットで出す。",
           "理由行に ・ は使わない。番号付き（1) / 1️⃣）は禁止。医療行為の指示・危険行為・専門処置は禁止。",
           "次の形式で返す: {\"do\":[{\"action\":\"...\",\"reason\":\"...\"}]}",
-          forSummary ? "doは2件。各reasonは検索要点と整合する確実な理由にする。" : "doは最低3件、最大4件。各reasonは検索要点と整合する確実な理由にする。",
+          forSummary ? "doは2件。各reasonは検索要点と整合する確実な理由にする。" : "doは必ずちょうど4件。各reasonは検索要点と整合する確実な理由にする。",
           isYellow && !forSummary ? "OTC（市販薬：鎮痛薬・整腸剤・のど飴・ワセリン等）を1件必ず含める。" : "",
           "「症状メモを2時間ごとに1回...」は禁止。",
         ]
@@ -4223,7 +4319,8 @@ function buildDoActionsFromPlan(plan, state, level, options = {}) {
       ensured = [...ensured, getOtcActionForYellowModal(topic)].slice(0, maxCount);
     }
   }
-  if (!forSummary && ensured.length < 4 && !skipSupplements) {
+  // LLM 由来（actionsOverride）で3件以下のときも、モーダルは必ず4件に補填する（skipSupplements では止めない）
+  if (!forSummary && ensured.length < 4) {
     const extra = ensureMinimumDoActions(
       ensured.map((x) => ({ title: x.action, reason: x.reason, isOtc: false })),
       4,
@@ -8181,41 +8278,55 @@ function bulletsAreSimilar(a, b) {
 }
 
 /**
- * 同一情報の短い行と長い行が並ぶとき、長い方1行に寄せる（短い方を落とす）。
- * 後から来た長い行が短い行を置き換える。
+ * 一方の行が他方に含まれる（同じ文・連語の重複）とき、長い行を落とし短い行を残す。
  */
 function dedupeBulletsBySubsumption(bullets) {
   if (!Array.isArray(bullets) || bullets.length <= 1) return bullets || [];
-  const out = [];
   const norm = (x) => normalizeBulletKeyForDedupe(x);
-  const minCore = 6;
-  for (const b of bullets) {
-    const nb = norm(b);
-    if (!nb || nb.length < 2) continue;
-    const filtered = out.filter((o) => {
-      const no = norm(o);
-      if (!no.length) return true;
-      return !(nb.length > no.length && no.length >= minCore && nb.includes(no));
-    });
-    out.length = 0;
-    out.push(...filtered);
-    const coveredByLonger = out.some((o) => {
-      const no = norm(o);
-      return no.length > nb.length && nb.length >= minCore && no.includes(nb);
-    });
-    if (coveredByLonger) continue;
-    out.push(b);
+  const minCore = 4;
+  const lines = [...new Set(bullets.map((b) => String(b || "").trim()).filter(Boolean))];
+  const seenNorm = new Set();
+  const uniq = [];
+  for (const b of lines) {
+    const n = norm(b);
+    if (!n || seenNorm.has(n)) continue;
+    seenNorm.add(n);
+    uniq.push(b);
   }
-  return out;
+  const toRemove = new Set();
+  for (let i = 0; i < uniq.length; i++) {
+    for (let j = 0; j < uniq.length; j++) {
+      if (i === j) continue;
+      const ni = norm(uniq[i]);
+      const nj = norm(uniq[j]);
+      if (ni.length < minCore || nj.length < minCore) continue;
+      if (ni.length > nj.length && ni.includes(nj)) {
+        toRemove.add(uniq[i]);
+      }
+    }
+  }
+  return uniq.filter((b) => !toRemove.has(b));
 }
 
-/** 同趣旨の行を1つに（先に出た行を優先）。bulletsAreSimilar に依存 */
+/** 同趣旨の行を1つに（含み関係なら短い方を優先）。bulletsAreSimilar に依存 */
 function dedupeBulletsSequentialSimilarity(bullets) {
   if (!Array.isArray(bullets) || bullets.length <= 1) return bullets || [];
   const out = [];
   for (const b of bullets) {
-    if (out.some((o) => bulletsAreSimilar(o, b))) continue;
-    out.push(b);
+    const line = String(b || "").trim();
+    if (!line) continue;
+    const nb = normalizeBulletKeyForDedupe(line);
+    let replaced = false;
+    for (let i = 0; i < out.length; i++) {
+      if (!bulletsAreSimilar(out[i], line)) continue;
+      const ne = normalizeBulletKeyForDedupe(out[i]);
+      if (nb.length > 0 && ne.length > 0 && nb.length < ne.length) {
+        out[i] = line;
+      }
+      replaced = true;
+      break;
+    }
+    if (!replaced) out.push(line);
   }
   return out;
 }
@@ -12049,7 +12160,7 @@ function buildGreenYellowStateModalBridgeLine(state) {
   return `👉 今回の状態は、よくある${label}のパターンに当てはまっています`;
 }
 
-/** 🤝/📝モーダル：🟢/🟡のとき本文末尾に付ける締め（ランダム二択） */
+/** 🤝/📝モーダル：🟢/🟡のとき `acceptanceConviction`（納得文）の直後に付ける締め（ランダム二択） */
 function pickGreenYellowModalRestClosingLine() {
   return Math.random() < 0.5
     ? "👉 今は無理に動かず、しっかり休むことが最も適切な対応です。"
@@ -12129,6 +12240,7 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
     /* fallback to plain message */
   }
 
+  let restClosingLine = null;
   const lines = [];
   if (structured) {
     lines.push("🟢 よくある原因");
@@ -12151,6 +12263,9 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
       lines.push(
         String(structured.acceptanceConviction || "").trim() || GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK
       );
+      lines.push("");
+      restClosingLine = pickGreenYellowModalRestClosingLine();
+      lines.push(restClosingLine);
       lines.push("");
     }
     lines.push("🔴 すぐ受診が必要なサイン（折りたたみ・初期非表示）");
@@ -12180,8 +12295,7 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
     .join("\n")
     .trim();
 
-  let restClosingLine = null;
-  if ((level === "🟢" || level === "🟡") && String(message || "").trim()) {
+  if ((level === "🟢" || level === "🟡") && String(message || "").trim() && !restClosingLine) {
     restClosingLine = pickGreenYellowModalRestClosingLine();
     message = `${String(message).trim()}\n\n${restClosingLine}`;
   }
@@ -13528,13 +13642,13 @@ function getPainSeverityScore(state) {
 }
 
 /**
- * RED抑制：経過が「さっき」「数時間前」相当のときは 🔴 を禁止（PAIN / INFECTION）。
+ * RED抑制：経過が「さっき」「数時間前」相当のときは 🔴 を禁止（PAIN / INFECTION / GI）。
  * INFECTION かつ痛みスコアが 8 以上のときだけガード解除（KAIRO_SPEC RED抑制ガード）。
- * 喉主症状 INFECTION は例外にせず、短い経過では痛み高値でも常にガード（🟢/🟡 のみ）。
+ * GI はガードのみ（解除条件なし）。喉主症状 INFECTION は例外にせず、短い経過では痛み高値でも常にガード（🟢/🟡 のみ）。
  */
 function shouldBlockRedByRecentShortDuration(state) {
   const category = state?.triageCategory || resolveQuestionCategoryFromState(state);
-  if (category !== "PAIN" && category !== "INFECTION") return false;
+  if (category !== "PAIN" && category !== "INFECTION" && category !== "GI") return false;
   if (category === "INFECTION") {
     if (
       state?.slotFilled?.pain_score === true &&
@@ -13964,6 +14078,7 @@ async function generateSummaryForConfirmation(conversationId) {
   aiResponse = stripHospitalMapLinks(aiResponse);
   aiResponse = stripMcForRed(aiResponse, level);
   aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
+  aiResponse = dedupeSummaryBlocksByCanonicalOrder(aiResponse, level);
   const decisionType = level === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING";
   // まとめ「返却済み」は確認応答で HTTP レスを返すときのみ立てる（markSummaryDeliveredAndFollowUpPhase）。
   // ここで立てると summaryShown が先に true になり、確認応答分岐（!summaryShown）に入らずまとめが出ない。
@@ -15328,7 +15443,6 @@ app.post("/api/chat", async (req, res) => {
           historyTextForOtc
         );
       }
-      conversationState[conversationId].summaryText = aiResponse;
       if (level === "🔴") {
         const hospitalName = conversationState[conversationId].hospitalRecommendation?.name;
         const hasType = aiResponse.includes("タイプ：");
@@ -15405,6 +15519,8 @@ app.post("/api/chat", async (req, res) => {
       aiResponse = stripHospitalMapLinks(aiResponse);
       aiResponse = stripMcForRed(aiResponse, level);
       aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
+      aiResponse = dedupeSummaryBlocksByCanonicalOrder(aiResponse, level);
+      conversationState[conversationId].summaryText = aiResponse;
       const decisionType =
         level === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING";
       markSummaryDeliveredAndFollowUpPhase(conversationState[conversationId]);
@@ -15999,7 +16115,7 @@ app.post("/api/action-details", async (req, res) => {
                 messages: [
                   {
                     role: "system",
-                    content: `主症状「${mainSymptom}」に合わせて、今すぐやること2件とやらないほうがいいこと1件を、それぞれ「・」と「→」形式で生成。見出しは「■今すぐやること」「■やらないほうがいいこと」。`,
+                    content: `主症状「${mainSymptom}」に合わせて、今すぐやること4件とやらないほうがいいこと1件を、それぞれ「・」と「→」形式で生成。見出しは「■今すぐやること」「■やらないほうがいいこと」。`,
                   },
                   { role: "user", content: retryHistoryText || "症状の状態を確認しました。" },
                 ],

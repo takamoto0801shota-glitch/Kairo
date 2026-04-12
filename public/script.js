@@ -618,7 +618,7 @@ function buildGreenYellowStateModalBridgeLineClient(mainSymptom) {
   return `👉 今回の状態は、よくある${label}のパターンに当てはまっています`;
 }
 
-/** サーバ `pickGreenYellowModalRestClosingLine` と同文言（🟢/🟡モーダル末尾・ランダム二択） */
+/** サーバ `pickGreenYellowModalRestClosingLine` と同文言（🟢/🟡・納得文の直後・ランダム二択） */
 function pickGreenYellowModalRestClosingLineClient() {
   return Math.random() < 0.5
     ? "👉 今は無理に動かず、しっかり休むことが最も適切な対応です。"
@@ -652,6 +652,10 @@ function renderStructuredStateModal(body, { structured, message, triageLevel, ma
     lines.push("");
     const conv = String(s.acceptanceConviction || "").trim() || GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK;
     lines.push(conv);
+    lines.push("");
+    lines.push(
+      String(restClosingLine || "").trim() || pickGreenYellowModalRestClosingLineClient()
+    );
   } else if (triageLevel === "🔴") {
     lines.push(s.reassuranceCommon || "");
     lines.push("");
@@ -697,14 +701,6 @@ function renderStructuredStateModal(body, { structured, message, triageLevel, ma
     body.appendChild(rareSection);
   } else {
     body.appendChild(pre);
-  }
-  if (triageLevel === "🟢" || triageLevel === "🟡") {
-    const closing = document.createElement("div");
-    closing.style.marginTop = "12px";
-    closing.style.whiteSpace = "pre-wrap";
-    closing.textContent =
-      String(restClosingLine || "").trim() || pickGreenYellowModalRestClosingLineClient();
-    body.appendChild(closing);
   }
 }
 
