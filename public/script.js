@@ -625,6 +625,26 @@ function pickGreenYellowModalRestClosingLineClient() {
     : "👉 今は無理に動かず、休息を優先させてください。";
 }
 
+/** API がオブジェクトを混ぜたときに [object Object] にならないよう1行に正規化 */
+function normalizeModalCauseLineClient(line) {
+  if (line == null || line === "") return "";
+  if (typeof line === "string") return line;
+  if (typeof line === "object") {
+    const o = line;
+    const left = [o.label, o.name, o.text, o.title, o.cause, o.left, o.head]
+      .map((k) => (o[k] != null && String(o[k]).trim() ? String(o[k]).trim() : ""))
+      .find(Boolean) || "";
+    const right = [o.reason, o.desc, o.detail, o.description, o.tail]
+      .map((k) => (o[k] != null && String(o[k]).trim() ? String(o[k]).trim() : ""))
+      .find(Boolean) || "";
+    if (left && right) return `・${left.replace(/^・\s*/, "")} → ${right}`;
+    if (left) return left.startsWith("・") ? left : `・${left}`;
+    return right || "";
+  }
+  const s = String(line);
+  return s === "[object Object]" ? "" : s;
+}
+
 function renderStructuredStateModal(body, { structured, message, triageLevel, mainSymptom, restClosingLine }) {
   const s = structured;
   if (!s) {
@@ -634,20 +654,34 @@ function renderStructuredStateModal(body, { structured, message, triageLevel, ma
   const showRareByDefault = triageLevel === "🔴";
   const lines = [];
   lines.push("🟢 よくある原因");
-  (s.common || []).forEach((c) => lines.push(c.startsWith("・") ? c : `・${c}`));
+  (s.common || []).forEach((c) => {
+    const t = normalizeModalCauseLineClient(c);
+    if (!t) return;
+    lines.push(t.startsWith("・") ? t : `・${t}`);
+  });
   if (triageLevel === "🟢" || triageLevel === "🟡") {
     lines.push(buildGreenYellowStateModalBridgeLineClient(mainSymptom));
     lines.push("");
   }
   lines.push("🟡 状況によっては確認が必要");
-  (s.conditional || []).forEach((c) => lines.push(c.startsWith("・") ? c : `・${c}`));
+  (s.conditional || []).forEach((c) => {
+    const t = normalizeModalCauseLineClient(c);
+    if (!t) return;
+    lines.push(t.startsWith("・") ? t : `・${t}`);
+  });
   lines.push("");
   if (triageLevel === "🟢" || triageLevel === "🟡") {
     lines.push(getGreenYellowModalMiddleBlockHeadingClient(triageLevel));
     if (triageLevel === "🟢") {
-      (s.reassuranceBullets || []).forEach((b) => lines.push(b));
+      (s.reassuranceBullets || []).forEach((b) => {
+        const t = normalizeModalCauseLineClient(b);
+        if (t) lines.push(t);
+      });
     } else {
-      (s.cautionWhyBullets || []).forEach((b) => lines.push(b));
+      (s.cautionWhyBullets || []).forEach((b) => {
+        const t = normalizeModalCauseLineClient(b);
+        if (t) lines.push(t);
+      });
     }
     lines.push("");
     const conv = String(s.acceptanceConviction || "").trim() || GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK;
@@ -660,7 +694,10 @@ function renderStructuredStateModal(body, { structured, message, triageLevel, ma
     lines.push(s.reassuranceCommon || "");
     lines.push("");
     lines.push("今回受診をおすすめしている理由");
-    (s.redVisitReasonsBullets || []).forEach((b) => lines.push(b));
+    (s.redVisitReasonsBullets || []).forEach((b) => {
+      const t = normalizeModalCauseLineClient(b);
+      if (t) lines.push(t);
+    });
     lines.push("");
     lines.push("・様子を見る選択もありますが、このケースではリスクがあります。");
   }
@@ -688,7 +725,16 @@ function renderStructuredStateModal(body, { structured, message, triageLevel, ma
     rarePre.style.whiteSpace = "pre-wrap";
     rarePre.style.fontFamily = "inherit";
     rarePre.style.margin = "0";
-    rarePre.textContent = "🔴 すぐ受診が必要なサイン\n" + rareItems.map((r) => (r.startsWith("・") ? r : `・${r}`)).join("\n");
+    rarePre.textContent =
+      "🔴 すぐ受診が必要なサイン\n" +
+      rareItems
+        .map((r) => {
+          const t = normalizeModalCauseLineClient(r);
+          if (!t) return "";
+          return t.startsWith("・") ? t : `・${t}`;
+        })
+        .filter(Boolean)
+        .join("\n");
     rarePre.style.display = showRareByDefault ? "block" : "none";
     toggleBtn.addEventListener("click", () => {
       const isHidden = rarePre.style.display === "none";
