@@ -985,13 +985,14 @@ ${requiredLevel === "🔴"
   - ①受診の肯定：「今の状況で受診を選ぶのは適切な判断です」等、判断をはっきり肯定する。
   - ②行動の後押し：「無理に我慢せず、一度確認してもらうと安心です」等（①②を長くしすぎない）。
   - トーン：不安を煽らない。でも判断ははっきり肯定する。
-  - カテゴリ別：PAIN→痛みの相談、SKIN→皮膚の相談、GI→消化器の相談、INFECTION→発熱・喉の相談など、症状に合わせて受診の肯定を具体的に。`
+  - カテゴリ別：PAIN→痛みの相談、SKIN→皮膚の相談、GI→消化器の相談、INFECTION→発熱・喉の相談、TIRED→疲労・だるさ・肩こり・睡眠不足の相談など、症状に合わせて受診の肯定を具体的に。`
   : `- 🟢/🟡の場合：見出しは「🌱 最後に」。**2文以内**（「。」は2つまで）。短く簡潔に。
   - ①休息の指示を1文で（必ず「休息」を含める）。カテゴリに合わせて具体的に：
     - PAIN（痛み系）：動きを控え、安静を優先する指示を。
     - SKIN（皮膚粘膜系）：刺激を避け、患部を休める指示を。
     - GI（消化器系）：消化を休める、食事を控える指示を。
     - INFECTION（発熱感染系）：休養・体を休める指示を。
+    - TIRED（疲労・肩こり・睡眠不足系）：無理を減らし、睡眠と負荷のバランスを整える休息の指示を。
   - ②必要なら再訪や安心の一言を1文まで（長い説明は禁止）。
   - トーン：優しいがはっきり指示。「〜してください」を優先。
   - 主症状に合わせて、その症状に合った休息の指示を生成する。汎用表現禁止。`}
@@ -1747,9 +1748,11 @@ function symptomMatchScore(candidate, category) {
   } else if (category === "GI") {
     if (/消化器|gastro|digestive/.test(hay)) score += 3;
     if (/内科|internal/.test(hay)) score += 1;
-  } else if (category === "INFECTION") {
+  } else   if (category === "INFECTION") {
     if (/gp|general practitioner|family doctor|fever|internal/.test(hay)) score += 2;
     if (/clinic/.test(hay)) score += 1;
+  } else if (category === "TIRED") {
+    if (/内科|クリニック|internal|clinic|gp|general practitioner|family doctor/.test(hay)) score += 2;
   } else {
     if (/内科|クリニック|internal|clinic|gp/.test(hay)) score += 2;
   }
@@ -1886,6 +1889,8 @@ function getGpSearchKeywordsByCategory(category) {
       return ["gastro clinic", "internal medicine clinic", "general practitioner clinic"];
     case "INFECTION":
       return ["general practitioner clinic", "family doctor", "fever clinic"];
+    case "TIRED":
+      return ["general practitioner clinic", "internal medicine clinic", "family doctor"];
     default:
       return ["general practitioner clinic", "family doctor", "medical clinic"];
   }
@@ -2274,6 +2279,11 @@ function getSymptomFitReasonsByCategory(category) {
     case "INFECTION":
       return [
         "発熱や体調不良の相談で利用されることが多い",
+        "体調不良の初期相談で利用されることが多い",
+      ];
+    case "TIRED":
+      return [
+        "疲労感や体調不良の初期相談で利用されることが多い",
         "体調不良の初期相談で利用されることが多い",
       ];
     default:
@@ -4411,6 +4421,7 @@ async function generateLastBlockWithLLM(level, state, contextText = "") {
       SKIN: "皮膚粘膜系：刺激を避け、患部を休める指示を。",
       GI: "消化器系（腹痛・下痢など）：消化を休める、食事を控える指示を。",
       INFECTION: "発熱感染系（喉・咳・熱など）：休養・体を休める指示を。",
+      TIRED: "疲労・だるさ・肩こり・首こり・睡眠不足系：無理を減らし、休息とリズムを整える指示を。",
     };
     return hints[category] || hints.PAIN;
   })();
@@ -4853,6 +4864,9 @@ async function buildConcreteImmediateActionsDetails(state, actionSection = "") {
 
 function mapDailyImpactAnswerToRestLevel(answer) {
   const normalized = String(answer || "").trim();
+  if (normalized === "ほぼ問題ない") return "NONE";
+  if (normalized === "少しつらい") return "LIGHT";
+  if (/^かなりつらい/.test(normalized)) return "STRONG";
   if (normalized === "普通に動ける") return "NONE";
   if (normalized === "少しつらいが動ける") return "LIGHT";
   if (normalized === "動けないほどつらい") return "STRONG";
@@ -4895,6 +4909,14 @@ function resolveRestLevelFromState(state) {
   if (category === "GI") {
     // 仕様: GI は常に LIGHT
     return "LIGHT";
+  }
+  if (category === "TIRED") {
+    const byAnswer = mapDailyImpactAnswerToRestLevel(state?.slotAnswers?.daily_impact);
+    if (byAnswer) return byAnswer;
+    const dailyImpact = state?.slotNormalized?.daily_impact?.riskLevel;
+    if (dailyImpact === RISK_LEVELS.HIGH) return "STRONG";
+    if (dailyImpact === RISK_LEVELS.MEDIUM) return "LIGHT";
+    return "NONE";
   }
   // INFECTION は daily_impact（体温）の回答を 1:1 で参照。PAIN は daily_impact を削除したため LIGHT で固定。
   if (category === "PAIN") return "LIGHT";
@@ -5541,6 +5563,7 @@ function getCheckboxSeedsByCategory(category) {
     INFECTION: ["水分", "安静"],
     GI: ["食事控えめ", "水分少量"],
     SKIN: ["刺激回避", "冷やす"],
+    TIRED: ["無理を減らす", "睡眠リズム"],
   };
   return seeds[category] || seeds.PAIN;
 }
@@ -5563,6 +5586,10 @@ function getPrepareSeedsByCategory(category) {
     SKIN: [
       ["原因になりそうなものを避ける", "悪化を防ぎやすくなります"],
       ["状態の変化をメモしておく", "診察時に伝えやすくなります"],
+    ],
+    TIRED: [
+      ["いつ頃からつらいか一言で言えるようにしておく", "診察がスムーズになります"],
+      ["睡眠や仕事の負荷をメモしておく", "医師に伝えやすくなります"],
     ],
   };
   return seeds[category] || seeds.PAIN;
@@ -5965,6 +5992,10 @@ function isDurationNotJustNow(state) {
 }
 
 function getSlotOrderWithConditional(state) {
+  const categoryEarly = state?.triageCategory || resolveQuestionCategoryFromState(state) || "PAIN";
+  if (categoryEarly === "TIRED") {
+    return ["duration", "daily_impact", "worsening_trend", "associated_symptoms", "cause_category"];
+  }
   let base = [...FIXED_SLOT_ORDER];
   if (isDurationNotJustNow(state)) {
     const durationIdx = base.indexOf("duration");
@@ -6202,6 +6233,10 @@ function extractDurationFromText(text) {
     return { raw_text: raw, normalized: "short", selectedIndex: 0 };
   }
 
+  if (/(今日から|本日から|きょうから)/.test(normalized)) {
+    return { raw_text: "今日から", normalized: "today", selectedIndex: 0 };
+  }
+
   // (1.5) N日前・昨日（数字／漢数字）。誤って「1番」扱いされないよう先に確定
   const daysAgoEarly = parseDaysAgoFromDurationString(rawText);
   if (daysAgoEarly !== null && daysAgoEarly >= 1) {
@@ -6345,11 +6380,23 @@ function extractImpactFromText(text) {
       selectedIndex: 1,
     };
   }
-  if (/普通に生活できる|普通に動ける|問題なく動ける|特に支障はない|日常生活は問題ない/.test(normalized)) {
+  if (/普通に生活できる|普通に動ける|問題なく動ける|特に支障はない|日常生活は問題ない|ほぼ問題ない|ほとんど問題ない/.test(normalized)) {
     return {
-      raw: pickRaw(/普通に生活できる|普通に動ける|問題なく動ける|特に支障はない|日常生活は問題ない/, rawText || normalized),
+      raw: pickRaw(
+        /普通に生活できる|普通に動ける|問題なく動ける|特に支障はない|日常生活は問題ない|ほぼ問題ない|ほとんど問題ない/,
+        rawText || normalized
+      ),
       selectedIndex: 0,
     };
+  }
+  if (/かなりつらい|動くのがしんどい|動くのもしんどい/.test(normalized)) {
+    return {
+      raw: pickRaw(/かなりつらい|動くのがしんどい|動くのもしんどい/, rawText || normalized),
+      selectedIndex: 2,
+    };
+  }
+  if (/^少しつらい$|少しつらいです|ややつらい/.test(normalized)) {
+    return { raw: pickRaw(/少しつらい|ややつらい/, rawText || normalized), selectedIndex: 1 };
   }
   return null;
 }
@@ -6491,6 +6538,9 @@ function parseDurationDayTierFromText(text) {
   const raw = String(text || "").trim();
   if (!raw) return null;
   const normalized = normalizeUserText(raw).replace(/\s+/g, "");
+  if (/(今日から|本日から|きょうから)/.test(normalized)) return 0;
+  if (/(数日前|ここ数日|この数日)/.test(normalized)) return 1;
+  if (/(一週間以上前|１週間以上前|1週間以上前)/.test(normalized)) return 2;
   if (/(さっき|今さっき|たった今|数分|数十分)/.test(normalized)) return 0;
   const daysAgo = parseDaysAgoFromDurationString(raw);
   if (daysAgo !== null && daysAgo >= 1) return 2;
@@ -6713,9 +6763,11 @@ function extractWorseningTrendFromText(text) {
     const m = rawText.match(/(変わらない|横ばい|同じ|変化なし|悪くも良くも|一進一退|良くなったり悪くなったり)/);
     return { raw: (m && m[0]) || "変わらない", selectedIndex: 1 };
   }
-  if (/(改善してきた|落ち着いてきた|回復に向か|良くなって|ましになって|楽になって|改善して)/.test(normalized)) {
+  if (/(改善してきた|落ち着いてきた|回復に向か|回復してきている|回復してきた|良くなって|ましになって|楽になって|改善して)/.test(
+    normalized
+  )) {
     const m = rawText.match(
-      /(改善してきた|落ち着いてきた|回復に向か[^。！？]*|良くなって[^。！？]*|ましになって[^。！？]*|楽になって[^。！？]*|改善して[^。！？]*)/
+      /(改善してきた|落ち着いてきた|回復に向か[^。！？]*|回復してきている[^。！？]*|回復してきた[^。！？]*|良くなって[^。！？]*|ましになって[^。！？]*|楽になって[^。！？]*|改善して[^。！？]*)/
     );
     return { raw: (m && m[0]) || "回復に向かっている", selectedIndex: 0 };
   }
@@ -6790,9 +6842,13 @@ function applySpontaneousSlotFill(state, message, opts = {}) {
     added += 1;
   }
 
+  const catEarly = state.triageCategory || resolveQuestionCategoryFromState(state);
   const worsening = extractWorseningFromText(text);
   const worseningIndex = mapWorseningToOptionIndex(worsening, symptomType);
-  if (worsening && setSlotFromSpontaneous(state, "worsening", {
+  if (
+    worsening &&
+    catEarly !== "TIRED" &&
+    setSlotFromSpontaneous(state, "worsening", {
     rawAnswer: worsening.raw,
     selectedIndex: worseningIndex,
     allowOverwrite: correction,
@@ -6849,7 +6905,10 @@ function applySpontaneousSlotFill(state, message, opts = {}) {
     }
     // PAIN/INFECTION は4問目（付随症状）を必ず出す。主症状語（喉・熱など）が extract に誤マッチしてスロットが埋まると質問が出ない（KAIRO_SPEC 7.1.1）。
     const skipAssocSpontaneous =
-      (state.triageCategory === "PAIN" || state.triageCategory === "INFECTION") && !correction;
+      (state.triageCategory === "PAIN" ||
+        state.triageCategory === "INFECTION" ||
+        state.triageCategory === "TIRED") &&
+      !correction;
     if (
       !skipAssocSpontaneous &&
       setSlotFromSpontaneous(state, "associated_symptoms", {
@@ -7048,7 +7107,11 @@ function ensureSlotFilledConsistency(state) {
   ensureSlotStatusShape(state);
   const hasValue = (v) => v != null && String(v).trim().length > 0;
   for (const slotKey of SLOT_KEYS) {
-    if (slotKey === "worsening_trend" && !isDurationNotJustNow(state)) {
+    if (
+      slotKey === "worsening_trend" &&
+      !isDurationNotJustNow(state) &&
+      (state?.triageCategory || resolveQuestionCategoryFromState(state)) !== "TIRED"
+    ) {
       state.slotFilled[slotKey] = false;
       if (state.slotStatus?.worsening_trend) {
         state.slotStatus.worsening_trend.filled = false;
@@ -7287,6 +7350,15 @@ function isThroatExplicitWorseningTrend(state) {
 function detectQuestionCategory4(text) {
   const normalized = (text || "").replace(/\s+/g, "");
   if (/(腹痛|お腹|下痢|吐き気|胃|嘔吐|便)/.test(normalized)) return "GI";
+  const infectionCue = /(熱|発熱|咳|せき|喉|のど|寒気|風邪|鼻水|鼻づまり)/.test(normalized);
+  if (
+    /(肩こり|首こり|首がこる|疲れ|疲労|だるさ|倦怠|睡眠不足|眠れない|寝不足|眠気|体が重い|慢性的)/.test(
+      normalized
+    ) ||
+    (/(だるい|倦怠)/.test(normalized) && !infectionCue)
+  ) {
+    return "TIRED";
+  }
   if (/(熱|発熱|だるい|咳|せき|喉|のど|寒気|風邪)/.test(normalized)) return "INFECTION";
   if (/(ヒリヒリ|かゆい|赤い|発疹|唇|水ぶくれ|乾燥|口)/.test(normalized)) return "SKIN";
   if (/(頭痛|傷)/.test(normalized)) return "PAIN";
@@ -7335,6 +7407,10 @@ function resolveLockedQuestionCategory(state, historyText = "") {
   if (isThroatMainSymptom(historyText)) {
     state.triageCategory = "INFECTION";
     return "INFECTION";
+  }
+  if (detected === "TIRED") {
+    state.triageCategory = "TIRED";
+    return "TIRED";
   }
   if (detected === "INFECTION") {
     state.triageCategory = "PAIN";
@@ -7396,6 +7472,38 @@ function getCategoryQuestionOverride(category, slotKey) {
       return {
         question: "何かきっかけで思い当たることはありますか？",
         options: ["冷えや寒気がある", "便秘", "食あたり"],
+      };
+    }
+  }
+  if (category === "TIRED") {
+    if (slotKey === "duration") {
+      return {
+        question: "どのくらい続いていますか？",
+        options: ["今日から", "数日前", "一週間以上前"],
+      };
+    }
+    if (slotKey === "daily_impact") {
+      return {
+        question: "日常生活にどれくらい影響がありますか？",
+        options: ["ほぼ問題ない", "少しつらい", "かなりつらい（動くのがしんどい）"],
+      };
+    }
+    if (slotKey === "worsening_trend") {
+      return {
+        question: "今の状態はどうですか？",
+        options: ["回復してきている", "変わらない", "悪化している"],
+      };
+    }
+    if (slotKey === "associated_symptoms") {
+      return {
+        question: "他に気になる症状はありますか？",
+        options: ["吐き気", "息苦しさ", "発熱がある"],
+      };
+    }
+    if (slotKey === "cause_category") {
+      return {
+        question: "思い当たるきっかけはありますか？",
+        options: ["寝不足・疲れ", "ストレス", "体を動かしすぎた"],
       };
     }
   }
@@ -7545,7 +7653,8 @@ function getAllowedIntroRolesBySlot(slotKey) {
 }
 
 function buildIntroTemplateIds(state, questionIndex, slotKey) {
-  if (questionIndex === 0 && slotKey === "pain_score") {
+  const firstInOrder = (state && getSlotOrderWithConditional(state)[0]) || "pain_score";
+  if (questionIndex === 0 && slotKey === firstInOrder) {
     return [];
   }
   // 最後の質問：何があってもPROGRESS／FOCUS禁止。質問文のみ。
@@ -10770,39 +10879,146 @@ function collectModalUserFactsAndSummary(state, summaryFacts = [], summarySectio
   return { rawFacts, userSummary };
 }
 
-/** 🟡：「なぜ注意が必要か」用。スロット＋まとめからフォールバック箇条書き（`・要約 → 理由`） */
+/** 🟡「なぜ注意が必要か」：緊急度スロットが中・高のものだけを対象とする */
+function slotRiskIsMediumOrHighForYellowCaution(rl) {
+  return rl === RISK_LEVELS.MEDIUM || rl === RISK_LEVELS.HIGH;
+}
+
+function getPainScoreRiskLevelForYellowCaution(state) {
+  const fromNorm = state?.slotNormalized?.pain_score?.riskLevel;
+  if (fromNorm) return fromNorm;
+  if (Number.isFinite(state?.lastPainScore)) return riskFromPainScore(state.lastPainScore);
+  return null;
+}
+
+const YELLOW_CAUTION_FACT_LABELS = {
+  pain_score: "痛みの強さ",
+  worsening: "痛み方・質",
+  duration: "経過・いつから",
+  daily_impact: "日常生活への影響",
+  associated_symptoms: "付随症状",
+  worsening_trend: "経過の方向",
+  cause_category: "きっかけ・原因",
+};
+
+/**
+ * 緊急度判定で中リスク・高リスクに相当するスロット要因だけを列挙（🟡「なぜ注意が必要か」用プロンプト素材）
+ */
+function buildYellowCautionMediumHighFactsForPrompt(state) {
+  if (!state) return "";
+  const val = (statusKey, answerKey) =>
+    getSlotStatusValue(state, statusKey, state?.slotAnswers?.[answerKey] || "");
+  const lines = [];
+  const pushIf = (slotId, statusKey, answerKey, rl) => {
+    if (!slotRiskIsMediumOrHighForYellowCaution(rl)) return;
+    const text = String(val(statusKey, answerKey) || "").trim();
+    if (text.length < 2) return;
+    const label = YELLOW_CAUTION_FACT_LABELS[slotId] || slotId;
+    lines.push(`・${label}：${text.slice(0, 160)}`);
+  };
+  pushIf("pain_score", "severity", "pain_score", getPainScoreRiskLevelForYellowCaution(state));
+  pushIf("worsening", "worsening", "worsening", state?.slotNormalized?.worsening?.riskLevel);
+  pushIf("duration", "duration", "duration", state?.slotNormalized?.duration?.riskLevel);
+  pushIf("daily_impact", "impact", "daily_impact", state?.slotNormalized?.daily_impact?.riskLevel);
+  pushIf(
+    "associated_symptoms",
+    "associated",
+    "associated_symptoms",
+    state?.slotNormalized?.associated_symptoms?.riskLevel
+  );
+  pushIf(
+    "worsening_trend",
+    "worsening_trend",
+    "worsening_trend",
+    state?.slotNormalized?.worsening_trend?.riskLevel
+  );
+  pushIf("cause_category", "cause_category", "cause_category", state?.slotNormalized?.cause_category?.riskLevel);
+  return lines.join("\n").trim();
+}
+
+function resolveYellowCautionUserContentForPrompt(state, userSummary) {
+  const mh = buildYellowCautionMediumHighFactsForPrompt(state);
+  if (mh.trim()) {
+    return `【緊急度の内訳（中リスク・高リスクの要因のみ。低リスク相当は含めない）】\n${mh}`;
+  }
+  return String(userSummary || "").trim();
+}
+
+/** 🟡：「なぜ注意が必要か」用。スロットの中・高のみからフォールバック箇条書き（`・要約 → 理由`） */
 function buildYellowCautionBulletsFallback(state, userSummary, mainSymptom) {
   const bullets = [];
   const val = (key, fb) => getSlotStatusValue(state, key, state?.slotAnswers?.[fb] || "");
-  const worsening = val("worsening", "worsening_trend");
-  if (worsening && /悪化|悪くなっ|ひどくなっ|強くなっ/.test(worsening)) {
-    const w = lightBulletCleanupForUserWords(String(worsening).trim());
+  const norm = state?.slotNormalized || {};
+
+  const wtRl = norm.worsening_trend?.riskLevel;
+  const woRl = norm.worsening?.riskLevel;
+  const worseningText = val("worsening_trend", "worsening_trend") || val("worsening", "worsening");
+  if (
+    worseningText &&
+    /悪化|悪くなっ|ひどくなっ|強くなっ|発症時より/.test(worseningText) &&
+    (slotRiskIsMediumOrHighForYellowCaution(wtRl) || slotRiskIsMediumOrHighForYellowCaution(woRl))
+  ) {
+    const w = lightBulletCleanupForUserWords(String(worseningText).trim());
     if (w) bullets.push(`・${w} → 経過が悪化方向に見えるため、判断の見通しを慎重にとる必要がある`);
   }
+
+  const assocRl = norm.associated_symptoms?.riskLevel;
   const associated = val("associated", "associated_symptoms");
-  if (associated && !/^(なし|特にない|これ以外は特にない)/.test(String(associated).trim())) {
+  if (
+    slotRiskIsMediumOrHighForYellowCaution(assocRl) &&
+    associated &&
+    !/^(なし|特にない|これ以外は特にない)/.test(String(associated).trim())
+  ) {
     const a = String(associated).trim().slice(0, 50);
     bullets.push(`・付随として「${a}」→ 症状の組み合わせが増えると、見極めの幅が広がるため注意が必要`);
   }
+
+  const impRl = norm.daily_impact?.riskLevel;
   const impact = val("impact", "daily_impact");
-  if (impact && /(動けない|つらい|困難|支障)/.test(impact)) {
+  if (
+    slotRiskIsMediumOrHighForYellowCaution(impRl) &&
+    impact &&
+    /(動けない|つらい|困難|支障|しんどい|ほぼ問題|普通に動け|平熱|37度|38度)/.test(impact)
+  ) {
     bullets.push(`・日常生活への影響が大きい → 体調の負担が重い状態で、経過の変化を逃さないよう注意が必要`);
   }
-  const summaryLines = String(userSummary || "")
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .slice(0, 4);
-  for (const line of summaryLines) {
-    if (bullets.length >= 3) break;
-    if (line.length < 8) continue;
-    const short = line.length > 60 ? `${line.slice(0, 57)}…` : line;
-    bullets.push(`・${short} → まとめの情報から、注意して見るべき点が残っている`);
-    if (bullets.length >= 2) break;
+
+  const durRl = norm.duration?.riskLevel;
+  const duration = val("duration", "duration");
+  if (slotRiskIsMediumOrHighForYellowCaution(durRl) && duration && String(duration).trim().length >= 2) {
+    const d = lightBulletCleanupForUserWords(String(duration).trim().slice(0, 56));
+    if (d) bullets.push(`・経過「${d}」 → 時間の経過と合わせて状態の幅を考える必要があるため注意が必要`);
+  }
+
+  const painRl = getPainScoreRiskLevelForYellowCaution(state);
+  if (slotRiskIsMediumOrHighForYellowCaution(painRl)) {
+    const pRaw = val("severity", "pain_score");
+    if (pRaw && String(pRaw).trim().length >= 1) {
+      const pw = lightBulletCleanupForUserWords(String(pRaw).trim().slice(0, 40));
+      if (pw) bullets.push(`・${pw} → 体感の強さが中程度以上に寄っているため、経過の変化に注意が必要`);
+    }
+  }
+
+  const causeRl = norm.cause_category?.riskLevel;
+  const cause = val("cause_category", "cause_category");
+  if (slotRiskIsMediumOrHighForYellowCaution(causeRl) && cause && String(cause).trim().length >= 2) {
+    const c = String(cause).trim().slice(0, 50);
+    bullets.push(`・きっかけ「${c}」 → 負荷や誘因が絡むと状態が動きやすいため注意が必要`);
+  }
+
+  if (bullets.length === 0) {
+    const mh = buildYellowCautionMediumHighFactsForPrompt(state);
+    if (mh.trim()) {
+      for (const line of mh.split("\n").filter(Boolean)) {
+        const body = line.replace(/^・/, "").trim();
+        if (body) bullets.push(`・${body} → 緊急度の内訳では中程度以上の要因として整理されているため、見落としなく注意が必要`);
+        if (bullets.length >= 3) break;
+      }
+    }
   }
   if (bullets.length === 0) {
     bullets.push(
-      `・${mainSymptom || "症状"}の経過が変わる可能性がある → 状態の変化を見逃さないよう注意が必要`
+      `・${mainSymptom || "症状"}について総合的に判断すると注意が必要 → 複数の要因の組み合わせで、状態の変化を見逃さないよう注意が必要`
     );
   }
   return bullets.slice(0, 3);
@@ -10811,7 +11027,8 @@ function buildYellowCautionBulletsFallback(state, userSummary, mainSymptom) {
 /** 🟡：`cautionWhyBullets` を LLM で生成（失敗時はフォールバック） */
 async function generateYellowCautionBulletsFromSummary(mainSymptom, userSummary, state) {
   const fallback = () => buildYellowCautionBulletsFallback(state, userSummary, mainSymptom);
-  if (!userSummary || !String(userSummary).trim()) {
+  const material = resolveYellowCautionUserContentForPrompt(state, userSummary);
+  if (!material.trim()) {
     return fallback();
   }
   try {
@@ -10820,7 +11037,8 @@ async function generateYellowCautionBulletsFromSummary(mainSymptom, userSummary,
       "厳守：",
       "- 出力は必ずJSONのみ：{\"bullets\":[\"・...\",\"・...\"]}",
       "- bullets は2〜3件。各項目は「・<今の状態の要約> → <なぜ注意が必要か（短い理由）>」形式。",
-      "- 素材は「今の状態について」のユーザー言動のみ。ユーザーの言っていないことは書かない。",
+      "- **緊急度判定で「低リスク」相当の要因だけ**（極めて軽い・短い経過のみ・付随なしのみ等）に限定した説明は書かない。**中リスク・高リスクに相当する要因**に絞る。",
+      "- 入力の【緊急度の内訳】に列挙された要因のみを素材にする（それ以外の推測は禁止）。",
       "- 診断を断定しない。煽らない。恐怖を煽る表現は禁止。",
       "- 禁止：「→」右側に痛みスロット由来の表現は使わない（3/10・〇/10・やや強い・やや強め・痛みはやや強め・中程度の痛み・軽い等）。空の括弧（）禁止。",
     ].join("\n");
@@ -10828,7 +11046,10 @@ async function generateYellowCautionBulletsFromSummary(mainSymptom, userSummary,
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: prompt },
-        { role: "user", content: `主症状: ${mainSymptom}\n\n【今の状態について（ユーザー言動）】\n${userSummary}` },
+        {
+          role: "user",
+          content: `主症状: ${mainSymptom}\n\n${material.includes("緊急度の内訳") ? material : `【今の状態について（ユーザー言動・中・高の要因のみに絞る）】\n${material}`}`,
+        },
       ],
       temperature: 0.2,
       max_tokens: 600,
@@ -11316,6 +11537,27 @@ function collapseDuplicateJapanesePhrases(text) {
 
 const MODAL_REASON_FALLBACK_GENERIC = "複数の要因が関与しうるとされています。";
 
+/** 原因モーダル「→」右で避けたい定型（〇〇の炎症が△△を引き起こす… 等） */
+function looksLikeModalInflammationCauseArbitraryTemplate(tail) {
+  const s = String(tail || "").trim();
+  if (!s) return false;
+  if (/の炎症が[^。]{0,24}(を引き起こす|を生じさせる)/.test(s)) return true;
+  if (/炎症が[^。]{0,20}を引き起こす/.test(s)) return true;
+  if (/を引き起こすことがある[。.]?$/.test(s) && /炎症/.test(s)) return true;
+  return false;
+}
+
+/** 「→」右がユーザー訴えの言い換えに偏っているとき */
+function looksLikeUserStateParaphraseModalReason(tail) {
+  return /感じている|感じます|優れないと|つらさを(訴え|感じ)|おっしゃ|言ってい|主観的|今のあなた|あなたの体調/.test(String(tail || ""));
+}
+
+function modalReasonTailReferencesMainSymptom(tail, mainSymptomDisplay) {
+  const m = String(mainSymptomDisplay || "").trim();
+  if (m.length < 2) return false;
+  return String(tail || "").includes(m);
+}
+
 /**
  * 「→」左の原因名から、理由文との照合用キーワードを抽出する。
  */
@@ -11367,13 +11609,13 @@ function modalArrowReasonReferencesCause(causeHead, reason) {
 }
 
 /**
- * 「→」右が左と対応しないときの置換：左の原因名を必ず含め、主症状ラベルへ結びつける。
+ * 「→」右が左と対応しない／定型に落ちたときのフォールバック：**一文**で左の原因（疾患・機序名）がどのような病態として扱われるかを述べ、主症状と鑑別上どう対応づけられるか（ユーザー状態の下りではない）。
  */
 function buildModalCauseAlignedReasonTail(causeHead, mainSymptomDisplay) {
   const h = String(causeHead || "").replace(/^・\s*/, "").trim();
   const label = String(mainSymptomDisplay || "症状").trim() || "症状";
   if (!h) return MODAL_REASON_FALLBACK_GENERIC;
-  return `${h}が関与すると、${label}に結びつくことがあるとされています。`;
+  return `「${h}」は、${label}を症状の一つとして説明されうる病態・機序として整理されることがあります。`;
 }
 
 /**
@@ -11455,8 +11697,21 @@ function finalizeModalCauseDisplayLine(item, mainSymptomDisplayForAlign) {
     mainSymptomDisplayForAlign != null && String(mainSymptomDisplayForAlign).trim() !== ""
       ? String(mainSymptomDisplayForAlign).trim()
       : "";
-  if (alignLabel && !modalArrowReasonReferencesCause(head, tail)) {
-    tail = sanitizeModalArrowReasonTail(buildModalCauseAlignedReasonTail(head, alignLabel));
+  if (alignLabel) {
+    const stiff = !tail || tail === MODAL_REASON_FALLBACK_GENERIC;
+    const badTmpl = looksLikeModalInflammationCauseArbitraryTemplate(tail);
+    const userOnly = looksLikeUserStateParaphraseModalReason(tail);
+    const linked = modalArrowReasonReferencesCause(head, tail);
+    const longNatural =
+      String(tail).length >= 22 &&
+      modalReasonTailReferencesMainSymptom(tail, alignLabel) &&
+      !userOnly &&
+      !badTmpl;
+    if (stiff || badTmpl || userOnly) {
+      tail = sanitizeModalArrowReasonTail(buildModalCauseAlignedReasonTail(head, alignLabel));
+    } else if (!linked && !longNatural) {
+      tail = sanitizeModalArrowReasonTail(buildModalCauseAlignedReasonTail(head, alignLabel));
+    }
   }
   return `・${head} → ${tail}`;
 }
@@ -11812,6 +12067,9 @@ async function buildDiseaseSafetyFilteredMessage(
   /** ユーザー向けの「〇〇」（初回安全文・橋渡しと同一）。検索用 mainSymptom とは別 */
   const mainSymptomDisplay = state ? getSyncedMainSymptomDisplayLabel(state) : mainSymptom;
 
+  const stateAboutForCautionPrompt =
+    level === "🟡" && state ? resolveYellowCautionUserContentForPrompt(state, userSummary) : userSummary;
+
   const fallbackPair = getDiseaseFallbackPair(mainSymptom);
   const category = state ? (state.triageCategory || resolveQuestionCategoryFromState(state)) : "PAIN";
   const reassurance = state ? buildReassuranceBulletsForPatterns(state) : ["・強い緊急サインは今のところはっきりしていません"];
@@ -11826,12 +12084,12 @@ async function buildDiseaseSafetyFilteredMessage(
       `- common・conditional・rare_emergency の各要素は**必ず文字列**（1行＝「・原因 → 理由」形式の文字列）。オブジェクト・入れ子は禁止。`,
       `- 緊急度レベルはユーザーメッセージの「緊急度レベル」に従う。🔴のとき acceptance_conviction は ""、caution_why_bullets は []。🟢のとき caution_why_bullets は []。🟡のときのみ caution_why_bullets を2〜3件で埋める。`,
       `- acceptance_conviction（🟢または🟡のみ）：納得文を**ちょうど2文**（各文は「。」終わり）。文末は断定形（「かもしれません」「でしょう」禁止）。意味は「今すぐ受診しても自宅と大きく変わらない」「無理に動くと悪化しやすいので休む方が合理的」に寄せる。主症状ラベルは必要なら1回まで。「あなたの場合」禁止。`,
-      `- caution_why_bullets（🟡のみ）：各要素は「・<今の状態の要約> → <なぜ注意が必要か>」形式。素材はユーザー言動のみ。→右に痛みスロット表現（〇/10等）禁止。`,
+      `- caution_why_bullets（🟡のみ）：各要素は「・<今の状態の要約> → <なぜ注意が必要か>」形式。**緊急度判定で中リスク・高リスクに相当する要因のみ**（低リスク相当だけの行は書かない）。入力に【緊急度の内訳】があるときはその要因に限定。→右に痛みスロット表現（〇/10等）禁止。`,
       "- common = 一般的に頻度が高い**原因・きっかけ・物理的機序**（2〜4件）。各項目は「・<原因名> → <短い理由>」形式。",
       "- **原因名（→の左）は**：病名・状態名・または**具体的な機序**（例：乾燥・摩擦・軽い切り傷・局所刺激・姿勢負荷・睡眠不足など）。主症状と無関係な病名は含めない。",
       "- **主症状が口唇・唇・口角まわりの痛みのとき**：common の左は**切り傷・擦過・皸裂・乾燥・摩擦・刺激（歯・食べ物・歯ブラシ）・口角炎（非感染の機序）**など、**形態・物理機序**を優先。感染が疑われるもの（口唇ヘルペス等）は conditional のみ。",
       "- **禁止（common の左または右）**：ユーザーの現在の状態のラベルや言い換えに相当する語だけを原因にすること。例：「体調不良」「回復傾向」「悪化傾向」「経過の変化」「症状の改善」「今回の状態」などを**原因名にしない**。「→」右側を**ユーザーの主観の要約**にしない（「〜と感じている」「優れないと感じ」「和らいでいる」「体調が〜」等は禁止）。**ユーザーの状態を述べる文は一切書かない**（原因の機序の説明のみ）。",
-      "- **「→」の右（理由）**：**直前の「→」左の原因名（またはその省略形）に語・内容で必ず対応**させる。左と無関係な一般論・別の病名の説明だけを並べることは禁止。**同じ理由文を複数行に流用しない**。その原因が**どのような機序で主症状を引き起こしうるか**の、短い一般医学的説明。検索結果に沿う。ユーザー発言の言い換え・心理描写・経過の要約は書かない。",
+      "- **「→」の右（理由）**：**必ず一文**。直前の「→」左の原因（疾患・機序）が**どんな病態・症状として扱われるか**を簡潔に述べ、**主症状（表示ラベル）**と鑑別上どう対応づけられるかを含める。左の原因名（またはその略称・語）に**必ず対応**させる。左と無関係な一般論・別の病名の説明だけは禁止。**同じ理由文を複数行に流用しない**。**禁止**：「○○の炎症が△△を引き起こすことがある」型の定型句や、炎症語と主症状を機械的に結ぶ短文の連発。「引き起こす」の多用も避ける。検索結果に沿う。ユーザー発言の言い換え・心理描写・経過の要約は書かない。",
       "- **common に「ウイルス感染」という文言を含めない。ウイルス・細菌感染・感染症として位置づける原因（感冒・咽頭炎・胃腸炎・口唇ヘルペス・インフルエンザ等）は必ず conditional のみ**に書く。",
       "- ユーザーが言っていない**具体的な固有名詞**（例：特定の製品名）は書かない。",
       "- conditional = 条件付きで考慮すべき状況（2〜4件）。各項目は「・<病名> → <関連した理由>」形式。**主症状に関連する病名のみ**使用。主症状と無関係な病名は絶対に含めない。**「→」右は必ず左の病名・原因に対応した説明**（左と無関係な一般論のみは禁止）。理由はユーザー症状と関連付ける。検索結果＋ユーザー症状から要約。煽らない表現。固定テンプレート禁止。**感染症系（ウイルス・細菌・上気道炎・胃腸炎など）はここに分類する**（common に出さない）。",
@@ -11850,7 +12108,9 @@ async function buildDiseaseSafetyFilteredMessage(
       `- 上記の主症状に無関係な疾患名・原因例は出さない（別の部位・別系統の一般論として並べない）。`,
       "",
       `緊急度レベル: ${level}`,
-      userSummary ? `\n【今の状態について（ユーザー言動）】\n${userSummary}` : "",
+      stateAboutForCautionPrompt
+        ? `\n【今の状態について（🟡は緊急度の中・高要因に限定）】\n${stateAboutForCautionPrompt}`
+        : "",
       `\n【検索結果（タイトル・スニペットのみ）】\n${searchText}`,
     ].join("\n");
 
@@ -13991,11 +14251,29 @@ function mapFreeTextToOptionIndex(answer, options, type) {
       if (/便秘|出ない|硬い便/.test(text)) return 1;
       if (/冷え|冷たい|体が冷え|冷房/.test(text)) return 0;
     }
+    // TIRED: 経過
+    if (indexOf("回復してきている") >= 0) {
+      if (/悪化している|悪化してきた|ひどくなって/.test(text)) return 2;
+      if (/変わらない|横ばい|同じ|変化なし/.test(text)) return 1;
+      if (/回復してき|回復に向か|良くなって|改善/.test(text)) return 0;
+    }
+    // TIRED: 危険サイン
+    if (indexOf("息苦しさ") >= 0 && indexOf("発熱がある") >= 0) {
+      if (/吐き気|嘔吐|むかむか/.test(text)) return 0;
+      if (/息苦|呼吸困難|息が詰まる/.test(text)) return 1;
+      if (/発熱|熱がある|熱っぽい|体温/.test(text)) return 2;
+    }
+    // TIRED: きっかけ
+    if (indexOf("体を動かしすぎた") >= 0) {
+      if (/寝不足|眠れ|疲れ|睡眠不足/.test(text)) return 0;
+      if (/ストレス|緊張/.test(text)) return 1;
+      if (/動かしすぎ|運動|仕事しすぎ/.test(text)) return 2;
+    }
     // worsening_trend（3.5・全カテゴリ共通）
     if (indexOf("発症時より悪化している") >= 0) {
       if (/発症時より悪化|悪化している|ひどくなって|悪化してきた/.test(text)) return 2;
       if (/変わらない|横ばい|同じ|変化なし/.test(text)) return 1;
-      if (/回復に向か|良くなって|ましになって|楽になって|改善して/.test(text)) return 0;
+      if (/回復に向か|回復してき|良くなって|ましになって|楽になって|改善して/.test(text)) return 0;
     }
   }
 
@@ -14038,6 +14316,11 @@ function mapFreeTextToOptionIndex(answer, options, type) {
   }
 
   if (type === "daily_impact") {
+    if (indexOf("ほぼ問題ない") >= 0) {
+      if (/かなりつらい|動くのがしんどい|動けない|寝込/.test(text)) return 2;
+      if (/少しつらい|ややつらい/.test(text)) return 1;
+      if (/ほぼ問題|問題ない|大丈夫|普通/.test(text)) return 0;
+    }
     if (/動けない|寝込|起き上がれ/.test(text)) return Math.min(2, options.length - 1);
     if (mild.test(text)) return options.length >= 3 ? 1 : 0;
     return 0;
@@ -14053,7 +14336,7 @@ function mapFreeTextToOptionIndex(answer, options, type) {
   if (type === "worsening_trend") {
     if (/発症時より悪化|悪化している|ひどくなって|悪化してきた/.test(text)) return 2;
     if (/変わらない|横ばい|同じ|変化なし|悪くも良くも/.test(text)) return 1;
-    if (/回復に向か|良くなって|ましになって|楽になって|改善して/.test(text)) return 0;
+    if (/回復に向か|回復してき|良くなって|ましになって|楽になって|改善して/.test(text)) return 0;
     return 1;
   }
 
@@ -14156,7 +14439,14 @@ function getPainSeverityScore(state) {
  */
 function shouldBlockRedByRecentShortDuration(state) {
   const category = state?.triageCategory || resolveQuestionCategoryFromState(state);
-  if (category !== "PAIN" && category !== "INFECTION" && category !== "GI") return false;
+  if (
+    category !== "PAIN" &&
+    category !== "INFECTION" &&
+    category !== "GI" &&
+    category !== "TIRED"
+  ) {
+    return false;
+  }
   if (category === "INFECTION") {
     if (
       state?.slotFilled?.pain_score === true &&
@@ -14218,8 +14508,20 @@ function filterComboCandidatesForRedGuardOnset(candidates, state) {
 }
 
 function calculateRiskFromState(state) {
+  const triageCat = state?.triageCategory || resolveQuestionCategoryFromState(state);
   const worseningTrendIndex = getWorseningTrendIndexForRisk(state);
   if (worseningTrendIndex === 2) {
+    if (triageCat === "TIRED") {
+      const imp = state?.slotNormalized?.daily_impact?.riskLevel;
+      if (imp === RISK_LEVELS.MEDIUM || imp === RISK_LEVELS.HIGH) {
+        const blockRedByRecentShortDuration = shouldBlockRedByRecentShortDuration(state);
+        if (blockRedByRecentShortDuration) {
+          return { ratio: 0.64, level: "🟡", urgency: "yellow" };
+        }
+        console.log("---- KAIRO URGENCY DEBUG (worsening_trend=悪化 かつ TIRED impact>=少しつらい → RED) ----");
+        return { ratio: 1, level: "🔴", urgency: "red" };
+      }
+    }
     const painScoreRaw =
       state?.slotFilled?.pain_score === true && Number.isFinite(state?.lastPainScore)
         ? state.lastPainScore
@@ -14238,14 +14540,24 @@ function calculateRiskFromState(state) {
     }
   }
 
-  const scores = {
-    pain: getPainSeverityScore(state),
-    quality: mapRiskLevelToSeverityScore(state?.slotNormalized?.worsening?.riskLevel),
-    onset: mapRiskLevelToSeverityScore(state?.slotNormalized?.duration?.riskLevel),
-    impact: mapRiskLevelToSeverityScore(state?.slotNormalized?.daily_impact?.riskLevel),
-    symptoms: mapRiskLevelToSeverityScore(state?.slotNormalized?.associated_symptoms?.riskLevel),
-    cause: mapRiskLevelToSeverityScore(state?.slotNormalized?.cause_category?.riskLevel),
-  };
+  const scores =
+    triageCat === "TIRED"
+      ? {
+          pain: 0,
+          quality: mapRiskLevelToSeverityScore(state?.slotNormalized?.worsening_trend?.riskLevel),
+          onset: mapRiskLevelToSeverityScore(state?.slotNormalized?.duration?.riskLevel),
+          impact: mapRiskLevelToSeverityScore(state?.slotNormalized?.daily_impact?.riskLevel),
+          symptoms: mapRiskLevelToSeverityScore(state?.slotNormalized?.associated_symptoms?.riskLevel),
+          cause: mapRiskLevelToSeverityScore(state?.slotNormalized?.cause_category?.riskLevel),
+        }
+      : {
+          pain: getPainSeverityScore(state),
+          quality: mapRiskLevelToSeverityScore(state?.slotNormalized?.worsening?.riskLevel),
+          onset: mapRiskLevelToSeverityScore(state?.slotNormalized?.duration?.riskLevel),
+          impact: mapRiskLevelToSeverityScore(state?.slotNormalized?.daily_impact?.riskLevel),
+          symptoms: mapRiskLevelToSeverityScore(state?.slotNormalized?.associated_symptoms?.riskLevel),
+          cause: mapRiskLevelToSeverityScore(state?.slotNormalized?.cause_category?.riskLevel),
+        };
 
   const slotScoreList = [
     scores.pain,
@@ -15487,7 +15799,7 @@ app.post("/api/chat", async (req, res) => {
       const nextSlot = mustAskPainScoreBeforeOtherSlots(stFixed)
         ? "pain_score"
         : isFirstQuestion
-          ? "pain_score"
+          ? missingSlots[0] || "pain_score"
           : reaskSameSlot
             ? lastType
             : missingSlots[0] || (isFirstUserTurn ? SLOT_KEYS[0] : null);
@@ -16114,7 +16426,7 @@ app.post("/api/chat", async (req, res) => {
       const nextSlot = mustAskPainScoreBeforeOtherSlots(st)
         ? "pain_score"
         : isFirstQuestion
-          ? "pain_score"
+          ? missingSlots[0] || "pain_score"
           : reaskSameSlot
             ? lastType
             : missingSlots[0];

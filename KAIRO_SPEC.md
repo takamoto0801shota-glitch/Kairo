@@ -59,7 +59,7 @@
 - 最低質問回数は5回。
 - 質問の上限は設けない（スロット充填を最優先）。
 - まとめに移行する条件は「判断スロットが全て埋まった時点」または「カテゴリ・場合による全質問が完了した時点」のいずれか。
-- カテゴリによりスロット数が異なる（PAIN/GI/SKIN=5、INFECTION=6、worsening_trend ありで+1等）。そのカテゴリの全スロットが未充填のまま判定＋まとめへ進むことを禁止する。
+- カテゴリによりスロット数が異なる（PAIN/GI/SKIN/TIRED=5、INFECTION=6、PAIN/GI/SKIN/INFECTION で duration が「さっき」以外のとき worsening_trend +1 等）。そのカテゴリの全スロットが未充填のまま判定＋まとめへ進むことを禁止する。
 
 ## 5. 最後の質問
 - Kairoが「最後の質問」と判断した場合、質問文頭は
@@ -129,8 +129,8 @@ severityIndex =
 
 **「高」がちょうど1つだけの場合**：上記指数で計算し、結果が🟢でも**強制的に🟡**とする（最低でも🟡。指数が🔴のときはそのまま🔴）。
 
-### RED抑制ガード（PAIN / INFECTION / GI・必須）
-- `PAIN`（痛み系）・`INFECTION`（発熱感染系）・`GI`（消化器系）で、経過時間（スロット3）が「さっき」または「数時間前」の場合、**🔴判定を禁止**する（GI はこのガードのみ適用。INFECTION 固有の解除条件は別途 § を参照）。
+### RED抑制ガード（PAIN / INFECTION / GI / TIRED・必須）
+- `PAIN`（痛み系）・`INFECTION`（発熱感染系）・`GI`（消化器系）・`TIRED`（疲労・肩こり・睡眠不足系）で、経過時間（`duration`）が短いクラス（例：PAIN 系の「さっき」「数時間前」、TIRED 系の「今日から」「数日前」に相当する `selectedIndex` 0〜1）の場合、**🔴判定を禁止**する（GI はこのガードのみ適用。INFECTION 固有の解除条件は別途 § を参照）。
 - **例外（INFECTION のみ）**：痛みの強さ（`pain_score`）が **8 以上**のときは、このガードを**適用しない**（短い経過でも 🔴 になり得る）。**ただし喉主症状の INFECTION**（`isThroatInfectionSession` 相当）ではこの例外を**使わない**（痛みが高くても短い経過では必ず 🟢／🟡）。
 - **喉主症状 INFECTION の 🔴**：経過スロット「悪化傾向」が**明示的に悪化**（`worsening_trend` が HIGH 相当／「発症時より悪化」「悪化している」等）のとき**のみ** 🔴 になり得る。それ以外の喉の痛み系では最終は **🟢 または 🟡**（Phase1・Phase2 いずれも同様）。
 - このガードは Phase1（高リスク2つ以上の即時🔴を含む）/ Phase2（加重指数）の**両方**に適用する（最終判定を🔴にしてはいけない。例外は上記 INFECTION＋痛み8以上のみ。喉主症状 INFECTION は痛み8以上でも短経過ではガード維持）。
@@ -149,21 +149,23 @@ severityIndex =
 6. 原因カテゴリ
 
 ### 7.1.1 症状カテゴリによる質問差し替え（固定）
-症状は以下の4カテゴリに分類する：
+症状は以下の5カテゴリに分類する：
 - PAIN（痛み系）
 - SKIN（皮膚粘膜系）
 - INFECTION（発熱感染系）
 - GI（消化器系）
+- TIRED（疲労・だるさ・肩こり・首こり・睡眠不足系）
 
 カテゴリ判定キーワード（例）：
 - PAIN: 頭痛 / 傷
 - SKIN: ヒリヒリ / かゆい / 赤い / 発疹 / 唇 / 水ぶくれ / 乾燥 / 口
-- INFECTION: 熱 / 発熱 / だるい / 咳 / 喉 / 寒気 / 風邪
+- INFECTION: 熱 / 発熱 / 咳 / 喉 / 寒気 / 風邪（**単独の「だるい」は TIRED 側に寄せ、発熱・咳・喉等の感染示唆と併記されるときは INFECTION**）
 - GI: 腹痛 / お腹 / 下痢 / 吐き気 / 胃 / 嘔吐 / 便
+- TIRED: 肩こり / 首こり / 疲れ / だるさ / 倦怠 / 睡眠不足 / 眠れない / 寝不足 等
 
 質問差し替えルール：
 - PAINは従来の質問を維持する。
-- SKIN / INFECTION / GI の場合は、スロット4・5・6の質問文と選択肢をカテゴリ定義に差し替える。
+- SKIN / INFECTION / GI / TIRED の場合は、該当スロットの質問文と選択肢をカテゴリ定義に差し替える。
 - 各質問は3択で提示し、選択肢は低リスク→中リスク→高リスクの順に並べる。
 - 自由記述は「最も近い選択肢」にマッピングしてスコア計算に使用する（内部計算は従来どおり）。
 
@@ -176,7 +178,7 @@ severityIndex =
 - **選択肢（元から INFECTION 系のとき）**：喉主症状で初めから INFECTION としている場合、または既に `triageCategory` が INFECTION の場合は、**「発熱がある」は出さない**。並びは **・これ以外は特にない、・吐き気がある、・咳や鼻詰まりがある**（低→中→高）。
 - **喉が痛いなど、喉的なものが主症状の時**：必ず初めからずっと INFECTION 系とする（4問目を待たずに最初から INFECTION）。
 - **実装強制**：`triageCategory === "INFECTION"` **または** 主訴・履歴・痛みスロット回答などの合成テキストで **`isThroatMainSymptom` が真**のときは、付随症状の3択を **必ず**「元から INFECTION 系」版（**「発熱がある」なし**・**これ以外は特にない → 吐き気 → 咳や鼻詰まり**）にする。`category` 引数だけに依存せず **`state` と全文脈**で判定する。
-- **付随スロットの自発充填禁止（PAIN/INFECTION）**：`triageCategory` が **PAIN** または **INFECTION** のときは、初回発話の `extractAssociatedSymptoms` 等で **`associated_symptoms` を自発的に埋めない**（主症状語「喉」「熱」「頭痛」などが付随に誤マッチし、4問目がスキップされるのを防ぐ）。訂正意図のあるターンのみ上書き可。
+- **付随スロットの自発充填禁止（PAIN/INFECTION/TIRED）**：`triageCategory` が **PAIN**・**INFECTION**・**TIRED** のときは、初回発話の `extractAssociatedSymptoms` 等で **`associated_symptoms` を自発的に埋めない**（主症状語「喉」「熱」「頭痛」などが付随に誤マッチし、付随質問がスキップされるのを防ぐ）。訂正意図のあるターンのみ上書き可。
 - **喉主症状 INFECTION の緊急度（🟢／🟡）の目安**（他条件が同程度のときの寄せ方）：
   - **経過の方向性（worsening_trend）が悪化でない／未記入** → **必ず 🟢 または 🟡**（Phase1・Phase2 とも 🔴 にしない）。
   - **経過の方向性（worsening_trend）が「発症時より悪化」相当** → **最低🟡**；痛みが強く **🔴** 分岐の条件を満たすときのみ **🔴** 候補（短い経過「さっき」等では RED抑制のため **🟡** 止まり）。
@@ -227,6 +229,15 @@ GI（消化器系）：
   - 便秘
   - 食あたり
 
+TIRED（疲労・肩こり・睡眠不足系）：
+- スロット数は5個。`pain_score` と痛みの質（`worsening`）は使わない。質問順は **①期間 → ②強さ（日常生活への影響）→ ③経過（worsening_trend）→ ④危険サイン（付随）→ ⑤きっかけ（最後）**。選択肢は上から **低リスク→中→高**（緊急度集計の段階と整合）。
+- ① `duration`：「どのくらい続いていますか？」— 今日から / 数日前 / 一週間以上前
+- ② `daily_impact`：「日常生活にどれくらい影響がありますか？」— ほぼ問題ない / 少しつらい / かなりつらい（動くのがしんどい）
+- ③ `worsening_trend`：「今の状態はどうですか？」— 回復してきている / 変わらない / 悪化している（**TIRED では**「さっき」限定で省略しない。常に③を出す）
+- ④ `associated_symptoms`：「他に気になる症状はありますか？」— 吐き気 / 息苦しさ / 発熱がある
+- ⑤ `cause_category`（最後の質問）：「思い当たるきっかけはありますか？」— 寝不足・疲れ / ストレス / 体を動かしすぎた
+- **緊急度（Phase1/Phase2）**：TIRED では `worsening_trend` のリスクを従来の「痛みの質」スロット相当として集計し、`pain_score` は 0 扱い。悪化トレンドが高かつ **②の強さ** が中以上のときの即時🔴分岐など、既存パターンに合わせる（RED抑制は **短い経過** クラスで有効）。
+
 カテゴリ運用ルール（強制）：
 - **3択の選択肢は、画面上で上から順に selectedIndex 0→1→2 と対応し、リスクは低→中→高（集計スコアも 0→1→2 に整合）とする。**
 - カテゴリは会話開始時に確定した `triageCategory` を固定して使う。
@@ -253,8 +264,8 @@ slot_status = {
 ### 質問生成ルール（必須）
 - 1ターンで質問は最大1つ。
 - 対象は未充填スロットのみ。
-- 優先順：pain_score → worsening → duration → daily_impact → associated_symptoms → cause_category（**INFECTION**では付随と体温の順序は実装上スワップ。**喉主症状**では `daily_impact`（体温）自体を含めない）。
-- **経過（duration）の解釈**：「1日前」「2日前」「二日前」など**日数表現に含まれる数字**を、**選択肢の 1番・2番・3番**と誤認しない（`parseDurationDayTierFromText` で意味マッチを先に行う）。**N日前（N≥1）・昨日・一昨日**はいずれも**一日以上前クラス**（`selectedIndex === 2` / `day_or_more`）とし、**24時間以上**の経過表現も同クラスに寄せる。**「1時間前」「一時間前」「3時間前」**など**時間に含まれる数字**も同様に番号誤認しない（`isDurationSlotNumericNoise`）。**N時間前（N≥1・24未満）**は**数時間前クラス**（`selectedIndex === 1`）とし、**さっき**に誤保存されないようにする。これにより **質問3.5（worsening_trend）** の挿入条件（`duration` が「さっき」以外）と整合する。
+- 優先順：カテゴリにより異なる（**TIRED**：`duration` → `daily_impact` → `worsening_trend` → `associated_symptoms` → `cause_category`）。デフォルトは pain_score → worsening → duration → daily_impact → associated_symptoms → cause_category（**INFECTION**では付随と体温の順序は実装上スワップ。**喉主症状**では `daily_impact`（体温）自体を含めない）。
+- **経過（duration）の解釈**：「1日前」「2日前」「二日前」など**日数表現に含まれる数字**を、**選択肢の 1番・2番・3番**と誤認しない（`parseDurationDayTierFromText` で意味マッチを先に行う）。**N日前（N≥1）・昨日・一昨日**はいずれも**一日以上前クラス**（`selectedIndex === 2` / `day_or_more`）とし、**24時間以上**の経過表現も同クラスに寄せる。**「1時間前」「一時間前」「3時間前」**など**時間に含まれる数字**も同様に番号誤認しない（`isDurationSlotNumericNoise`）。**N時間前（N≥1・24未満）**は**数時間前クラス**（`selectedIndex === 1`）とし、**さっき**に誤保存されないようにする。TIRED の「今日から／数日前／一週間以上前」も同じ index 0/1/2 のリスク段階に対応する。これにより **質問3.5（worsening_trend）** の挿入条件（`duration` が「さっき」以外）と整合する（**TIRED では worsening_trend を常に尋ね、挿入条件を別途適用**）。
 - 充填済みスロットの再質問は禁止。
 - 6スロットが全て埋まるまで、未充填スロットへの質問を継続する（強制）。
 - 6スロット未充填でまとめへ遷移することを禁止する。
@@ -301,6 +312,7 @@ slot_status = {
   - 「38度以上」→ `STRONG`
   - 仕組みは `@kairo/KAIRO_SPEC.md:261-268` と同じ（他スロットは休息判定に使わない）
 - `GI`：常に `restLevel = LIGHT`
+- `TIRED`：`daily_impact`（②の3択）を 1:1 で休息判定に用いる（`ほぼ問題ない`→`NONE`、`少しつらい`→`LIGHT`、`かなりつらい（動くのがしんどい）`→`STRONG`）。他スロットは休息判定に使わない。
 
 ### MC必要性判定
 - restLevel = NONE → mcRecommended = false
@@ -443,7 +455,8 @@ slot_status = {
 | GI | 5 | daily_impact なし |
 | SKIN | 5 | cause_category なし |
 | INFECTION | 6（喉主症状のときは 5：体温スロット省略） | 体温スロットあり（喉が痛い系は省略） |
-| 共通 | +1 | duration が「さっき」以外のとき worsening_trend を追加 |
+| TIRED | 5 | pain_score・worsening（痛みの質）なし。`worsening_trend` は常に含む（共通スロットの +1 条件は適用しない） |
+| 共通 | +1 | PAIN/GI/SKIN/INFECTION で duration が「さっき」以外のとき worsening_trend を追加 |
 
 #### C. まとめ出力のフロー（順序厳守）
 
@@ -912,7 +925,7 @@ slot_status = {
 - 「🌱 最後に」「💬 最後に」を必ず含める
 - セクション単体ではなく、まとめの一部として自然に生成する
 
-**実装**：テンプレート禁止。LLMで会話内容・カテゴリ・主症状に即して毎回生成する。チャット画面のまとめブロック末尾に表示。カテゴリ（PAIN/SKIN/GI/INFECTION）ごとに休息の指示内容を変える。
+**実装**：テンプレート禁止。LLMで会話内容・カテゴリ・主症状に即して毎回生成する。チャット画面のまとめブロック末尾に表示。カテゴリ（PAIN/SKIN/GI/INFECTION/TIRED）ごとに休息の指示内容を変える。
 
 **出力例**（参考。実際は会話・カテゴリに応じて生成）：
 
@@ -991,7 +1004,7 @@ SKIN（皮膚症状など）：
 - **はい** → 一言のみ（再説明禁止）
 - **いいえ** → 「どれが難しそうですか？」＋個別対応（1つだけ）
 
-**カテゴリ別☐**：PAIN=刺激減・水分、INFECTION=水分・安静、GI=食事控えめ・水分少量、SKIN=刺激回避・冷やす。固定文禁止。
+**カテゴリ別☐**：PAIN=刺激減・水分、INFECTION=水分・安静、GI=食事控えめ・水分少量、SKIN=刺激回避・冷やす、TIRED=無理を減らす・睡眠リズム。固定文禁止。
 
 ---
 
@@ -1046,7 +1059,7 @@ WhiteCoat
 - **どっちも** → 整理出力＋改行＋Englishのみ
 - **拒否** → 「大丈夫です、その判断でも問題ありません。また不安になったら…」
 
-**カテゴリ別準備**：INFECTION=体温・マスク、PAIN=痛み記録・安静、GI=食事制限・水分、SKIN=原因回避・状態観察。
+**カテゴリ別準備**：INFECTION=体温・マスク、PAIN=痛み記録・安静、GI=食事制限・水分、SKIN=原因回避・状態観察、TIRED=睡眠・負荷のメモ・一言主訴。
 
 **英語テンプレ**：`I have been having {symptom} for {duration}, and it feels {severity}. I'd like to have this checked just to be safe.`  
 変換例：頭痛→a headache、数時間前→for a few hours、強い→quite strong。箇条書き・単語のみ・maybe/probably 禁止。
@@ -1315,7 +1328,7 @@ Nova Clinic（例）
 - 補足：INFECTION/🔴ではオンライン診療案内を出さない。city が取れないことを理由に案内中止しない。
 
 **他国：検索・スコアリング**
-- カテゴリ別クエリ：PAIN→GP/内科、SKIN→dermatology+GP、GI→gastro+内科、INFECTION→GP/fever。専門科に寄せすぎない。
+- カテゴリ別クエリ：PAIN→GP/内科、SKIN→dermatology+GP、GI→gastro+内科、INFECTION→GP/fever、TIRED→GP/内科（疲労・体調不良の初期相談軸）。専門科に寄せすぎない。
 - フィルタ：vet/動物病院・小児科、評価3.8以下、無関係専門科を除外。**歯痛時は歯科を許可**。
 - `score = symptomMatch*0.5 + (1/distance)*0.3 + rating*0.2`
 
@@ -1738,7 +1751,7 @@ slot_status = {
 導入文は **役割×バリエーション** のテンプレID制のみで出力する。  
 LLMの自由生成は禁止。
 
-**主症状の短ラベル（〇〇）の単一ソース（表示）**：初回安全文・まとめ②「一時的な〇〇」・🤝/📝 モーダル橋渡し「よくある〇〇」・API `mainSymptom`・🟢/🟡モーダルの納得文・🟡「なぜ注意が必要か」のフォールバックで主症状を出す場合・まとめ／確認文の箇条書きから「主訴の繰り返しのみ」の行を除外するフィルタ（`collectMainSymptomPhrasesForBulletFilter`／`isMainSymptomOnlyBulletLine`）はいずれもサーバ `getSyncedMainSymptomDisplayLabel(state)`（`greenYellowPatternNounForTemporary` と同一。初回応答で保存する `safetyIntroMainSymptomLabel` を最優先）。**疾患検索クエリ**および原因モーダル内の LLM 分類・関連度チェックには `toMainSymptomForDiseaseSearch` を用いる（検索カテゴリ最適化のため、表示ラベルと異なる場合がある）。
+**主症状の短ラベル（〇〇）の単一ソース（表示）**：初回安全文・まとめ②「一時的な〇〇」・🤝/📝 モーダル橋渡し「よくある〇〇」・API `mainSymptom`・🟢/🟡モーダルの納得文・🟡「なぜ注意が必要か」のフォールバックで主症状を出す場合・まとめ／確認文の箇条書きから「主訴の繰り返しのみ」の行を除外するフィルタ（`collectMainSymptomPhrasesForBulletFilter`／`isMainSymptomOnlyBulletLine`）はいずれもサーバ `getSyncedMainSymptomDisplayLabel(state)`（`greenYellowPatternNounForTemporary` と同一。初回応答で保存する `safetyIntroMainSymptomLabel` を最優先）。**TIRED**（`triageCategory === "TIRED"`）の初回も同じ単一ソース（ユーザーが「肩こり」「だるさ」などと言った内容に基づく短ラベル）。**疾患検索クエリ**および原因モーダル内の LLM 分類・関連度チェックには `toMainSymptomForDiseaseSearch` を用いる（検索カテゴリ最適化のため、表示ラベルと異なる場合がある）。
 
 #### 役割（role）
 - EMPATHY（受け止め）
