@@ -46,8 +46,6 @@ const AWAITING_SUMMARY_SESSION_KEY = "kairo_awaiting_summary";
 const SUBJECTIVE_ALERT_WORDS = ["気になります", "引っかかります", "心配です", "注意が必要です"];
 const FEATURE_SHOW_LOCATION_EXPLANATION = false;
 const QUESTION_DELAY_MS = 500;
-const DEFAULT_FOLLOW_UP_QUESTION =
-  "今は少し休むだけでも良さそうです。このまま休みますか？それとも、もう少し詳しく確認しますか？";
 
 /** フォロー文かどうか判定。未確認経路（履歴復元等）からのフォロー表示をブロックするため */
 function isFollowUpContent(text) {
@@ -1751,9 +1749,13 @@ async function handleUserInput() {
         const firstDelay = QUESTION_DELAY_MS + 600;
         const interval = 800;
         const followUpMessage = aiResponse.followUpMessage;
-        const followUpQuestion = aiResponse.followUpQuestion || DEFAULT_FOLLOW_UP_QUESTION;
+        /** サーバーが null を返したときはフォローしない（DEFAULT で埋めないと二重バブル・まとめの直後に別文が連続する原因になる） */
+        const followUpQuestion =
+          typeof aiResponse.followUpQuestion === "string" && aiResponse.followUpQuestion.trim().length > 0
+            ? aiResponse.followUpQuestion
+            : null;
 
-        // フォロー文: APIがfollowUpQuestionを返している場合は必ず表示。サーバー側のshouldSendFollowUpQuestionで判定済み。
+        // フォロー文: followUpQuestion が非空のときのみ表示（サーバー shouldSendFollowUpQuestion と一致）
         // まとめカード → その後にフォロー文（仕様）。フォロー後は postSummaryFollowUpSuppress でまとめ再出しを禁止。
         const onLastSectionRendered = () => {
           const canShowSummaryCard =
@@ -1767,7 +1769,7 @@ async function handleUserInput() {
             persistSummaryDoneForConversation(aiResponse.conversationId);
           }
           if (followUpMessage) addMessage(followUpMessage, false, true, { fromFollowUpTrigger: true });
-          addMessage(followUpQuestion, false, true, { fromFollowUpTrigger: true });
+          if (followUpQuestion) addMessage(followUpQuestion, false, true, { fromFollowUpTrigger: true });
           if (showedSummaryCard) {
             appState.postSummaryFollowUpSuppress = true;
             appState.followUpSummarySuppress = true;
@@ -1804,7 +1806,10 @@ async function handleUserInput() {
       ) {
         const firstDelay = QUESTION_DELAY_MS + 600;
         const followUpMessage = aiResponse.followUpMessage;
-        const followUpQuestion = aiResponse.followUpQuestion || DEFAULT_FOLLOW_UP_QUESTION;
+        const followUpQuestion =
+          typeof aiResponse.followUpQuestion === "string" && aiResponse.followUpQuestion.trim().length > 0
+            ? aiResponse.followUpQuestion
+            : null;
         const onLastSectionRendered = () => {
           const canShowSummaryCard =
             !suppressInlineSummary &&
@@ -1817,7 +1822,7 @@ async function handleUserInput() {
             persistSummaryDoneForConversation(aiResponse.conversationId);
           }
           if (followUpMessage) addMessage(followUpMessage, false, true, { fromFollowUpTrigger: true });
-          addMessage(followUpQuestion, false, true, { fromFollowUpTrigger: true });
+          if (followUpQuestion) addMessage(followUpQuestion, false, true, { fromFollowUpTrigger: true });
           if (showedSummaryCard) {
             appState.postSummaryFollowUpSuppress = true;
             appState.followUpSummarySuppress = true;
