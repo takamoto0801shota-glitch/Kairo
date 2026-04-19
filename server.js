@@ -8347,7 +8347,8 @@ function sanitizeBulletPoints(bullets, state) {
   const bySlot = dedupeBulletsOneLinePerInferenceSlot(byDurAnchor);
   const bySubsume = dedupeBulletsBySubsumption(bySlot);
   const bySoftIncl = dedupeStateAboutBulletsBySoftInclusion(bySubsume);
-  const deduped = dedupeBulletsSequentialSimilarity(bySoftIncl);
+  const byFourRun = dedupeBulletsByFourCharRunOverlap(bySoftIncl);
+  const deduped = dedupeBulletsSequentialSimilarity(byFourRun);
   const dedupedAgg = dedupeBulletLinesByAggressiveNormalizedEquality(deduped);
   return state ? stripMainSymptomOnlyBullets(state, dedupedAgg) : dedupedAgg;
 }
@@ -8662,6 +8663,30 @@ function inferBulletSlotKeyForDedupe(line) {
   const painNumKey = inferPainScoreNumericDedupeKey(s);
   if (painNumKey) return painNumKey;
 
+  // 確認文での言い直し（経過・悪化の否定などは原因より先に TREND に寄せる）
+  if (
+    s.length <= 140 &&
+    /(やっぱり|実際は|本当は|むしろ|訂正|追加で|補足で)/.test(s) &&
+    /(経過|悪化|回復|様子|波|推移|マシ|横ばい|良くな|悪くな|発症時より)/.test(s) &&
+    /(ない|なし|じゃない|ではない|違う|思い当たらない|関係ない|ではなかった)/.test(s)
+  ) {
+    return `${BULLET_INFER_SLOT_KEYS.TREND}:${normalizeBulletKeyForDedupe(s)}`;
+  }
+  if (
+    s.length <= 140 &&
+    /(やっぱり|実際は|本当は|むしろ|いや[、,]|訂正|追加で|補足で|ちなみに)/.test(s) &&
+    /(ない|なし|じゃない|ではない|違う|思い当たらない|関係ない|ではなかった|ではありません|なかった)/.test(s)
+  ) {
+    return `${BULLET_INFER_SLOT_KEYS.CAUSE}:${normalizeBulletKeyForDedupe(s)}`;
+  }
+  if (
+    s.length <= 140 &&
+    /(やっぱり|実際は|本当は|むしろ|訂正|追加で|補足で)/.test(s) &&
+    /(経過|悪化|回復|様子|波|推移|マシ|横ばい|良くな|悪くな|発症時より)/.test(s)
+  ) {
+    return `${BULLET_INFER_SLOT_KEYS.TREND}:${normalizeBulletKeyForDedupe(s)}`;
+  }
+
   if (isBodyThermalFeelingBulletLine(s)) {
     return `${BULLET_INFER_SLOT_KEYS.CONTEXT}:body_thermal_feeling`;
   }
@@ -8903,6 +8928,97 @@ function dedupeStateAboutBulletsBySoftInclusion(bullets) {
   return lines.filter((_, idx) => !removeIdx.has(idx));
 }
 
+/**
+ * 正規化後の文字列で **同一の4文字連続** を共有する行のペアは、**長い方を削除**（短い方を残す）。
+ * 「悪化している可能性がある」と「経過の様子は悪化してる」等の重複向け。肯定／否定が食い違う行は対象外。
+ */
+function dedupeBulletsByFourCharRunOverlap(bullets) {
+  if (!Array.isArray(bullets) || bullets.length <= 1) return bullets || [];
+  const lines = bullets.map((b) => String(b || "").trim()).filter(Boolean);
+  const norm = (x) => normalizeBulletKeyForDedupe(x);
+  const polBucket = (inner) => {
+    const s = String(inner || "");
+    if (/ない|なし|見られない|出ていない|しません|しなかった|ないです/.test(s) && !/(可能性|ことが)/.test(s)) return "neg";
+    if (/ある|続い|見られる|出ている|多い|続く|可能性がある|してる/.test(s)) return "pos";
+    return "neu";
+  };
+  const toRemoveIdx = new Set();
+  for (let i = 0; i < lines.length; i++) {
+    for (let j = i + 1; j < lines.length; j++) {
+      if (toRemoveIdx.has(i) || toRemoveIdx.has(j)) continue;
+      const ai = lines[i].replace(/^・\s*/, "").trim();
+      const aj = lines[j].replace(/^・\s*/, "").trim();
+      const pi = polBucket(ai);
+      const pj = polBucket(aj);
+      if (pi !== pj && pi !== "neu" && pj !== "neu") continue;
+      const ni = norm(ai);
+      const nj = norm(aj);
+      if (ni.length < 4 || nj.length < 4) continue;
+      const shorter = ni.length <= nj.length ? ni : nj;
+      const longer = ni.length > nj.length ? ni : nj;
+      let shareFour = false;
+      for (let k = 0; k <= shorter.length - 4; k++) {
+        const run = shorter.slice(k, k + 4);
+        if (longer.includes(run)) {
+          shareFour = true;
+          break;
+        }
+      }
+      if (!shareFour) continue;
+      const leni = ai.length;
+      const lenj = aj.length;
+      if (leni > lenj) toRemoveIdx.add(i);
+      else if (lenj > leni) toRemoveIdx.add(j);
+    }
+  }
+  return lines.filter((_, idx) => !toRemoveIdx.has(idx));
+}
+
+/**
+ * `inferBulletSlotKeyForDedupe` の先頭（例: slot_cause）を返す。
+ */
+function inferBulletCoarseSlotPrefix(slotKey) {
+  const k = String(slotKey || "");
+  const i = k.indexOf(":");
+  return i >= 0 ? k.slice(0, i) : k;
+}
+
+/** 確認追加分で上書きしてよいスロット種別（OTHER は誤削除しやすいので対象外） */
+const CONFIRMATION_SUPERSEDES_SLOT_PREFIXES = new Set([
+  BULLET_INFER_SLOT_KEYS.PAIN_SCORE,
+  BULLET_INFER_SLOT_KEYS.MAIN_QUALITY,
+  BULLET_INFER_SLOT_KEYS.DURATION,
+  BULLET_INFER_SLOT_KEYS.TREND,
+  BULLET_INFER_SLOT_KEYS.ASSOCIATED,
+  BULLET_INFER_SLOT_KEYS.IMPACT,
+  BULLET_INFER_SLOT_KEYS.CAUSE,
+  BULLET_INFER_SLOT_KEYS.CONTEXT,
+]);
+
+/**
+ * 確認で追加した行と **同じスロット種別** の既存箇条書きは、新しい発言で置き換える前提で除去する。
+ * 天候固定の正規表現は使わず、スロット推定キーのみに依存する。
+ */
+function removeBaseBulletsSupersededByConfirmationSlotFamilies(baseLines, extraFormattedLines) {
+  if (!Array.isArray(baseLines) || !Array.isArray(extraFormattedLines) || extraFormattedLines.length === 0) {
+    return baseLines || [];
+  }
+  const supersededFamilies = new Set();
+  for (const line of extraFormattedLines) {
+    const sk = inferBulletSlotKeyForDedupe(line);
+    const prefix = inferBulletCoarseSlotPrefix(sk);
+    if (CONFIRMATION_SUPERSEDES_SLOT_PREFIXES.has(prefix)) {
+      supersededFamilies.add(prefix);
+    }
+  }
+  if (supersededFamilies.size === 0) return baseLines;
+  return baseLines.filter((b) => {
+    const prefix = inferBulletCoarseSlotPrefix(inferBulletSlotKeyForDedupe(b));
+    if (!CONFIRMATION_SUPERSEDES_SLOT_PREFIXES.has(prefix)) return true;
+    return !supersededFamilies.has(prefix);
+  });
+}
+
 /** 同趣旨の行を1つに（含み関係なら短い方を優先）。bulletsAreSimilar に依存 */
 function dedupeBulletsSequentialSimilarity(bullets) {
   if (!Array.isArray(bullets) || bullets.length <= 1) return bullets || [];
@@ -9010,9 +9126,11 @@ function mergeConfirmationExtraFactsIntoStateBulletsCache(state) {
       : buildStateFactsBulletsLegacy(state, { forSummary: true });
   if (!Array.isArray(base)) base = [];
   const sanitizedBase = sanitizeBulletPoints(base, state);
+  const extraFormattedAll = facts.flatMap((raw) => formatConfirmationExtraFactAsBullets(raw));
+  const baseAfterSupersede = removeBaseBulletsSupersededByConfirmationSlotFamilies(sanitizedBase, extraFormattedAll);
   const deduped = [];
   const seenKeys = new Set();
-  for (const line of sanitizedBase) {
+  for (const line of baseAfterSupersede) {
     const k = normalizeBulletKeyForDedupe(line);
     if (k) seenKeys.add(k);
     deduped.push(line);
@@ -10229,6 +10347,60 @@ function comboSlotAllowsGreenYellowCombo(state, slotKey) {
 }
 
 /**
+ * 🟢🟡①：痛み方②（worsening）だけは緊急度が HIGH でも、回答があれば組み合わせ候補に載せる（他スロットは従来どおり LOW〜MEDIUM のみ）。
+ */
+function comboSlotAllowsGreenYellowComboForPainManner(state) {
+  if (!state) return false;
+  if (comboSlotAllowsGreenYellowCombo(state, "worsening")) return true;
+  const raw = String(
+    getSlotStatusValue(state, "worsening", state?.slotAnswers?.worsening || "") || ""
+  ).trim();
+  return raw.length >= 1;
+}
+
+/**
+ * 🟢🟡「〇〇＋〇〇」：抽象語をスロットのユーザー発話短語に差し替え、痛み方②は回答があれば優先的に含める。
+ */
+function applyGreenYellowComboUserWordGuards(state, picked) {
+  if (!state || !Array.isArray(picked) || picked.length === 0) return picked;
+  let out = picked.map((x) => String(x || "").trim()).filter(Boolean);
+  const painLab = buildRedComboLabelFromWorseningSlotAnswer(state);
+  if (painLab && comboSlotAllowsGreenYellowComboForPainManner(state)) {
+    const hasPain = out.some((p) => redComboUserWordInclusiveMatch(painLab, p));
+    if (!hasPain) out = [painLab, ...out];
+  }
+  const trendLab = buildRedComboLabelFromWorseningTrendSlotAnswer(state);
+  if (trendLab) {
+    out = out.map((p) => {
+      const pl = String(p).trim();
+      if (pl === "経過の変化" || /^経過の変化[（(]/.test(pl) || pl === "悪化傾向") return trendLab;
+      return p;
+    });
+  }
+  const durLab = buildRedComboLabelFromDurationSlotAnswer(state);
+  if (durLab) {
+    out = out.map((p) => {
+      const pl = String(p).trim();
+      if (pl === "長く続いている" || pl === "症状が続いている") return durLab;
+      return p;
+    });
+  }
+  const seen = new Set();
+  const deduped = [];
+  for (const p of out) {
+    const fp = finalizeComboLabelForCombinationLine(p) || String(p).trim();
+    if (!fp) continue;
+    if (seen.has(fp)) continue;
+    seen.add(fp);
+    deduped.push(fp);
+    if (deduped.length >= 3) break;
+  }
+  out = deduped.length > 3 ? deduped.slice(0, 3) : deduped;
+  if (out.length >= 2) return out;
+  return picked;
+}
+
+/**
  * まとめ箇条書きから 🟢🟡 組み合わせ用候補 {label, inv}。主症状行（通常は先頭 or 痛み行の次）は除外。
  */
 function gatherGreenYellowComboCandidatesFromBullets(state) {
@@ -10255,7 +10427,7 @@ function gatherGreenYellowComboCandidatesFromBullets(state) {
       if (!comboSlotAllowsGreenYellowCombo(state, "cause_category")) continue;
     }
     if (kind === "pain_type") {
-      if (!comboSlotAllowsGreenYellowCombo(state, "worsening")) continue;
+      if (!comboSlotAllowsGreenYellowComboForPainManner(state)) continue;
     }
     const short = shortenComboLabelFromBulletText(rawLine);
     if (!short) continue;
@@ -10362,30 +10534,27 @@ function collectGreenYellowLowMediumCombinationParts(state) {
   const trendRaw = String(
     getSlotStatusValue(state, "worsening_trend", state?.slotAnswers?.worsening_trend || "") || ""
   ).trim();
-  if (comboSlotAllowsGreenYellowCombo(state, "worsening_trend")) {
-    if (/回復|改善|まし|楽にな/.test(trendRaw)) candidates.push({ label: "回復に向かっている", inv: 87 });
-    else if (/変わらない|横ばい|同じ/.test(trendRaw)) candidates.push({ label: "悪化していない", inv: 87 });
-    else if (/悪化|発症時より/.test(trendRaw) && !/ない/.test(trendRaw)) candidates.push({ label: "経過の変化", inv: 86 });
-    else if (trendRaw) {
-      const p = polishBulletColloquialSentence(trendRaw.replace(/です$|ます$/, ""));
-      if (p) candidates.push({ label: p, inv: 86 });
-    }
+  if (comboSlotAllowsGreenYellowCombo(state, "worsening_trend") && trendRaw) {
+    const tl = buildRedComboLabelFromWorseningTrendSlotAnswer(state);
+    if (tl) candidates.push({ label: tl, inv: 87 });
   }
 
-  if (comboSlotAllowsGreenYellowCombo(state, "worsening")) {
-    const wRaw = String(getSlotStatusValue(state, "worsening", state?.slotAnswers?.worsening || "") || "").trim();
-    if (wRaw) {
-      const p = polishBulletColloquialSentence(wRaw.replace(/です$|ます$/, "").slice(0, 24));
-      if (p) candidates.push({ label: p, inv: COMBO_INV_PRI_PAIN_TYPE });
-    }
+  if (comboSlotAllowsGreenYellowComboForPainManner(state)) {
+    const pl = buildRedComboLabelFromWorseningSlotAnswer(state);
+    if (pl) candidates.push({ label: pl, inv: 96 });
   }
 
   if (comboSlotAllowsGreenYellowCombo(state, "duration")) {
     const dur = String(getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "") || "").trim();
     if (!shouldBlockRedByRecentShortDuration(state)) {
-      if (dur && /(さっき|数時間前|数十分|今さっき)/.test(dur)) candidates.push({ label: "発症から時間が短い", inv: 85 });
-      else if (dur && /(日|週|昨日|一昨日|一日以上)/.test(dur)) {
-        const dlab = shrinkDurationLineForComboShortLabel(dur) || "症状が続いている";
+      if (dur && /(さっき|数時間前|数十分|今さっき)/.test(dur)) {
+        const dlab = buildRedComboLabelFromDurationSlotAnswer(state) || "発症から時間が短い";
+        candidates.push({ label: dlab, inv: 85 });
+      } else if (dur && /(日|週|昨日|一昨日|一日以上)/.test(dur)) {
+        const dlab =
+          buildRedComboLabelFromDurationSlotAnswer(state) ||
+          shrinkDurationLineForComboShortLabel(dur) ||
+          "症状が続いている";
         candidates.push({ label: dlab, inv: 85 });
       }
     }
@@ -10417,8 +10586,9 @@ function collectGreenYellowLowMediumCombinationParts(state) {
 
   const comboMaxParts = shouldBlockRedByRecentShortDuration(state) ? 2 : 3;
   const applyRedGuardComboFilter = (arr) => filterComboCandidatesForRedGuardOnset(arr, state);
+  const finish = (arr) => applyGreenYellowComboUserWordGuards(state, arr);
 
-  let picked = pickComboPartsByInversePriority(applyRedGuardComboFilter(candidates), 2, comboMaxParts);
+  let picked = finish(pickComboPartsByInversePriority(applyRedGuardComboFilter(candidates), 2, comboMaxParts));
   if (picked.length >= 2) return picked;
 
   const parts = [];
@@ -10447,7 +10617,7 @@ function collectGreenYellowLowMediumCombinationParts(state) {
     const extra = parts.map((p) => ({ label: shortenComboLabelFromBulletText(p) || p, inv: 72 }));
     candidates.push(...extra);
   }
-  picked = pickComboPartsByInversePriority(applyRedGuardComboFilter(candidates), 2, comboMaxParts);
+  picked = finish(pickComboPartsByInversePriority(applyRedGuardComboFilter(candidates), 2, comboMaxParts));
   if (picked.length >= 2) return picked;
 
   const mainSafe = main && main !== "症状" ? main : "症状の出方";
@@ -10456,7 +10626,7 @@ function collectGreenYellowLowMediumCombinationParts(state) {
     { label: "急いで受診が必要な所見は見えにくい", inv: 54 },
     { label: "付随の所見は限定的", inv: 53 }
   );
-  return pickComboPartsByInversePriority(applyRedGuardComboFilter(candidates), 2, comboMaxParts);
+  return finish(pickComboPartsByInversePriority(applyRedGuardComboFilter(candidates), 2, comboMaxParts));
 }
 
 /**
@@ -10631,7 +10801,9 @@ function buildGreenYellowComboIntegratedParagraph(state, level, parts) {
  */
 function buildGreenYellowStateAboutBlock(state, level) {
   const rawParts = collectGreenYellowLowMediumCombinationParts(state);
-  let parts = rawParts.map((p) => finalizeComboLabelForCombinationLine(p)).filter(Boolean);
+  let parts = applyGreenYellowComboUserWordGuards(state, rawParts)
+    .map((p) => finalizeComboLabelForCombinationLine(p))
+    .filter(Boolean);
   if (parts.length < 2) {
     parts = rawParts.map((p) => String(p || "").trim()).filter(Boolean);
   }
@@ -10647,7 +10819,11 @@ function buildGreenYellowStateAboutBlock(state, level) {
 async function buildGreenYellowStateAboutBlockAsync(state, level) {
   const rawParts = collectGreenYellowLowMediumCombinationParts(state);
   const finalized = await finalizeCombinationPartsWithLlm(state, rawParts);
-  let parts = finalized.map((p) => finalizeComboLabelForCombinationLine(p)).filter(Boolean);
+  const guarded = applyGreenYellowComboUserWordGuards(
+    state,
+    finalized.map((p) => String(p || "").trim()).filter(Boolean)
+  );
+  let parts = guarded.map((p) => finalizeComboLabelForCombinationLine(p)).filter(Boolean);
   if (parts.length < 2) {
     parts = finalized.map((p) => String(p || "").trim()).filter(Boolean);
   }
@@ -10685,6 +10861,101 @@ function compactMainSymptomNounForRed(state) {
   return toMainSymptomLabelForSafety(firstLine);
 }
 
+/** 🔴「〇〇＋〇〇」：痛み方スロット（②）の回答から短語（647。例：ズキズキする→ズキズキ） */
+function buildRedComboLabelFromWorseningSlotAnswer(state) {
+  const raw = String(
+    getSlotStatusValue(state, "worsening", state?.slotAnswers?.worsening || "") || ""
+  ).trim();
+  if (!raw) return "";
+  const stripped = raw.replace(/です$|ます$/, "").trim();
+  return (
+    finalizeComboLabelForCombinationLine(stripped) || stripped.slice(0, KAIRO_COMBO_SHORT_LABEL_MAX_CHARS)
+  );
+}
+
+/** 🔴同上：経過の方向（worsening_trend）。組み合わせ行に「経過の変化」だけを載せず、ユーザーが話した内容を短語化して載せる */
+function buildRedComboLabelFromWorseningTrendSlotAnswer(state) {
+  const raw = String(
+    getSlotStatusValue(state, "worsening_trend", state?.slotAnswers?.worsening_trend || "") || ""
+  ).trim();
+  if (!raw) return "";
+  const stripped = raw.replace(/です$|ます$/, "").trim();
+  return (
+    finalizeComboLabelForCombinationLine(stripped) || stripped.slice(0, KAIRO_COMBO_SHORT_LABEL_MAX_CHARS)
+  );
+}
+
+/** 🔴同上：いつから／続き（duration）。可能なら時間軸の短語（◯日前から 等）に落とす */
+function buildRedComboLabelFromDurationSlotAnswer(state) {
+  const raw = String(
+    getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "") || ""
+  ).trim();
+  if (!raw) return "";
+  const stripped = raw.replace(/です$|ます$/, "").trim();
+  const d = shrinkDurationLineForComboShortLabel(stripped);
+  if (d) {
+    const fd = finalizeComboLabelForCombinationLine(d) || d;
+    if (fd) return fd;
+  }
+  return (
+    finalizeComboLabelForCombinationLine(stripped) || stripped.slice(0, KAIRO_COMBO_SHORT_LABEL_MAX_CHARS)
+  );
+}
+
+function redComboUserWordInclusiveMatch(canonicalLab, part) {
+  const a = finalizeComboLabelForCombinationLine(canonicalLab) || String(canonicalLab || "").trim();
+  const b = finalizeComboLabelForCombinationLine(part) || String(part || "").trim();
+  if (!a || !b) return false;
+  if (a === b) return true;
+  return b.includes(a) || a.includes(b);
+}
+
+/**
+ * 🔴組み合わせ「〇〇＋〇〇」：抽象ラベル（経過の変化・長く続いている等）をユーザー発話ベースに差し替え、
+ * 痛み方②が HIGH のときは必ずその短語を含める。
+ */
+function applyRedComboUserWordGuards(state, picked) {
+  if (!state || !Array.isArray(picked) || picked.length === 0) return picked;
+  const norm = state?.slotNormalized || {};
+  let out = picked.map((x) => String(x || "").trim()).filter(Boolean);
+  const painLab = buildRedComboLabelFromWorseningSlotAnswer(state);
+  if (norm.worsening?.riskLevel === RISK_LEVELS.HIGH && painLab) {
+    const hasPain = out.some((p) => redComboUserWordInclusiveMatch(painLab, p));
+    if (!hasPain) {
+      out = [painLab, ...out];
+    }
+  }
+  const trendLab = buildRedComboLabelFromWorseningTrendSlotAnswer(state);
+  if (norm.worsening_trend?.riskLevel === RISK_LEVELS.HIGH && trendLab) {
+    out = out.map((p) => {
+      const pl = String(p).trim();
+      if (pl === "経過の変化" || /^経過の変化[（(]/.test(pl) || pl === "悪化傾向") return trendLab;
+      return p;
+    });
+  }
+  const durLab = buildRedComboLabelFromDurationSlotAnswer(state);
+  if (norm.duration?.riskLevel === RISK_LEVELS.HIGH && durLab) {
+    out = out.map((p) => {
+      const pl = String(p).trim();
+      if (pl === "長く続いている" || pl === "症状が続いている") return durLab;
+      return p;
+    });
+  }
+  const seen = new Set();
+  const deduped = [];
+  for (const p of out) {
+    const fp = finalizeComboLabelForCombinationLine(p) || String(p).trim();
+    if (!fp) continue;
+    if (seen.has(fp)) continue;
+    seen.add(fp);
+    deduped.push(fp);
+    if (deduped.length >= 3) break;
+  }
+  out = deduped.length > 3 ? deduped.slice(0, 3) : deduped;
+  if (out.length >= 2) return out;
+  return picked;
+}
+
 function collectRedHighRiskCombinationLabels(state) {
   const norm = state?.slotNormalized || {};
   const candidates = [];
@@ -10714,10 +10985,20 @@ function collectRedHighRiskCombinationLabels(state) {
     const m = String(main || "");
     if (!/(痛|頭痛|腹痛|歯痛|腰痛|喉|のど)/.test(m)) candidates.push({ label: "強い痛み", inv: 85 });
   }
-  if (norm?.worsening_trend?.riskLevel === RISK_LEVELS.HIGH) candidates.push({ label: "経過の変化", inv: 91 });
-  if (norm?.duration?.riskLevel === RISK_LEVELS.HIGH) candidates.push({ label: "長く続いている", inv: 89 });
+  if (norm?.worsening_trend?.riskLevel === RISK_LEVELS.HIGH) {
+    const tl = buildRedComboLabelFromWorseningTrendSlotAnswer(state);
+    if (tl) candidates.push({ label: tl, inv: 91 });
+    else candidates.push({ label: "経過の変化", inv: 91 });
+  }
+  if (norm?.duration?.riskLevel === RISK_LEVELS.HIGH) {
+    const dl = buildRedComboLabelFromDurationSlotAnswer(state);
+    if (dl) candidates.push({ label: dl, inv: 89 });
+    else candidates.push({ label: "長く続いている", inv: 89 });
+  }
   if (norm?.worsening?.riskLevel === RISK_LEVELS.HIGH) {
-    candidates.push({ label: "痛み方が強い側", inv: COMBO_INV_PRI_PAIN_TYPE });
+    const pl = buildRedComboLabelFromWorseningSlotAnswer(state);
+    if (pl) candidates.push({ label: pl, inv: COMBO_INV_PRI_PAIN_TYPE });
+    else candidates.push({ label: "痛み方が強い側", inv: COMBO_INV_PRI_PAIN_TYPE });
   }
   if (norm?.cause_category?.riskLevel === RISK_LEVELS.HIGH) {
     const cr = String(state?.slotAnswers?.cause_category || "").trim();
@@ -10727,7 +11008,7 @@ function collectRedHighRiskCombinationLabels(state) {
     }
   }
 
-  let picked = pickRedComboPartsInCandidateOrder(candidates, 2, 3);
+  let picked = applyRedComboUserWordGuards(state, pickRedComboPartsInCandidateOrder(candidates, 2, 3));
   if (picked.length >= 2) return picked;
 
   const combinedText = [
@@ -10751,11 +11032,11 @@ function collectRedHighRiskCombinationLabels(state) {
     /* ignore */
   }
 
-  picked = pickRedComboPartsInCandidateOrder(candidates, 2, 3);
+  picked = applyRedComboUserWordGuards(state, pickRedComboPartsInCandidateOrder(candidates, 2, 3));
   if (picked.length >= 2) return picked;
 
   candidates.push({ label: "つらさが強い", inv: 58 }, { label: "複数のサイン", inv: 57 });
-  return pickRedComboPartsInCandidateOrder(candidates, 2, 3);
+  return applyRedComboUserWordGuards(state, pickRedComboPartsInCandidateOrder(candidates, 2, 3));
 }
 
 const RED_STATE_ABOUT_MEANING_TEMPLATES = [
@@ -10857,7 +11138,8 @@ function buildRedStateAboutEmpathyBlock(state) {
 /** 🔴専用：意味行を LLM で生成した版（まとめ生成の本線） */
 async function buildRedStateAboutEmpathyBlockAsync(state) {
   const rawParts = collectRedHighRiskCombinationLabels(state);
-  const parts = (await finalizeCombinationPartsWithLlm(state, rawParts)).filter(Boolean);
+  const llmParts = (await finalizeCombinationPartsWithLlm(state, rawParts)).filter(Boolean);
+  const parts = applyRedComboUserWordGuards(state, llmParts).map((p) => finalizeComboLabelForCombinationLine(p)).filter(Boolean);
   const comboLine = `「${parts.join("＋")}」が同時に出ている状態です。`;
   const meaning = await generateRedStateAboutMeaningLineViaLlm(state, parts);
   const action =
