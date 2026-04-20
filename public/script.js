@@ -426,13 +426,13 @@ function parseAIMessage(text) {
     { icon: '🟢', name: 'ここまでの情報を整理します' },
     { icon: '🟡', name: 'ここまでの情報を整理します' },
     { icon: '🔴', name: 'ここまでの情報を整理します' },
-    { icon: '🤝', name: '今の状態について' },
+    { icon: '🤝', name: 'Kairoの判断' },
     { icon: '✅', name: '今すぐやること' },
     { icon: '⏳', name: '今後の見通し' },
     { icon: '💊', name: '一般的な市販薬' },
     { icon: '🌱', name: '最後に' },
     // 病院をおすすめする場合
-    { icon: '📝', name: '今の状態について' },
+    { icon: '📝', name: 'Kairoの判断' },
     { icon: '📝', name: 'いまの状態を整理します（メモ）' },
     { icon: '🏥', name: '受診先の候補' },
     { icon: '💬', name: '最後に' }
@@ -619,8 +619,8 @@ function buildGreenYellowStateModalBridgeLineClient(mainSymptom) {
 /** サーバ `pickGreenYellowModalRestClosingLine` と同文言（🟢/🟡・納得文の直後・ランダム二択） */
 function pickGreenYellowModalRestClosingLineClient() {
   return Math.random() < 0.5
-    ? "👉 今は無理に動かず、しっかり休むことが最も適切な対応です。"
-    : "👉 今は無理に動かず、休息を優先させてください。";
+    ? "👉 今は無理に動かず、安心して休んでください。"
+    : "👉 今は無理に動かず、安心して休息を優先させてください。";
 }
 
 /** API がオブジェクトを混ぜたときに [object Object] にならないよう1行に正規化 */
@@ -902,10 +902,12 @@ function isDecisionCompleted(text) {
     '🔴 ここまでの情報を整理します',
     '🟢 ここまでの情報を整理します',
     '🟡 ここまでの情報を整理します',
+    '🤝 Kairoの判断',
     '🤝 今の状態について',
     '✅ 今すぐやること',
     '⏳ 今後の見通し',
     '🏥 受診先の候補',
+    '📝 Kairoの判断',
     '📝 今の状態について',
     '📝 いまの状態を整理します',
     '病院に行くことをおすすめします',
@@ -1004,7 +1006,9 @@ function createSummaryBlock(text) {
     headerText = 'ここまでの情報を整理します';
     
     // 🟡は🟢と同じ構成
-    const stateMatch = text.match(/🤝[^⸻]*?今の状態について[^⸻]*?\*\*([^*]+)\*\*/s);
+    const stateMatch = text.match(
+      /🤝[^⸻]*?(?:今の状態について|Kairoの判断)[^⸻]*?\*\*([^*]+)\*\*/s
+    );
     if (stateMatch) {
       summaryContent = stateMatch[1].trim() + '\n\n✅ 今やること\n\n今は一度休むだけで大丈夫です。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
     } else {
@@ -1020,7 +1024,9 @@ function createSummaryBlock(text) {
     headerText = 'ここまでの情報を整理します';
     
     // 判断を抽出（🤝 セクションから）
-    const stateMatch = text.match(/🤝[^⸻]*?今の状態について[^⸻]*?\*\*([^*]+)\*\*/s);
+    const stateMatch = text.match(
+      /🤝[^⸻]*?(?:今の状態について|Kairoの判断)[^⸻]*?\*\*([^*]+)\*\*/s
+    );
     if (stateMatch) {
       summaryContent = stateMatch[1].trim() + '\n\n✅ 今やること\n\n今は一度休むだけで大丈夫です。\nまた不安になったら、いつでもここで聞いてください。' + actionSuffix;
     } else {
@@ -1222,7 +1228,7 @@ function addMessage(text, isUser = false, save = true, options = {}) {
       headerDiv.dataset.headerText = headerText;
       const isStateBlock =
         (block?.header?.icon === "🤝" || block?.header?.icon === "📝") &&
-        /今の状態について|いまの状態を整理します/.test(block?.header?.name || "");
+        /今の状態について|Kairoの判断|いまの状態を整理します/.test(block?.header?.name || "");
       const isActionBlock =
         block?.header?.icon === "✅" &&
         /今すぐやること/.test(block?.header?.name || "");

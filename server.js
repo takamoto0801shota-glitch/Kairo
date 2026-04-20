@@ -400,7 +400,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 
 【まとめブロックの完全性 - 最重要】
 - **まとめは必ず「全ブロック」を出す。途中の1ブロックだけを出すのは禁止。**
-- **同一の回答（同一メッセージ）内で、まとめの列（🟢〜🌱 または 🔴〜💬）を2回並べない。**「🟢／🟡／🔴 のここまでの情報を整理します」は**1回だけ**。**🤝 と 📝 の「今の状態について」は同じ回答に両方出さない**（🟢／🟡は 🤝 のみ、🔴は 📝 のみ）。
+- **同一の回答（同一メッセージ）内で、まとめの列（🟢〜🌱 または 🔴〜💬）を2回並べない。**「🟢／🟡／🔴 のここまでの情報を整理します」は**1回だけ**。**🤝 と 📝 の「Kairoの判断」は同じ回答に両方出さない**（🟢／🟡は 🤝 のみ、🔴は 📝 のみ）。
 - **見出しの並び順は必ず守る（入れ替え・前後の逆転禁止）。**（B）🟢→🤝→✅→⏳→🌱、（A）🔴→📝→✅→🏥→💬。本文中に別ブロックを挟んでも、**見出し行の順番はこの通り**。
 - **（A）の場合は 📝→✅→🏥→💬 の4ブロックを必ず全部出す。**
 - **（B）の場合は 🟢→🤝→✅→⏳→🌱 の5ブロックを必ず全部出す。🚨 もし次の症状が出たら は絶対に出さない。**
@@ -555,7 +555,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 
 必ず以下の構造で提示すること（区切り線の前後には必ず改行を2回以上入れる）：
 
-📝 今の状態について
+📝 Kairoの判断
 
 [ユーザーの発言から事実のみを箇条書きで列挙]
 （例：・ 夜中に突然頭が痛くなった
@@ -623,15 +623,15 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 
 🟢 ここまでの情報を整理します
 
-[整理する宣言のみ（判断・安心・結論は出さない）]
-（例：教えてもらった内容をもとに、今の状態を一度まとめますね。）
-（例：ここまでに聞いたことを整理して、今の状況を確認しますね。）
+[前文：次のいずれか1文をランダム → 改行 → 後文固定]
+（例：必要な情報はそろいました。／ここまでで判断に必要な情報は確認できました。／ここまでで、今の状態はかなり整理できました。）
+（後文固定）今の症状なら、まずどう動くべきかをはっきりお伝えします。
 
 
 ⸻
 
 
-🤝 今の状態について
+🤝 Kairoの判断
 
 
 以下の順番で必ず出力すること：
@@ -695,10 +695,8 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 
 🌱 最後に（必ずこのセクションを表示すること）
 
-
-また不安になったら、いつでもここで聞いてください。
-
-一人で判断しなくて大丈夫です。
+本文は**2文以内**。中心は**安心して休むことができる**こと（今の情報なら休んでよい・休むことへの許可が伝わる）。
+（例：今の情報なら安心して休んで大丈夫です。まずは安静を優先してください。）＋必要なら（また不安になったら、ここで確認してください。）程度の1文まで
 
 
 ⸻
@@ -747,7 +745,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 - **様子見/市販薬の場合のみ、（B）の形式を使用すること**
 - 各ブロックは必ず改行と余白を入れる（改行は2回以上）
 - ノートを読む感覚で、視線が上から下に流れるUIを想定する
-- 病院をおすすめする場合、「📝 今の状態について」から始めて、結論（病院をおすすめする）は必ず最後（🏥 受診先の候補）に出す
+- 病院をおすすめする場合、「📝 Kairoの判断」から始めて、結論（病院をおすすめする）は必ず最後（🏥 受診先の候補）に出す
 - **最後のまとめセクション（💬 最後に または 🌱 最後に）は、どんな場合でも必ず毎回表示すること（絶対に省略しない）**
 - **判断を提示した後は、必ず最後にまとめセクションを追加すること**
 - **病院をおすすめする場合は、必ず（A）の形式を使用すること（📝→✅→🏥→💬の順番を厳守）**
@@ -901,7 +899,7 @@ function buildStateAboutContextForSummary(state) {
   if (!state) return "";
   const bullets = buildStateFactsBullets(state);
   if (bullets.length === 0) return "";
-  return `【🤝 今の状態について（ユーザー固有・必ず参照）】
+  return `【🤝 Kairoの判断（ユーザー固有・必ず参照）】
 ${bullets.join("\n")}
 
 ✅ 今すぐやること は、上記の状態に即した具体的な行動を出してください。一般的なテンプレ・汎用表現は禁止。痛みの強さ・きっかけ・経過など、上記の具体語を理由に反映すること。
@@ -918,7 +916,7 @@ ${stateContext ? `\n${stateContext}\n` : ""}
 - ブロック構成は必ずフルセット
   - 様子見/市販薬の場合：🟢→🤝→✅→⏳→🌱 の5ブロック（🚨は絶対に出さない）
   - 病院推奨の場合：📝→✅→🏥→💬 の4ブロック
-- 同一出力内でまとめ列を2回並べない。「ここまでの情報を整理します」は1回のみ。**🤝 と 📝 の「今の状態について」を併記しない**（🟢／🟡は 🤝 のみ、🔴は 📝 のみ）。
+- 同一出力内でまとめ列を2回並べない。「ここまでの情報を整理します」は1回のみ。**🤝 と 📝 の「Kairoの判断」を併記しない**（🟢／🟡は 🤝 のみ、🔴は 📝 のみ）。
 - 見出しの順番は厳守：様子見は 🟢→🤝→✅→⏳→🌱、病院は 🔴→📝→✅→🏥→💬（途中で順を入れ替えない）。
 - 🟡は🟢と同じ構成で出力する
 - 文章はテンプレ禁止。会話内容に即して自然に書く
@@ -929,10 +927,10 @@ ${stateContext ? `\n${stateContext}\n` : ""}
 - 選択肢や箇条書きの記号は必ず「・」を使う
 - ❗どのブロックも欠けてはいけない（1ブロックのみの出力は禁止）
 - ❗見出しは必ず以下を全て含める（順番厳守）：
-  - 🟢 ここまでの情報を整理します / 🤝 今の状態について / ✅ 今すぐやること / ⏳ 今後の見通し / 🌱 最後に
-  - または 📝 今の状態について / ✅ 今すぐやること / 🏥 受診先の候補 / 💬 最後に
-- ❗🟢/🟡 ここまでの情報を整理します の本文は固定文のみ。「教えてもらった内容をもとに、今の状態を一度まとめますね。」または「ここまでに聞いたことを整理して、今の状況を確認しますね。」のどちらか1文のみ。自由生成禁止。
-- 📝 今の状態について は事実のみ・具体的に書く
+  - 🟢 ここまでの情報を整理します / 🤝 Kairoの判断 / ✅ 今すぐやること / ⏳ 今後の見通し / 🌱 最後に
+  - または 📝 Kairoの判断 / ✅ 今すぐやること / 🏥 受診先の候補 / 💬 最後に
+- ❗🟢/🟡/🔴 ここまでの情報を整理します の本文は固定のみ。前文は「必要な情報はそろいました。」「ここまでで判断に必要な情報は確認できました。」「ここまでで、今の状態はかなり整理できました。」のいずれか1文をランダム。改行のあと「今の症状なら、まずどう動くべきかをはっきりお伝えします。」を必ず続ける。自由生成禁止。
+- 📝 Kairoの判断 は事実のみ・具体的に書く
   - 「ない」「不明」「特になし」だけの記述は禁止
   - 症状・経過・生活影響など具体語を含める
 - 「ない／特にない／該当しない」は不安材料として扱わず、安心材料として書く
@@ -941,18 +939,18 @@ ${stateContext ? `\n${stateContext}\n` : ""}
 - 🔴の場合、🏥 受診先の候補で受診先のカテゴリを具体的に示す
   - 例：歯の痛み→歯医者／耳の痛み→耳鼻科／腹痛・頭痛→病院
 - 🏥 受診先の候補は「近くで行きやすい場所を案内します」を入れ、候補は最大2件までにする
-- 🤝 今の状態については一般論の説明を禁止し、感覚の翻訳にする
+- 🤝 Kairoの判断は一般論の説明を禁止し、感覚の翻訳にする
   - 「今のあなたの状態なら、こう考えて大丈夫です」
   - 「だから今日はこれでいいですよ」
 - ⏳ 今後の見通しは「自然な流れの一言 → 具体トリガー1〜2個 → 固定締め文」で構成
 
-🤝 今の状態について（LLM理解レイヤー）：
+🤝 Kairoの判断（LLM理解レイヤー）：
 - 情報整理は単なる言い換えではなく「症状の状態を説明する文章」として生成する。
 - 禁止：回答をそのまま並べること（例：・ズキズキする、・さっき始まった）
 - OK：症状の意味を短い文章で説明（例：・ズキズキするタイプの痛み、・症状は急に始まった）
 - 処理順序：回答 → 状況理解 → 要約。Step1:回答を整理 → Step2:症状の意味を考える → Step3:意味を短い文章にする
 
-🤝 今の状態について（順番厳守）：
+🤝 Kairoの判断（順番厳守）：
 1) ユーザーのつらさ・不安への一文の寄り添い
 2) ユーザーが話した事実の要約（箇条書き・改行）
 3) ユーザーの感覚を言葉にして返す（感覚の翻訳）
@@ -967,7 +965,7 @@ ${stateContext ? `\n${stateContext}\n` : ""}
 ✅ 今すぐやること：
 - 項目は最大3つ
 - 各項目は「行動 + 理由（1文）」のセット
-${stateContext ? "- 上記【🤝 今の状態について】の内容を必ず反映し、その状態に即した具体的な行動を出す（テンプレ・汎用表現は禁止）\n" : ""}- 理由は不安を下げる説明に限定（正しさの証明・詳細な医学説明は禁止）
+${stateContext ? "- 上記【🤝 Kairoの判断】の内容を必ず反映し、その状態に即した具体的な行動を出す（テンプレ・汎用表現は禁止）\n" : ""}- 理由は不安を下げる説明に限定（正しさの証明・詳細な医学説明は禁止）
 - 口調はやわらかく、選択肢を残す
   - 「〜してみてください」「〜すると楽になることがあります」を使う
 - 命令形・断定は禁止
@@ -991,14 +989,16 @@ ${requiredLevel === "🔴"
   - トーン：不安を煽らない。でも判断ははっきり肯定する。
   - カテゴリ別：PAIN→痛みの相談、SKIN→皮膚の相談、GI→消化器の相談、INFECTION→発熱・喉の相談、TIRED→疲労・だるさ・肩こり・睡眠不足の相談など、症状に合わせて受診の肯定を具体的に。`
   : `- 🟢/🟡の場合：見出しは「🌱 最後に」。**2文以内**（「。」は2つまで）。短く簡潔に。
-  - ①休息の指示を1文で（必ず「休息」を含める）。カテゴリに合わせて具体的に：
+  - **中心軸**：本文は**安心して休むことができる**ことを核に組み立てる（今の情報なら休んでよい・落ち着いて休んでよいが伝わることを最優先。休むことへの不安を残さない）。
+  - ①休息の指示を1文で（必ず「休息」を含める）。カテゴリに合わせて具体的に。上記の中心軸が伝わる表現を優先する：
     - PAIN（痛み系）：動きを控え、安静を優先する指示を。
     - SKIN（皮膚粘膜系）：刺激を避け、患部を休める指示を。
     - GI（消化器系）：消化を休める、食事を控える指示を。
     - INFECTION（発熱感染系）：休養・体を休める指示を。
     - TIRED（疲労・肩こり・睡眠不足系）：無理を減らし、睡眠と負荷のバランスを整える休息の指示を。
-  - ②必要なら再訪や安心の一言を1文まで（長い説明は禁止）。
-  - トーン：優しいがはっきり指示。「〜してください」を優先。
+  - ②必要なら再訪や安心の一言を1文まで（①と重ならない範囲で。長い説明は禁止）。
+  - トーン：優しいがはっきり指示。「〜してください」を優先。休むことへの許可と安心感が伝わるようにする。
+  - 禁止：根拠のない「念のため」だけで休む不安を残す書き方、曖昧な表現。
   - 主症状に合わせて、その症状に合った休息の指示を生成する。汎用表現禁止。`}
 `;
 }
@@ -1013,7 +1013,10 @@ function isHospitalFlow(text) {
 }
 
 function normalizeHospitalMemoHeaderText(text) {
-  return String(text || "").replace(/📝\s*いまの状態を整理します（メモ）?/g, "📝 今の状態について");
+  return String(text || "")
+    .replace(/📝\s*いまの状態を整理します（メモ）?/g, "📝 Kairoの判断")
+    .replace(/🤝\s*今の状態について/g, "🤝 Kairoの判断")
+    .replace(/📝\s*今の状態について/g, "📝 Kairoの判断");
 }
 
 function hasAnySummaryBlocks(text) {
@@ -1034,11 +1037,11 @@ function hasAnySummaryBlocks(text) {
 
 /** LLM 出力の 🤝 見出し（前後空白・全角スペースのゆらぎを許容。KAIRO_SPEC 🤝 ブロック正規化・分割で使用） */
 function isHandshakeStateAboutHeaderLine(line) {
-  return /^\s*🤝\s*今の状態について/.test(String(line || ""));
+  return /^\s*🤝\s*(?:今の状態について|Kairoの判断)/.test(String(line || ""));
 }
 
 function textIncludesHandshakeAboutHeader(text) {
-  return /🤝\s*今の状態について/.test(String(text || ""));
+  return /🤝\s*(?:今の状態について|Kairoの判断)/.test(String(text || ""));
 }
 
 /** 🤝 ブロックが箇条書きのみ（共感・判断の段落なし）か。🟡で多発する欠落の検出用 */
@@ -1060,7 +1063,7 @@ function handshakeStateBlockNeedsEmpathy(text) {
 function isMemoStateAboutHeaderLine(line) {
   const t = String(line || "");
   return (
-    /^\s*📝\s*今の状態について/.test(t) ||
+    /^\s*📝\s*(?:今の状態について|Kairoの判断)/.test(t) ||
     /^\s*📝\s*いまの状態を整理します（メモ）/.test(t) ||
     /^\s*📝\s*いまの状態を整理します\s*$/.test(t.trim())
   );
@@ -1074,7 +1077,7 @@ function isRedIntroHeaderLine(line) {
 function textIncludesMemoAboutHeader(text) {
   const s = String(text || "");
   return (
-    /📝\s*今の状態について/.test(s) ||
+    /📝\s*(?:今の状態について|Kairoの判断)/.test(s) ||
     /📝\s*いまの状態を整理します(（メモ）)?/.test(s)
   );
 }
@@ -1090,10 +1093,10 @@ function lineMatchesSummaryHeaderFlex(line, header) {
   if (header === "🔴 ここまでの情報を整理します") {
     return isRedIntroHeaderLine(t);
   }
-  if (header === "🤝 今の状態について") {
+  if (header === "🤝 Kairoの判断") {
     return isHandshakeStateAboutHeaderLine(t);
   }
-  if (header === "📝 今の状態について" || header === "📝 いまの状態を整理します（メモ）") {
+  if (header === "📝 Kairoの判断" || header === "📝 いまの状態を整理します（メモ）") {
     return isMemoStateAboutHeaderLine(t);
   }
   return false;
@@ -1103,13 +1106,13 @@ function hasAllSummaryBlocks(text) {
   const normalized = normalizeHospitalMemoHeaderText(text);
   const hospitalHeaders = [
     "🔴 ここまでの情報を整理します",
-    "📝 今の状態について",
+    "📝 Kairoの判断",
     "✅ 今すぐやること",
     "🏥 受診先の候補",
     "💬 最後に",
   ];
-  const normalHeaders = ["🟢 ここまでの情報を整理します", "🤝 今の状態について", "✅ 今すぐやること", "⏳ 今後の見通し", "🌱 最後に"];
-  const yellowHeaders = ["🟡 ここまでの情報を整理します", "🤝 今の状態について", "✅ 今すぐやること", "⏳ 今後の見通し", "🌱 最後に"];
+  const normalHeaders = ["🟢 ここまでの情報を整理します", "🤝 Kairoの判断", "✅ 今すぐやること", "⏳ 今後の見通し", "🌱 最後に"];
+  const yellowHeaders = ["🟡 ここまでの情報を整理します", "🤝 Kairoの判断", "✅ 今すぐやること", "⏳ 今後の見通し", "🌱 最後に"];
   const required = isHospitalFlow(normalized)
     ? hospitalHeaders
     : normalized.includes("🟡")
@@ -1119,10 +1122,10 @@ function hasAllSummaryBlocks(text) {
     if (header === "🔴 ここまでの情報を整理します") {
       return /🔴\s*ここまでの情報を整理します/.test(normalized);
     }
-    if (header === "🤝 今の状態について") {
+    if (header === "🤝 Kairoの判断") {
       return textIncludesHandshakeAboutHeader(normalized);
     }
-    if (header === "📝 今の状態について") {
+    if (header === "📝 Kairoの判断") {
       return textIncludesMemoAboutHeader(normalized);
     }
     return normalized.includes(header);
@@ -1133,7 +1136,7 @@ function getRequiredSummaryHeadersByLevel(level) {
   if (level === "🔴") {
     return [
       "🔴 ここまでの情報を整理します",
-      "📝 今の状態について",
+      "📝 Kairoの判断",
       "✅ 今すぐやること",
       "🏥 受診先の候補",
       "💬 最後に",
@@ -1142,7 +1145,7 @@ function getRequiredSummaryHeadersByLevel(level) {
   if (level === "🟡") {
     return [
       "🟢 ここまでの情報を整理します",
-      "🤝 今の状態について",
+      "🤝 Kairoの判断",
       "✅ 今すぐやること",
       "⏳ 今後の見通し",
       "🌱 最後に",
@@ -1150,7 +1153,7 @@ function getRequiredSummaryHeadersByLevel(level) {
   }
   return [
     "🟢 ここまでの情報を整理します",
-    "🤝 今の状態について",
+    "🤝 Kairoの判断",
     "✅ 今すぐやること",
     "⏳ 今後の見通し",
     "🌱 最後に",
@@ -1272,7 +1275,7 @@ function removeSummaryBlockByHeaderPredicate(text, isHeaderLine) {
 }
 
 /**
- * 緊急度に合わない「今の状態について」表現を除去：🔴 では 🤝 を、🟢／🟡 では 📝（メモ）を使わない。
+ * 緊急度に合わない「Kairoの判断」ブロック表現を除去：🔴 では 🤝 を、🟢／🟡 では 📝（メモ）を使わない。
  */
 function stripWrongVariantStateAboutBlocks(text, level) {
   let t = String(text || "");
@@ -1333,11 +1336,11 @@ function dedupeSummaryBlocksByCanonicalOrder(text, level) {
 const ALL_SUMMARY_HEADERS = [
   "🔴 ここまでの情報を整理します",
   "🟢 ここまでの情報を整理します",
-  "🤝 今の状態について",
+  "🤝 Kairoの判断",
   "✅ 今すぐやること",
   "⏳ 今後の見通し",
   "🌱 最後に",
-  "📝 今の状態について",
+  "📝 Kairoの判断",
   "📝 いまの状態を整理します（メモ）",
   "⚠️ Kairoが気になっているポイント",
   "🏥 受診先の候補",
@@ -1705,6 +1708,7 @@ async function fetchPlacesByTextSearch(location, query, { type, radius = 5000 } 
 async function fetchPlaceDetails(placeId, { language = "en", includeOpeningHours = false } = {}) {
   if (!getPlacesApiKey()) return null;
   if (!placeId) return null;
+  if (String(placeId).startsWith("sg_curated_jp_")) return null;
   const baseFields = "place_id,name,rating,reviews,types,url,user_ratings_total,editorial_summary";
   const fields = includeOpeningHours ? `${baseFields},opening_hours` : baseFields;
   const params = new URLSearchParams({
@@ -1806,7 +1810,7 @@ function filterSingaporeExcluded(candidates, allowDental = false) {
 /** 🇸🇬 スコア：japaneseClinic*3 + gpMatch*3 + distanceScore*2 + ratingScore */
 function computeSingaporeCareScore(candidate) {
   const text = [candidate?.name || "", candidate?.vicinity || "", ...(candidate?.types || [])].join(" ").toLowerCase();
-  const japaneseClinic = japaneseClinicNameHasJapanOrJapanese(candidate?.name) ? 3 : 0;
+  const japaneseClinic = isJapaneseClinicForSingapore(candidate?.name) ? 3 : 0;
   const gpMatch = /\b(gp|general practitioner|family\s*clinic|family\s*doctor)\b/.test(text) ? 3 : 0;
   const distM = candidate?.distanceM ?? 9999;
   const distanceScore =
@@ -1960,6 +1964,128 @@ function japaneseClinicNameHasJapanOrJapanese(name) {
   return /(?:ジャパン|ジヤパン|ジャパニーズ|ジャパニー|じゃぱん|じゃぱにーず|じゃぱにす)/u.test(s);
 }
 
+/**
+ * 🇸🇬 シンガポール：日系クリニック判定（Places の表記ゆれ＋固定リスト）。
+ * `japan|japanese` が無くても、下記キュレート施設名に合致すれば日系として扱う。
+ */
+function isJapaneseClinicForSingapore(name) {
+  if (japaneseClinicNameHasJapanOrJapanese(name)) return true;
+  const n = String(name || "").toLowerCase();
+  if (/ことびあ|kotob\s*ia/i.test(String(name || ""))) return true;
+  return SG_CURATED_JAPANESE_CLINICS.some((c) => n.includes(String(c.matchHint || "").toLowerCase()));
+}
+
+/**
+ * シンガポール在住者向けに固定した日系クリニック（住所・座標は概算。距離ソート用）。
+ * ユーザー位置に最も近い順で候補に合流させる。placeId は API 非依存表示用の合成 ID。
+ */
+const SG_CURATED_JAPANESE_CLINICS = [
+  {
+    id: "nihon-premium-novena",
+    matchHint: "nihon premium",
+    name: "Nihon Premium Clinic (ニホンプレミアムクリニック)",
+    address: "10 Sinaran Dr, #11-12/13/30 Novena Medical Center, Singapore 307506",
+    lat: 1.32058,
+    lng: 103.84376,
+  },
+  {
+    id: "japanese-association-adam",
+    matchHint: "japanese association",
+    name: "Japanese Association Clinic (日本人会クリニック)",
+    address: "120 Adam Rd, Singapore 289899",
+    lat: 1.32512,
+    lng: 103.81523,
+  },
+  {
+    id: "sugino-royal-square",
+    matchHint: "sugino",
+    name: "Sugino International Clinic (スギノインターナショナルクリニック)",
+    address: "101 Irrawaddy Road, #10-11 Royal Square @ Novena, Singapore 329565",
+    lat: 1.32189,
+    lng: 103.84345,
+  },
+  {
+    id: "japan-green-paragon",
+    matchHint: "japan green",
+    name: "Japan Green Clinic (ジャパングリーンクリニック)",
+    address: "290 Orchard Road, #10-01 Paragon, Singapore 238859",
+    lat: 1.30408,
+    lng: 103.83565,
+  },
+  {
+    id: "healthway-centrepoint",
+    matchHint: "healthway japanese",
+    name: "Healthway Japanese Medical (Centrepoint)",
+    address: "176 Orchard Rd, #06-05 The Centrepoint, Singapore 238843",
+    lat: 1.30045,
+    lng: 103.83982,
+  },
+  {
+    id: "raffles-japanese-shaw",
+    matchHint: "raffles japanese",
+    name: "Raffles Japanese Clinic (Shaw Centre)",
+    address: "1 Scotts Road, #05-06/11 Shaw Centre, Singapore 228208",
+    lat: 1.30639,
+    lng: 103.83171,
+  },
+  {
+    id: "kotob-ue-square",
+    matchHint: "kotob",
+    name: "ことびあクリニック (UE Square)",
+    address: "81 Clemenceau Ave, #03-11, Singapore 239917",
+    lat: 1.29289,
+    lng: 103.84012,
+  },
+  {
+    id: "raffles-japanese-north-bridge",
+    matchHint: "raffles japanese",
+    name: "Raffles Japanese Clinic (North Bridge / 本院)",
+    address: "585 North Bridge Road, Level 2, Singapore 188770",
+    lat: 1.30123,
+    lng: 103.8589,
+  },
+  {
+    id: "raffles-japanese-great-world",
+    matchHint: "great world",
+    name: "Raffles Japanese Clinic (Great World)",
+    address: "1 Kim Seng Promenade, #01-158B, Singapore 237994",
+    lat: 1.29368,
+    lng: 103.82746,
+  },
+  {
+    id: "healthway-shenton",
+    matchHint: "shenton way",
+    name: "Healthway Japanese Medical (Downtown / Shenton)",
+    address: "6A Shenton Way, #02-15, Singapore 068815",
+    lat: 1.27894,
+    lng: 103.85123,
+  },
+];
+
+/** @param {{ lat: number, lng: number }} origin */
+function buildSingaporeCuratedJapanesePlaces(origin) {
+  if (!origin || !Number.isFinite(origin.lat) || !Number.isFinite(origin.lng)) return [];
+  const out = SG_CURATED_JAPANESE_CLINICS.map((c) => {
+    const distanceM = distanceMeters(origin.lat, origin.lng, c.lat, c.lng);
+    const placeId = `sg_curated_jp_${c.id}`;
+    return {
+      name: c.name,
+      placeId,
+      vicinity: c.address,
+      lat: c.lat,
+      lng: c.lng,
+      distanceM,
+      rating: 4.2,
+      userRatingsTotal: null,
+      types: ["doctor", "health"],
+      mapsUrl: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${c.name} ${c.address}`)}`,
+      sgCurated: true,
+    };
+  });
+  out.sort((a, b) => (a.distanceM ?? 0) - (b.distanceM ?? 0));
+  return out;
+}
+
 /** 症状カテゴリごとのGP検索キーワード（v2：専門科に寄せすぎずGP/内科軸） */
 function getGpSearchKeywordsByCategory(category) {
   switch (category) {
@@ -2000,13 +2126,14 @@ async function fetchCarePlacesForSingapore(location, state) {
   for (const q of jpQueries) {
     const batch = await fetchPlacesByTextSearch(location, q, { radius: 50000 });
     japaneseMerged.push(...batch);
-    const strictSoFar = mergePlaces(japaneseMerged).filter((c) => japaneseClinicNameHasJapanOrJapanese(c?.name));
+    const strictSoFar = mergePlaces(japaneseMerged).filter((c) => isJapaneseClinicForSingapore(c?.name));
     if (strictSoFar.length >= 3) break;
   }
+  const curatedJp = buildSingaporeCuratedJapanesePlaces(location);
   const japanese = filterSingaporeExcluded(
-    mergePlaces(japaneseMerged).filter((c) => japaneseClinicNameHasJapanOrJapanese(c?.name)),
+    mergePlaces(curatedJp, mergePlaces(japaneseMerged)).filter((c) => isJapaneseClinicForSingapore(c?.name)),
     allowDental
-  ).slice(0, 3);
+  ).slice(0, 6);
 
   // ② GP／歯科（歯痛時）：Nearby Search、radius=1000、type=doctor or dentist
   const gpKeywords = allowDental ? ["clinic", "GP", "family medicine", "dentist", "dental clinic"] : ["clinic", "GP", "family medicine"];
@@ -2020,22 +2147,27 @@ async function fetchCarePlacesForSingapore(location, state) {
     gpRaw.push(...places);
   }
   const gp = filterSingaporeExcluded(
-    mergePlaces(gpRaw).filter((c) => !japaneseClinicNameHasJapanOrJapanese(c?.name)),
+    mergePlaces(gpRaw).filter((c) => !isJapaneseClinicForSingapore(c?.name)),
     allowDental
   ).filter((c) => (c?.distanceM ?? 0) <= 1000);
 
-  // ③④ フィルタ（rating 3.8+）＋スコアリング
+  // ③④ フィルタ（rating 3.8+）＋スコアリング（日系キュレートは rating 付与済みで通過）
   const allCandidates = filterByMinRating(mergePlaces(japanese, gp));
   const scored = allCandidates.map((c) => ({ ...c, _sgScore: computeSingaporeCareScore(c) }));
   const meetsRating = scored.filter((c) => c._sgScore >= 0);
 
   // ⑤ 意思決定：主役＝GP（必須）、日系＝サブ主役（英語不安の選択肢・施設名に Japan/Japanese）
   const gpSorted = meetsRating
-    .filter((c) => !japaneseClinicNameHasJapanOrJapanese(c?.name))
+    .filter((c) => !isJapaneseClinicForSingapore(c?.name))
     .sort((a, b) => (b._sgScore || 0) - (a._sgScore || 0));
   const japaneseSorted = meetsRating
-    .filter((c) => japaneseClinicNameHasJapanOrJapanese(c?.name))
-    .sort((a, b) => (b._sgScore || 0) - (a._sgScore || 0));
+    .filter((c) => isJapaneseClinicForSingapore(c?.name))
+    .sort((a, b) => {
+      const da = a?.distanceM ?? 999999;
+      const db = b?.distanceM ?? 999999;
+      if (da !== db) return da - db;
+      return (b._sgScore || 0) - (a._sgScore || 0);
+    });
 
   const main = gpSorted[0];
   const alt1 = japaneseSorted[0] || null;
@@ -2053,7 +2185,8 @@ async function fetchCarePlacesForSingapore(location, state) {
  */
 async function fetchJapaneseClinicSingaporeForRedModal(state) {
   const location = state?.locationSnapshot;
-  if (!getPlacesApiKey() || !location?.lat || !location?.lng) return [];
+  const curated = buildSingaporeCuratedJapanesePlaces(location);
+  if (!getPlacesApiKey() || !location?.lat || !location?.lng) return curated.slice(0, 3);
   const queries = [
     "japanese clinic singapore",
     "Japanese medical clinic singapore",
@@ -2066,17 +2199,24 @@ async function fetchJapaneseClinicSingaporeForRedModal(state) {
   for (const q of queries) {
     const raw = await fetchPlacesByTextSearch(location, q, { radius: 50000 });
     all.push(...mergePlaces(raw));
-    const strict = mergePlaces(all).filter((c) => japaneseClinicNameHasJapanOrJapanese(c?.name));
+    const strict = mergePlaces(all).filter((c) => isJapaneseClinicForSingapore(c?.name));
     if (strict.length >= 3) break;
   }
-  const merged = mergePlaces(all).filter((c) => japaneseClinicNameHasJapanOrJapanese(c?.name));
+  const merged = mergePlaces(curated, mergePlaces(all)).filter((c) => isJapaneseClinicForSingapore(c?.name));
   const relaxed = merged.filter((c) => {
     const r = c?.rating ?? c?.details?.rating;
     if (r == null) return true;
     return r >= 3.0;
   });
   const pool = relaxed.length ? relaxed : merged;
-  return pool.sort((a, b) => (b?.rating ?? 0) - (a?.rating ?? 0)).slice(0, 3);
+  return pool
+    .sort((a, b) => {
+      const da = a?.distanceM ?? 999999;
+      const db = b?.distanceM ?? 999999;
+      if (da !== db) return da - db;
+      return (b?.rating ?? 0) - (a?.rating ?? 0);
+    })
+    .slice(0, 3);
 }
 
 async function fetchCarePlacesWithFallbacks(location, plan, state) {
@@ -2174,7 +2314,7 @@ function scoreSingaporePreference(candidate) {
     candidate?.details?.editorialSummary || "",
     ...(candidate?.details?.reviewTexts || []).slice(0, 5).join(" "),
   ].join(" ");
-  const hasJapaneseClinic = japaneseClinicNameHasJapanOrJapanese(candidate?.name);
+  const hasJapaneseClinic = isJapaneseClinicForSingapore(candidate?.name);
   const hasJapaneseSupport = /(日本語対応|japanese support|japanese speaking|日本語)/i.test(text);
   const hasGp = /(gp|general practitioner|family|clinic)/i.test(text);
   const hasLargeHospital = /(hospital|medical centre|medical center)/i.test(text);
@@ -2238,7 +2378,7 @@ function reorderSingaporePlacesWithJapaneseSecond(places) {
   if (list.length <= 1) return list;
   const main = list[0];
   const rest = list.slice(1);
-  const jpIdx = rest.findIndex((p) => japaneseClinicNameHasJapanOrJapanese(p?.name));
+  const jpIdx = rest.findIndex((p) => isJapaneseClinicForSingapore(p?.name));
   if (jpIdx === -1) return list;
   const jp = rest[jpIdx];
   const restWithout = rest.filter((_, i) => i !== jpIdx);
@@ -2255,15 +2395,17 @@ function buildSingaporeHospitalCandidatesThreeOrdered(placesIn) {
     seen.add(p.placeId);
     uniq.push(p);
   }
-  const jp = uniq.filter((c) => japaneseClinicNameHasJapanOrJapanese(c?.name));
-  const nonJp = uniq.filter((c) => !japaneseClinicNameHasJapanOrJapanese(c?.name));
+  const jp = uniq.filter((c) => isJapaneseClinicForSingapore(c?.name));
+  const nonJp = uniq.filter((c) => !isJapaneseClinicForSingapore(c?.name));
   const firstGp = nonJp[0];
   const jpOne = jp[0];
+  const jpTwo = jp[1];
   const secondGp = nonJp[1];
   const out = [];
   if (firstGp) out.push(firstGp);
   if (jpOne) out.push(jpOne);
-  if (secondGp) out.push(secondGp);
+  if (jpTwo) out.push(jpTwo);
+  else if (secondGp) out.push(secondGp);
   if (out.length >= 3) return out;
   const usedIds = new Set(out.map((x) => x.placeId));
   for (const c of uniq) {
@@ -2285,13 +2427,13 @@ function buildSingaporeHospitalCandidatesFourOrdered(placesIn) {
     seen.add(p.placeId);
     uniq.push(p);
   }
-  const jp = uniq.filter((c) => japaneseClinicNameHasJapanOrJapanese(c?.name));
-  const nonJp = uniq.filter((c) => !japaneseClinicNameHasJapanOrJapanese(c?.name));
+  const jp = uniq.filter((c) => isJapaneseClinicForSingapore(c?.name));
+  const nonJp = uniq.filter((c) => !isJapaneseClinicForSingapore(c?.name));
   const out = [];
   if (nonJp[0]) out.push(nonJp[0]);
   if (jp[0]) out.push(jp[0]);
+  if (jp[1]) out.push(jp[1]);
   if (nonJp[1]) out.push(nonJp[1]);
-  if (nonJp[2]) out.push(nonJp[2]);
   if (out.length >= 4) return out.slice(0, 4);
   const usedIds = new Set(out.map((x) => x.placeId));
   for (const c of uniq) {
@@ -2318,9 +2460,9 @@ async function ensureSingaporeJapaneseClinicSecondSlot(state, placesIn) {
   let pool = dedupeByPlace(placesIn);
   if (pool.length === 0) return pool;
   pool = reorderSingaporePlacesWithJapaneseSecond(pool);
-  const hasSecondJp = pool.length > 1 && japaneseClinicNameHasJapanOrJapanese(pool[1]?.name);
+  const hasSecondJp = pool.length > 1 && isJapaneseClinicForSingapore(pool[1]?.name);
   if (hasSecondJp) return buildSingaporeHospitalCandidatesFourOrdered(pool);
-  const hasAnyJp = pool.some((p) => japaneseClinicNameHasJapanOrJapanese(p?.name));
+  const hasAnyJp = pool.some((p) => isJapaneseClinicForSingapore(p?.name));
   if (hasAnyJp) return buildSingaporeHospitalCandidatesFourOrdered(reorderSingaporePlacesWithJapaneseSecond(pool));
   const extra = await fetchJapaneseClinicSingaporeForRedModal(state);
   const jp = extra.find((e) => e?.placeId && e.placeId !== pool[0]?.placeId);
@@ -2333,7 +2475,7 @@ async function ensureSingaporeJapaneseClinicSecondSlot(state, placesIn) {
 function getInsuranceLabel(facility, isSingapore) {
   if (!isSingapore || !facility) return "";
   const text = [facility?.name || "", facility?.vicinity || "", ...(facility?.types || [])].join(" ").toLowerCase();
-  if (japaneseClinicNameHasJapanOrJapanese(facility?.name) || /(日系|nihon)/i.test(text)) return "［保険: △ 要確認（自費になることも）］";
+  if (isJapaneseClinicForSingapore(facility?.name) || /(日系|nihon)/i.test(text)) return "［保険: △ 要確認（自費になることも）］";
   if (/\b(clinic|gp|family)\b/.test(text)) return "［保険: ◯ 使えることが多い］";
   return "［保険: -］";
 }
@@ -3437,7 +3579,7 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
           lines.push("");
           if (i === 1) {
             lines.push(
-              japaneseClinicNameHasJapanOrJapanese(c?.name)
+              isJapaneseClinicForSingapore(c?.name)
                 ? "もし英語が不安で日本語がいい場合はこちらです"
                 : "必要であれば、こちらも選択肢になります"
             );
@@ -3564,7 +3706,6 @@ async function buildSingaporeModalContent(places, plan, state) {
   ];
   lines.push("");
 
-  const isRed = state?.decisionLevel === "🔴";
   let pool = [...(places || [])].filter((p) => p?.placeId);
   const dedupeByPlace = (arr) => {
     const seen = new Set();
@@ -3575,11 +3716,9 @@ async function buildSingaporeModalContent(places, plan, state) {
     });
   };
   pool = dedupeByPlace(pool);
-  if (isRed) {
-    if (!pool.some((p) => japaneseClinicNameHasJapanOrJapanese(p?.name))) {
-      const extra = await fetchJapaneseClinicSingaporeForRedModal(state);
-      pool = dedupeByPlace([...pool, ...extra]);
-    }
+  if (!pool.some((p) => isJapaneseClinicForSingapore(p?.name))) {
+    const extra = await fetchJapaneseClinicSingaporeForRedModal(state);
+    pool = dedupeByPlace([...pool, ...extra]);
   }
   pool = buildSingaporeHospitalCandidatesFourOrdered(pool);
 
@@ -3600,10 +3739,17 @@ async function buildSingaporeModalContent(places, plan, state) {
   const mainEnriched = { ...main, details: mainDetails || main.details };
   buildMainFacilityReasons(mainEnriched, plan, state).forEach((r) => lines.push(r));
 
-  const jpSlot = pool[1] && japaneseClinicNameHasJapanOrJapanese(pool[1].name) ? pool[1] : null;
-  if (jpSlot && jpSlot.placeId !== main.placeId) {
+  const jpSlots = pool.slice(1, 3).filter((p) => p && isJapaneseClinicForSingapore(p.name));
+  let jpIdxShown = 0;
+  for (const jpSlot of jpSlots) {
+    if (!jpSlot || jpSlot.placeId === main.placeId) continue;
     pushBetweenHospitalBlocks();
-    lines.push("もし英語が不安で日本語がいい場合はこちらです");
+    lines.push(
+      jpIdxShown === 0
+        ? "もし英語が不安で日本語がいい場合はこちらです"
+        : "ほかにも、近い日系クリニックの候補です"
+    );
+    jpIdxShown++;
     const jd = await fetchPlaceDetails(jpSlot.placeId, { language: "ja" });
     const jn = jd?.name || jpSlot.name || "";
     const insJ = getInsuranceLabel(jpSlot, true);
@@ -3612,7 +3758,8 @@ async function buildSingaporeModalContent(places, plan, state) {
     lines.push("・海外でも安心して相談しやすい環境");
   }
 
-  const thirdGp = pool[2] && !japaneseClinicNameHasJapanOrJapanese(pool[2].name) ? pool[2] : null;
+  const auxGps = pool.slice(1).filter((p) => p?.placeId && !isJapaneseClinicForSingapore(p?.name) && p.placeId !== main.placeId);
+  const thirdGp = auxGps[0] || null;
   if (thirdGp && thirdGp.placeId !== main.placeId) {
     pushBetweenHospitalBlocks();
     const d3 = await fetchPlaceDetails(thirdGp.placeId, { language: "ja" });
@@ -3623,7 +3770,7 @@ async function buildSingaporeModalContent(places, plan, state) {
     lines.push(buildAuxiliaryReason({ ...thirdGp, details: d3 || thirdGp.details }, plan, state, 0));
   }
 
-  const fourthGp = pool[3] && !japaneseClinicNameHasJapanOrJapanese(pool[3].name) ? pool[3] : null;
+  const fourthGp = auxGps[1] || null;
   if (fourthGp && fourthGp.placeId !== main.placeId) {
     pushBetweenHospitalBlocks();
     const d4 = await fetchPlaceDetails(fourthGp.placeId, { language: "ja" });
@@ -3719,7 +3866,7 @@ async function ensureHospitalMemoBlock(text, state, historyText = "") {
   if (!text) return text;
   const factBullets = sanitizeBulletPoints(buildStateFactsBullets(state, { forSummary: true }) || [], state);
   const memoLines = [
-    "📝 今の状態について",
+    "📝 Kairoの判断",
     ...factBullets,
     "",
     await buildStateAboutEmpathyAndJudgmentAsync(state, "🔴"),
@@ -3731,7 +3878,7 @@ async function ensureHospitalMemoBlock(text, state, historyText = "") {
   );
   return replaceSummaryBlock(
     replacedOld,
-    "📝 今の状態について",
+    "📝 Kairoの判断",
     memoLines.join("\n")
   );
 }
@@ -3761,7 +3908,7 @@ async function ensureRedImmediateActionsBlock(text, state, historyText = "", res
   const block = buildRedImmediateActionsBlock(state, historyText, plan, refinedSafeWait);
   const replaced = replaceSummaryBlock(text, "✅ 今すぐやること", block);
   if (replaced === text) {
-    const insertAfter = "📝 今の状態について";
+    const insertAfter = "📝 Kairoの判断";
     const lines = text.split("\n");
     const idx = lines.findIndex((line) => line.startsWith(insertAfter));
     if (idx >= 0) {
@@ -3869,10 +4016,10 @@ function replaceSummaryBlock(text, header, block) {
   if (!text) return text;
   const lines = text.split("\n");
   const startIndex = lines.findIndex((line) => {
-    if (header === "🤝 今の状態について") {
+    if (header === "🤝 Kairoの判断") {
       return isHandshakeStateAboutHeaderLine(line);
     }
-    if (header === "📝 今の状態について" || header === "📝 いまの状態を整理します") {
+    if (header === "📝 Kairoの判断" || header === "📝 いまの状態を整理します") {
       return isMemoStateAboutHeaderLine(line);
     }
     return line.startsWith(header);
@@ -3900,20 +4047,20 @@ function replaceSummaryBlock(text, header, block) {
   return updated.join("\n");
 }
 
-/** 追加情報・違う等のとき、「今の状態について」ブロックのみ差し替え（他ブロックはそのまま） */
+/** 追加情報・違う等のとき、「Kairoの判断」ブロックのみ差し替え（他ブロックはそのまま） */
 async function replaceStateAboutBlockOnly(summaryText, state, historyText = "") {
   if (!summaryText || !state) return summaryText;
   const hasRedStateBlock = textIncludesMemoAboutHeader(summaryText);
   if (hasRedStateBlock) {
     const factBullets = sanitizeBulletPoints(buildStateFactsBullets(state, { forSummary: true }) || [], state);
     const memoLines = [
-      "📝 今の状態について",
+      "📝 Kairoの判断",
       ...factBullets,
       "",
       await buildStateAboutEmpathyAndJudgmentAsync(state, "🔴"),
     ].join("\n");
     let result = replaceSummaryBlock(normalizeHospitalMemoHeaderText(summaryText), "📝 いまの状態を整理します", memoLines);
-    result = replaceSummaryBlock(result, "📝 今の状態について", memoLines);
+    result = replaceSummaryBlock(result, "📝 Kairoの判断", memoLines);
     return result;
   }
   const level = finalizeRiskLevel(state);
@@ -3925,13 +4072,13 @@ async function replaceStateAboutBlockOnly(summaryText, state, historyText = "") 
   const decisionLine = buildStateDecisionLine(state, level);
   const factBulletsGy = sanitizeBulletPoints(buildStateFactsBullets(state, { forSummary: true }) || [], state);
   const newBlock = [
-    "🤝 今の状態について",
+    "🤝 Kairoの判断",
     ...factBulletsGy,
     "",
     aboutLine,
     ...(decisionLine ? [decisionLine] : []),
   ].join("\n");
-  return replaceSummaryBlock(summaryText, "🤝 今の状態について", newBlock);
+  return replaceSummaryBlock(summaryText, "🤝 Kairoの判断", newBlock);
 }
 
 /** 🤝 が箇条書きのみのときだけ差し替え（重複 LLM を避ける）。まとめ本線・確認応答の両方で使用 */
@@ -3966,7 +4113,7 @@ async function replaceImmediateActionsBlockOnly(summaryText, state, historyText 
 
 /**
  * 先行まとめ（GET /api/summary-progress）用の部分セクション。
- * 「今の状態について」は箇条書き・共感・判断・網羅検証まで含めた**完全形**をまとめ本線で組み立てるため、ここでは出さない（箇条書きだけが先行すると不完全表示になる）。
+ * 「Kairoの判断」は箇条書き・共感・判断・網羅検証まで含めた**完全形**をまとめ本線で組み立てるため、ここでは出さない（箇条書きだけが先行すると不完全表示になる）。
  */
 function buildSummaryPartialSectionsBeforeLlm(state) {
   if (!state) return [];
@@ -4315,6 +4462,8 @@ function buildExpectedCourse(context = {}, state = null) {
  * - 緑 Cold & Flu: 風の初期症状パターン（KAIRO_SPEC）または喉主症状
  * - 青オリジナル: 上記以外の基本
  */
+const PANADOL_SG_RETAIL_AVAILABILITY_LINE = "シンガポールのコンビニやドラッグストアで市販されています。";
+
 function resolvePanadolPackForPainInfection(state, topic) {
   if (!state) return "blue";
   const pain = Number.isFinite(state.lastPainScore) ? state.lastPainScore : null;
@@ -4324,23 +4473,66 @@ function resolvePanadolPackForPainInfection(state, topic) {
   return "blue";
 }
 
+/**
+ * パナドール表示時は必ずパッケージ色を含め、理由にコンビニ・ドラッグストア販売の別文を付与する（LLM／固定の両方）。
+ */
+function ensurePanadolSingaporeDisplayCopy(action, reason, state, topicForPack) {
+  const a = String(action || "");
+  if (!/パナドール|Panadol/i.test(a)) return { action, reason };
+  const pack = resolvePanadolPackForPainInfection(state, topicForPack);
+  const colorPack =
+    pack === "red" ? "赤いパッケージの" : pack === "green" ? "緑のパッケージの" : "青いパッケージの";
+  let newAction = a;
+  if (!/(青い|赤い|緑の)パッケージ/.test(newAction)) {
+    if (/市販のパナドール/.test(newAction)) {
+      newAction = newAction.replace(/市販のパナドール/, `${colorPack}市販のパナドール`);
+    } else if (/Panadol/i.test(newAction)) {
+      newAction = newAction.replace(/\bPanadol\b/i, `${colorPack}市販のPanadol`);
+    } else {
+      newAction = newAction.replace(/パナドール/, `${colorPack}市販のパナドール`);
+    }
+  }
+  let r = String(reason || "").trim();
+  if (!/コンビニ.*ドラッグストア|ドラッグストア.*コンビニ/.test(r)) {
+    r = r ? `${r} ${PANADOL_SG_RETAIL_AVAILABILITY_LINE}` : PANADOL_SG_RETAIL_AVAILABILITY_LINE;
+  }
+  return { action: newAction, reason: r };
+}
+
+function applyPanadolSingaporeDisplayToDoActionItems(items, state, ctx) {
+  const topic = normalizeContextLocation(ctx?.location || "");
+  return items.map((x) => {
+    const action = x.action ?? x.title;
+    const z = ensurePanadolSingaporeDisplayCopy(action, x.reason, state, topic);
+    if (x.title !== undefined) return { title: z.action, reason: z.reason };
+    return { action: z.action, reason: z.reason };
+  });
+}
+
 function getPanadolOtcActionForModal(state, topic) {
   const pack = resolvePanadolPackForPainInfection(state, topic);
+  const retailLine = PANADOL_SG_RETAIL_AVAILABILITY_LINE;
   const byPack = {
     red: {
-      action: "市販のパナドール Extra（エキストラ）を用法通りに使ってください",
+      action: "赤いパッケージの市販パナドール Extra（エキストラ）を用法通りに使ってください",
       reason:
-        "鎮痛効果を高めるカフェインが配合され、強い痛み（頑固な頭痛・重い生理痛・激しい筋肉痛など）に使われます。痛みを和らげることで、休息を取りやすくなります。",
+        "鎮痛効果を高めるカフェインが配合され、強い痛み（頑固な頭痛・重い生理痛・激しい筋肉痛など）に使われます。痛みを和らげることで、休息を取りやすくなります。" +
+        " " +
+        retailLine,
     },
     green: {
-      action: "市販のパナドール Cold & Flu（コールド＆フル）を用法通りに使ってください",
+      action: "緑のパッケージの市販パナドール Cold & Flu（コールド＆フル）を用法通りに使ってください",
       reason:
-        "風邪の症状に合わせた配合で、鼻水・咳・のどの痛み・発熱・頭痛などに使われます。症状を和らげることで休みやすくなります。",
+        "風邪の症状に合わせた配合で、鼻水・咳・のどの痛み・発熱・頭痛などに使われます。症状を和らげることで休みやすくなります。" +
+        " " +
+        retailLine,
     },
     blue: {
-      action: "市販のパナドール（オリジナル）を用法通りに使ってください",
+      action: "青いパッケージの市販パナドール（オリジナル）を用法通りに使ってください",
       reason:
-        "パラセタモール（アセトアミノフェン）500mgの一般的な服用で、頭痛・発熱・生理痛・歯痛・筋肉痛などに使われます。痛みを和らげることで、休息を取りやすくなります。",
+        "パラセタモール（アセトアミノフェン）500mgの一般的な服用で、頭痛・発熱・生理痛・歯痛・筋肉痛などに使われます。痛みを和らげることで、休息を取りやすくなります。" +
+        " " +
+        retailLine,
     },
   };
   return byPack[pack] || byPack.blue;
@@ -4433,7 +4625,7 @@ async function refineDoActionsWithLLM(plan, state, level, options = {}) {
               : "doは2件。各reasonは検索要点と整合する確実な理由にする。"
             : "doは必ずちょうど4件。各reasonは検索要点と整合する確実な理由にする。",
           isYellow && !forSummary
-            ? "OTC（市販薬）を1件必ず含める。PAIN/INFECTION かつ鎮痛のときはシンガポール市販のパナドール（オリジナル／Extra／Cold&Fluのいずれか1種）を具体的に。整腸剤・のど飴・ワセリン等は他部位向け。"
+            ? "OTC（市販薬）を1件必ず含める。PAIN/INFECTION かつ鎮痛のときはシンガポール市販のパナドール（オリジナル／Extra／Cold&Fluのいずれか1種）を具体的に。**パッケージの色（青／赤／緑のいずれか）を行動文に必ず書く。**理由には、薬の説明とは別文として**「シンガポールのコンビニやドラッグストアで市販されています」**を必ず1文追加する。整腸剤・のど飴・ワセリン等は他部位向け。"
             : "",
           "「症状メモを2時間ごとに1回...」は禁止。",
         ]
@@ -4464,15 +4656,28 @@ async function refineDoActionsWithLLM(plan, state, level, options = {}) {
       const parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
       const outDo = Array.isArray(parsed?.do) ? parsed.do : doActions;
       const valid = outDo.filter((x) => x && x.action && x.reason).map((x) => ({ title: x.action, reason: x.reason }));
-      if (valid.length >= minRequired) return valid;
-      if (valid.length > 0 && attempt >= LLM_RETRY_COUNT - 1) return valid;
+      const enriched = applyPanadolSingaporeDisplayToDoActionItems(valid, state, ctx);
+      if (enriched.length >= minRequired) return enriched;
+      if (enriched.length > 0 && attempt >= LLM_RETRY_COUNT - 1) return enriched;
     } catch (_) {
       /* retry */
     }
   }
-  if (doActions.length > 0) return doActions.map((x) => ({ title: x.action, reason: x.reason }));
+  if (doActions.length > 0) {
+    return applyPanadolSingaporeDisplayToDoActionItems(
+      doActions.map((x) => ({ title: x.action, reason: x.reason })),
+      state,
+      ctx
+    );
+  }
   const lastResort = await generateMinimalActionsLastResort(ctx);
-  if (lastResort.length > 0) return lastResort.map((a) => ({ title: a.title, reason: a.reason }));
+  if (lastResort.length > 0) {
+    return applyPanadolSingaporeDisplayToDoActionItems(
+      lastResort.map((a) => ({ title: a.title, reason: a.reason })),
+      state,
+      ctx
+    );
+  }
   return [];
 }
 
@@ -4542,6 +4747,10 @@ function buildDoActionsFromPlan(plan, state, level, options = {}) {
       .filter((x) => !ensured.some((e) => e.action === x.action));
     ensured = [...ensured, ...extra].slice(0, maxCount);
   }
+  ensured = applyPanadolSingaporeDisplayToDoActionItems(ensured, state, ctx).map((x) => ({
+    action: toConciseActionTitle(x.action ?? x.title),
+    reason: ensureReliableReason(x.reason, evidence),
+  }));
   return ensured.slice(0, maxCount);
 }
 
@@ -4563,11 +4772,11 @@ async function generateLastBlockWithLLM(level, state, contextText = "") {
   const categoryHint = (() => {
     if (level === "🔴") return "";
     const hints = {
-      PAIN: "痛み系（頭痛・腰痛など）：動きを控え、安静を優先する指示を。",
-      SKIN: "皮膚粘膜系：刺激を避け、患部を休める指示を。",
-      GI: "消化器系（腹痛・下痢など）：消化を休める、食事を控える指示を。",
-      INFECTION: "発熱感染系（喉・咳・熱など）：休養・体を休める指示を。",
-      TIRED: "疲労・だるさ・肩こり・首こり・睡眠不足系：無理を減らし、休息とリズムを整える指示を。",
+      PAIN: "痛み系（頭痛・腰痛など）：動きを控え、安静を優先する指示を。**今の情報なら安心して休んでよい**ことが伝わるように。",
+      SKIN: "皮膚粘膜系：刺激を避け、患部を休める指示を。**安心して休める**ことが中心になるように。",
+      GI: "消化器系（腹痛・下痢など）：消化を休める、食事を控える指示を。**落ち着いて休んでよい**ことが伝わるように。",
+      INFECTION: "発熱感染系（喉・咳・熱など）：休養・体を休める指示を。**休むことへの許可と安心**が伝わるように。",
+      TIRED: "疲労・だるさ・肩こり・首こり・睡眠不足系：無理を減らし、休息とリズムを整える指示を。**安心して休める**ことを核に。",
     };
     return hints[category] || hints.PAIN;
   })();
@@ -4579,14 +4788,15 @@ async function generateLastBlockWithLLM(level, state, contextText = "") {
 不安を煽らない。判断ははっきり肯定する。
 症状カテゴリ（${category}）と主症状（${mainSymptom || "症状"}）に合わせて、受診の肯定・後押しを具体的に書く。`
       : `見出しは「🌱 最後に」。**2文以内**（「。」は2つまで）。短く簡潔に。
+**中心軸**：**安心して休むことができる**こと。今の情報なら休んで問題ない・落ち着いて休んでよいが伝わることを最優先。休むことへの不安を残さない。
 ①休息の指示を1文（必ず「休息」を含める。カテゴリに合わせて具体化：${categoryHint}）
-②必要なら再訪や安心の一言を1文まで（「また不安になったらここで確認」程度でよい。長い説明は禁止）
-「〜してください」を優先。抽象的な励まし禁止。
+②必要なら再訪や安心の一言を1文まで（①と重ならない範囲で。「また不安になったらここで確認」程度でよい。長い説明は禁止）
+「〜してください」を優先。休むことへの許可と安心感が伝わるように。抽象的な励まし禁止。根拠のない「念のため」だけで休む不安を残すのは禁止。
 主症状（${mainSymptom || "症状"}）に合わせる。汎用表現禁止。`;
   const simplePrompt =
     level === "🔴"
       ? `「今の状況で受診を選ぶのは適切な判断です。無理に我慢せず、一度確認してもらうと安心です。」を主症状「${mainSymptom || "症状"}」に合わせて1〜2文で言い換えてください。見出しは出さず本文のみ。`
-      : `主症状「${mainSymptom || "症状"}」に合わせ、休息を勧める**1文**を書いてください（長い場合のみ最大2文）。「〜してください」で終える。見出しは出さず本文のみ。`;
+      : `主症状「${mainSymptom || "症状"}」に合わせ、**安心して休めること**を核に、休息を勧める**1文**を書いてください（長い場合のみ最大2文）。今の情報なら休んでよいことが伝わるように。「〜してください」で終える。見出しは出さず本文のみ。`;
   const userContent = contextText || (state ? buildStateFactsBullets(state, { forSummary: true }).join("\n") : "") || "症状の状態を確認しました。";
   const fullPrompt = `あなたはKairoです。以下の会話・状態を踏まえ、「${header}」ブロックの本文のみを生成してください。
 ${fullRules}
@@ -4616,7 +4826,7 @@ ${fullRules}
   const copyPrompt =
     level === "🔴"
       ? "「今の状況で受診を選ぶのは適切な判断です。無理に我慢せず、一度確認してもらうと安心です。」をそのまま返してください。"
-      : "「今は体を休めることを優先してください。不安になったらまたここで確認してください。」をそのまま返してください。";
+      : "「今の情報なら安心して休んで大丈夫です。まずは休息を優先し、不安になったらまたここで確認してください。」をそのまま返してください。";
   const last = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     messages: [{ role: "user", content: copyPrompt }],
@@ -4631,7 +4841,7 @@ ${fullRules}
     try {
       const retry = await openai.chat.completions.create({
         model: "gpt-4o-mini",
-        messages: [{ role: "user", content: level === "🔴" ? "「今の状況で受診を選ぶのは適切な判断です。」をそのまま返して。" : "「今は体を休めることを優先してください。」をそのまま返して。" }],
+        messages: [{ role: "user", content: level === "🔴" ? "「今の状況で受診を選ぶのは適切な判断です。」をそのまま返して。" : "「今の情報なら安心して休んで大丈夫です。まずは休息を優先してください。」をそのまま返して。" }],
         temperature: 0,
         max_tokens: 50,
       });
@@ -4644,7 +4854,7 @@ ${fullRules}
   return `${header}\n${
     level === "🔴"
       ? "今の状況で受診を選ぶのは適切な判断です。無理に我慢せず、一度確認してもらうと安心です。"
-      : "今は体を休めることを優先してください。不安になったらまたここで確認してください。"
+      : "今の情報なら安心して休んで大丈夫です。まずは休息を優先してください。不安になったらまたここで確認してください。"
   }`;
 }
 
@@ -5126,11 +5336,14 @@ function ensureRestMcDecisionBlock(text, level, state) {
 }
 
 function buildSummaryIntroTemplate() {
-  const templates = [
-    "教えてもらった内容をもとに、今の状態を一度まとめますね。",
-    "ここまでに聞いたことを整理して、今の状況を確認しますね。",
+  const prefixes = [
+    "必要な情報はそろいました。",
+    "ここまでで判断に必要な情報は確認できました。",
+    "ここまでで、今の状態はかなり整理できました。",
   ];
-  return templates[Math.floor(Math.random() * templates.length)];
+  const fixed = "今の症状なら、まずどう動くべきかをはっきりお伝えします。";
+  const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
+  return `${prefix}\n${fixed}`;
 }
 
 function enforceSummaryIntroTemplate(text) {
@@ -5138,7 +5351,8 @@ function enforceSummaryIntroTemplate(text) {
   const lines = text.split("\n");
   const headerIndex = lines.findIndex((line) =>
     line.startsWith("🟢 ここまでの情報を整理します") ||
-    line.startsWith("🟡 ここまでの情報を整理します")
+    line.startsWith("🟡 ここまでの情報を整理します") ||
+    line.startsWith("🔴 ここまでの情報を整理します")
   );
   if (headerIndex === -1) {
     if (isHospitalFlow(text)) return text;
@@ -5153,7 +5367,8 @@ function enforceSummaryIntroTemplate(text) {
     }
     return text;
   }
-  const templateLine = buildSummaryIntroTemplate();
+  const templateBody = buildSummaryIntroTemplate();
+  const templateLines = templateBody.split("\n");
   const nextBlockIndex = lines.findIndex(
     (line, idx) =>
       idx > headerIndex &&
@@ -5169,7 +5384,7 @@ function enforceSummaryIntroTemplate(text) {
   );
   const bodyStart = headerIndex + 1;
   const bodyEnd = nextBlockIndex >= 0 ? nextBlockIndex : lines.length;
-  lines.splice(bodyStart, bodyEnd - bodyStart, templateLine);
+  lines.splice(bodyStart, bodyEnd - bodyStart, ...templateLines);
   return lines.join("\n");
 }
 
@@ -5556,17 +5771,21 @@ function historyContainsSummaryBlock(history) {
   const patterns = [
     /(🟢|🟡|🔴)\s*ここまでの情報を整理/,
     /ここまでの情報を整理します/,
+    /必要な情報はそろいました/,
+    /判断に必要な情報は確認できました/,
+    /かなり整理できました/,
+    /まずどう動くべきかをはっきりお伝えします/,
     /教えてもらった内容をもとに/,
     /聞いたことを整理して/,
-    /🤝\s*今の状態について/,
-    /📝\s*今の状態について/,
+    /🤝\s*(?:今の状態について|Kairoの判断)/,
+    /📝\s*(?:今の状態について|Kairoの判断)/,
     /📝\s*いまの状態を整理します/,
     /✅\s*今すぐやること/,
     /⏳\s*今後の見通し/,
     /🏥\s*受診先の候補/,
     /🌱\s*最後に/,
     /💬\s*最後に/,
-    /【🤝\s*今の状態について/,
+    /【🤝\s*(?:今の状態について|Kairoの判断)/,
     /■おすすめのオンライン診療/,
     /I'd like to have this checked just to be safe/,
     /I have been having /,
@@ -8055,7 +8274,7 @@ function buildFactsFromSlotAnswers(state) {
   return facts.map((item) => `・${item}`);
 }
 
-/** まとめの「今の状態について」ブロック内で、確認文用の前後文（今の情報から見ると、／という状況です。）を除去し箇条書きのみにする */
+/** まとめの「Kairoの判断」ブロック内で、確認文用の前後文（今の情報から見ると、／という状況です。）を除去し箇条書きのみにする */
 function stripStateAboutIntroOutro(text) {
   if (!text) return text;
   const lines = text.split("\n");
@@ -9192,6 +9411,92 @@ function polishCausePhraseToWrittenJapanese(cause) {
   return c;
 }
 
+/** きっかけスロットの生回答（整形前）を取得。空・不明は除外。 */
+function getCauseRawSlotsAnswer(state) {
+  const raw = String(
+    state?.causeDetailText ||
+      getSlotStatusValue(state, "cause_category", state?.slotAnswers?.cause_category || "") ||
+      ""
+  ).trim();
+  if (!raw || isAbsentOrUnknownSlotBulletAnswer(raw)) return "";
+  return raw;
+}
+
+/**
+ * きっかけ（`polishCausePhraseToWrittenJapanese` 後など）を組み合わせ「〇〇」用に短縮する。
+ * 「〜の可能性」「がきっかけ」等の定型末尾を落とし、ユーザーが述べた要因の核を 3〜7 文字目安（上限8）に収める。
+ */
+function squeezeCausePhraseToComboShortLabel(polishedOrRaw) {
+  let s = String(polishedOrRaw || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!s) return "";
+  s = s
+    .replace(/がきっかけの可能性$/g, "")
+    .replace(/きっかけの可能性$/g, "")
+    .replace(/がきっかけ$/g, "")
+    .replace(/の可能性$/g, "")
+    .replace(/のきっかけ$/g, "")
+    .trim();
+  s = s.replace(/です$|ます$|でした$/g, "").trim();
+  if (!s) return "";
+  if (s.length > KAIRO_COMBO_SHORT_LABEL_MAX_CHARS) {
+    s = `${s.slice(0, KAIRO_COMBO_SHORT_LABEL_MAX_CHARS - 1)}…`;
+  }
+  return s.trim();
+}
+
+/** 箇条書き1行（きっかけ系）から組み合わせ短語へ（polish → squeeze → 647） */
+function comboCauseBulletInnerToShortLabel(rawLine) {
+  const inner = stripBulletLead(String(rawLine || ""))
+    .replace(/^きっかけ[・：:]\s*/, "")
+    .replace(/^きっかけは/, "")
+    .trim();
+  if (!inner) return "";
+  const written = polishCausePhraseToWrittenJapanese(inner);
+  if (!written) return "";
+  const sq = squeezeCausePhraseToComboShortLabel(written);
+  return finalizeComboLabelForCombinationLine(sq) || sq;
+}
+
+/** 🟢🟡①：きっかけを 3〜7 文字目安の名詞句に（同期・ヒューリスティック） */
+function buildCauseComboShortLabelSync(state) {
+  if (!state || !comboSlotAllowsGreenYellowCombo(state, "cause_category")) return "";
+  const raw = getCauseRawSlotsAnswer(state);
+  if (!raw) return "";
+  const written = polishCausePhraseToWrittenJapanese(raw);
+  if (!written) return "";
+  const sq = squeezeCausePhraseToComboShortLabel(written);
+  return finalizeComboLabelForCombinationLine(sq) || sq;
+}
+
+/** 🟢🟡①：きっかけ短語。API があるときは LLM で 3〜7 文字に整形し、失敗時は `buildCauseComboShortLabelSync` */
+async function buildCauseComboShortLabelAsync(state) {
+  const sync = buildCauseComboShortLabelSync(state);
+  if (!sync) return "";
+  if (!process.env.OPENAI_API_KEY) return sync;
+  const raw = getCauseRawSlotsAnswer(state);
+  if (!raw) return sync;
+  const written = polishCausePhraseToWrittenJapanese(raw);
+  if (!written) return sync;
+  const llm = await shortenComboLabelsForCombinationLineWithLlm(state, [written]);
+  if (llm && llm[0]) {
+    const t = finalizeComboLabelForCombinationLine(llm[0]);
+    if (t) return t;
+  }
+  return sync;
+}
+
+/** 🔴組み合わせ行：きっかけ HIGH 時の短語（ユーザー語の核＋3〜7文字目安） */
+function buildRedCauseComboShortLabelForState(state) {
+  const cr = String(state?.causeDetailText || state?.slotAnswers?.cause_category || "").trim();
+  if (!cr || /^(ない|なし|思い当たらない|わからない|不明)/.test(cr)) return "";
+  const written = polishCausePhraseToWrittenJapanese(cr.replace(/です$|ます$/, "").slice(0, 120));
+  if (!written) return "";
+  const sq = squeezeCausePhraseToComboShortLabel(written);
+  return finalizeComboLabelForCombinationLine(sq) || sq;
+}
+
 /** 箇条書き用：口語語尾を軽く整える（意味は維持） */
 function polishBulletColloquialSentence(s) {
   let t = String(s || "").trim();
@@ -9703,7 +10008,7 @@ async function polishConfirmationBulletsWithLlm(state) {
   const bulletText = bulletsIn.join("\n");
   try {
     const systemPrompt = [
-      "あなたは医療用チャットの「今の状態について」箇条書きの編集者です。出力はJSONのみ。",
+      "あなたは医療用チャットの「Kairoの判断」箇条書きの編集者です。出力はJSONのみ。",
       "【重要】下に渡す箇条書きは、スロット値をつなぎ合わせて自動生成したものです。文のつながりや語感は元からかなりぎこちなく、読みにくいことがほとんどです。",
       "だからこそ、あなたの仕事はその内容・事実を変えずに、ユーザーが一読で理解できるよう、自然で整った一文へ書き直すことです。",
       "【文体】敬語（です・ます・ございます・でした・ました等）は使わない。常体・言い切りで短く（体言止め、〜だ、〜ある、〜の可能性 など）。",
@@ -10180,12 +10485,13 @@ async function shortenComboLabelsForCombinationLineWithLlm(state, rawParts) {
   const rawUserCtx = buildComboLabelLlmRawUserContext(state);
   try {
     const systemPrompt = [
-      "あなたは医療チャット「今の状態について」の**組み合わせ行**用ラベル編集者です。出力はJSONのみ。",
+      "あなたは医療チャット「Kairoの判断」の**組み合わせ行**用ラベル編集者です。出力はJSONのみ。",
       "各要素は、箇条書きやスロットから**機械的につながれた長い語**で、元から**かなりぎこちない**ことが多いです。",
       "だからこそ、**事実・数値・意味は変えずに**、組み合わせ行に並べる**短い名詞句**へそれぞれ削ぎ落としてください（例：ズキズキする痛み→ズキズキ、やや強いズキズキする頭痛→やや強い頭痛）。",
       "【最優先・抽出の出どころ】**【ユーザー原文・スロット生値】**には、箇条書き整形**前**の言い回しが載っています。**肝心の事実（いつから・どのくらい・波があるか等）は、そちらを読んで候補より優先して短語に反映**してください。まとめ箇条書きだけでは抽象的になりがちです。",
       "【経過・時間】「痛みの経過」「経過は」などの**ラベル語は短語に使わない**。**ユーザーが言った時間軸**だけを抜く（例：2日前から／昨日から／さっきから／数時間前）。",
       "【推移・波】「悪化傾向」「経過の変化」などの**枠の名前は使わず**、内容だけ（例：波が一定しない／読み取りにくい→**波の推移** など）。",
+      "【きっかけ】「〜の可能性」「がきっかけの可能性」などの**定型語尾は短語に含めない**。**ユーザーが述べた負荷・要因の語だけ**を3〜7文字程度の名詞句にする（例：寝不足がきっかけの可能性→寝不足、画面を長時間見た→画面見過ぎ）。新語の捏造は禁止。",
       `【文字数】各ラベルは**目安 ${KAIRO_COMBO_SHORT_LABEL_TARGET_MIN_CHARS}〜${KAIRO_COMBO_SHORT_LABEL_TARGET_MAX_CHARS}文字**（意味が通る最短の名詞句）。1〜2文字だけの出力は避ける。絶対上限は ${KAIRO_COMBO_SHORT_LABEL_MAX_CHARS} 文字まで（超過禁止）。`,
       "【禁止】新しい症状・病名推測・入力にない事実の追加。",
       "【重複禁止】まとめ箇条書きに**すでに書いた事実**（体温・下痢・痛みの程度など）を、組み合わせ行で**言い換えて繰り返さない**。候補同士が同じ事実を指すなら**短い名詞句に寄せる**（新事実の推測はしない）。",
@@ -10425,6 +10731,9 @@ function gatherGreenYellowComboCandidatesFromBullets(state) {
     const kind = inferComboBulletInverseKind(rawLine);
     if (kind === "cause") {
       if (!comboSlotAllowsGreenYellowCombo(state, "cause_category")) continue;
+      const cshort = comboCauseBulletInnerToShortLabel(rawLine);
+      if (cshort) candidates.push({ label: cshort, inv: COMBO_INV_PRI_CAUSE });
+      continue;
     }
     if (kind === "pain_type") {
       if (!comboSlotAllowsGreenYellowComboForPainManner(state)) continue;
@@ -10465,10 +10774,8 @@ function gatherRedHighComboCandidatesFromBullets(state) {
     const kind = inferComboBulletInverseKind(rawLine);
     if (kind === "cause") {
       if (norm.cause_category?.riskLevel !== RISK_LEVELS.HIGH) continue;
-      candidates.push({
-        label: shortenComboLabelFromBulletText(rawLine),
-        inv: COMBO_INV_PRI_CAUSE,
-      });
+      const cshort = comboCauseBulletInnerToShortLabel(rawLine);
+      if (cshort) candidates.push({ label: cshort, inv: COMBO_INV_PRI_CAUSE });
       continue;
     }
     if (kind === "pain_type") {
@@ -10567,11 +10874,8 @@ function collectGreenYellowLowMediumCombinationParts(state) {
   }
 
   if (comboSlotAllowsGreenYellowCombo(state, "cause_category")) {
-    const cr = String(state?.slotAnswers?.cause_category || "").trim();
-    if (cr && !/^(ない|なし|思い当たらない|わからない|不明)/.test(cr)) {
-      const p = polishBulletColloquialSentence(cr.replace(/です$|ます$/, "").slice(0, 22));
-      if (p) candidates.push({ label: p, inv: COMBO_INV_PRI_CAUSE });
-    }
+    const cs = buildCauseComboShortLabelSync(state);
+    if (cs) candidates.push({ label: cs, inv: COMBO_INV_PRI_CAUSE });
   }
 
   if (comboSlotAllowsGreenYellowCombo(state, "associated_symptoms") && !isDisplayOnlyNoOtherSymptomsSlotCondition(state)) {
@@ -10664,21 +10968,15 @@ function shouldUseWindyColdOnsetPatternForStateAbout(state) {
 }
 
 /**
- * きっかけスロットを書き言葉に整えた短文（🟢🟡「〇〇＋〇〇」列の先頭項に使う）。
- * LOW〜MEDIUM のときのみ（`comboSlotAllowsGreenYellowCombo` と一致）。
+ * きっかけを書き言葉に整えた**長文**（LLM 入力・デバッグ用）。組み合わせ「〇〇」列挙には `buildCauseComboShortLabelSync`／`buildCauseComboShortLabelAsync` を使う。
  */
 function getPolishedCauseForGreenYellowCombo(state) {
   if (!state || !comboSlotAllowsGreenYellowCombo(state, "cause_category")) return "";
-  const raw = String(
-    state?.causeDetailText ||
-      getSlotStatusValue(state, "cause_category", state?.slotAnswers?.cause_category || "") ||
-      ""
-  ).trim();
-  if (!raw || isAbsentOrUnknownSlotBulletAnswer(raw)) return "";
-  let w = polishCausePhraseToWrittenJapanese(raw);
+  const raw = getCauseRawSlotsAnswer(state);
+  if (!raw) return "";
+  const w = polishCausePhraseToWrittenJapanese(raw);
   if (!w) return "";
-  if (w.length > 52) w = `${w.slice(0, 50)}…`;
-  return w;
+  return w.length > 52 ? `${w.slice(0, 50)}…` : w;
 }
 
 /** 🤝🟢🟡 組み合わせ行フィルタ用：箇条書き（キャッシュ優先）の内側テキスト */
@@ -10745,13 +11043,20 @@ function filterGreenYellowComboPartsAgainstBulletFacts(state, labels) {
 
 /**
  * 🟢🟡 ①：選んだ短語を **「〇〇＋〇〇＋…」** で列挙し、**「〜ことから、」** に繋ぐ主部を返す。
- * きっかけは `polishCausePhraseToWrittenJapanese` 済みを**先頭**に付与（parts 内のきっかけ相当短語は重複回避で除外）。
+ * きっかけは **3〜7 文字目安の短語**（`buildCauseComboShortLabelSync`／非同期時は `causeShortOverride`）を**先頭**に付与（parts 内のきっかけ相当短語は重複回避で除外）。
  * **合計チャンク数は最大 3**（きっかけ＋短語で 4 連になるのを防ぐ）。箇条書きと事実重複する短語は列挙しない。
+ * @param {string} [causeShortOverride] - 非同期経路で LLM 済みのきっかけ短語。未指定時は同期ヒューリスティック。
  */
-function buildGreenYellowComboPlusClause(state, parts) {
+function buildGreenYellowComboPlusClause(state, parts, causeShortOverride) {
   const MAX_CHUNKS_IN_COMBO_CLAUSE = 3;
   let labels = (parts || []).map((p) => String(p).trim()).filter(Boolean);
-  const causeW = state ? getPolishedCauseForGreenYellowCombo(state) : "";
+  let causeW = "";
+  if (causeShortOverride !== undefined && causeShortOverride !== null) {
+    causeW = String(causeShortOverride).trim();
+    causeW = finalizeComboLabelForCombinationLine(causeW) || causeW;
+  } else if (state) {
+    causeW = buildCauseComboShortLabelSync(state);
+  }
   if (causeW) {
     labels = labels.filter((p) => inferComboBulletInverseKind(p) !== "cause");
   }
@@ -10771,11 +11076,12 @@ function buildGreenYellowComboPlusClause(state, parts) {
 
 /**
  * 🤝🟢🟡 ①の「〇〇＋〇〇」列挙と②パターン文を1段落に統合（KAIRO_SPEC・「〜ことから、一時的な〇〇として…」）。
+ * @param {string} [causeShortOverride] - `buildCauseComboShortLabelAsync` 結果を渡す（省略時は同期短語）。
  */
-function buildGreenYellowComboIntegratedParagraph(state, level, parts) {
+function buildGreenYellowComboIntegratedParagraph(state, level, parts, causeShortOverride) {
   const lv = level === "🟡" || level === "🟢" ? level : finalizeRiskLevel(state);
   const windy = shouldUseWindyColdOnsetPatternForStateAbout(state);
-  const clause = buildGreenYellowComboPlusClause(state, parts);
+  const clause = buildGreenYellowComboPlusClause(state, parts, causeShortOverride);
 
   if (windy) {
     const lead = clause ? `${clause}ことから、` : `これらの症状の組み合わせから、`;
@@ -10795,6 +11101,21 @@ function buildGreenYellowComboIntegratedParagraph(state, level, parts) {
   return `${lead}\n${tail}`;
 }
 
+/** 🟢🟡③ 判断の確定：KAIRO_SPEC 固定文ペアをランダムに1つ選ぶ */
+function pickGreenYellowDecisionCoreLines() {
+  const pairs = [
+    [
+      "👉 現時点では、病院に行っても対応は自宅での休息と大きく変わりません。",
+      "👉 今は受診より、休んで回復を優先する方が正しいです。",
+    ],
+    [
+      "👉 現時点では、受診を急ぐよりも、自宅で安静にして変化を見る方が適切な状態です。",
+      "👉 無理に動くとかえって負担になりやすいため、今は休むことが正しい対応です。",
+    ],
+  ];
+  return pairs[Math.floor(Math.random() * pairs.length)];
+}
+
 /**
  * 🤝🟢🟡 専用：共感廃止・3 ブロック固定（KAIRO_SPEC）。
  * **フォールバック用**：`OPENAI_API_KEY` なし・LLM 失敗時など。本線は `buildGreenYellowStateAboutBlockAsync`（LLM 短縮 3〜7 文字目安）。
@@ -10808,11 +11129,8 @@ function buildGreenYellowStateAboutBlock(state, level) {
     parts = rawParts.map((p) => String(p || "").trim()).filter(Boolean);
   }
   const integrated = buildGreenYellowComboIntegratedParagraph(state, level, parts);
-  return [
-    integrated,
-    "👉 今すぐ受診が必要な状態ではありません",
-    "👉 まずは休んで様子を見てください",
-  ].join("\n");
+  const core = pickGreenYellowDecisionCoreLines();
+  return [integrated, ...core].join("\n");
 }
 
 /** 🤝🟢🟡 同上。組み合わせ「〇〇」は LLM で削ぎ落とし（KAIRO_SPEC 605）。 */
@@ -10827,15 +11145,13 @@ async function buildGreenYellowStateAboutBlockAsync(state, level) {
   if (parts.length < 2) {
     parts = finalized.map((p) => String(p || "").trim()).filter(Boolean);
   }
-  const integrated = buildGreenYellowComboIntegratedParagraph(state, level, parts);
-  return [
-    integrated,
-    "👉 今すぐ受診が必要な状態ではありません",
-    "👉 まずは休んで様子を見てください",
-  ].join("\n");
+  const causeShort = await buildCauseComboShortLabelAsync(state);
+  const integrated = buildGreenYellowComboIntegratedParagraph(state, level, parts, causeShort);
+  const core = pickGreenYellowDecisionCoreLines();
+  return [integrated, ...core].join("\n");
 }
 
-/** 🔴「📝 今の状態について」：slotNormalized の HIGH のみを短語にし、＋でつなぐ（KAIRO_SPEC・LLM禁止） */
+/** 🔴「📝 Kairoの判断」：slotNormalized の HIGH のみを短語にし、＋でつなぐ（KAIRO_SPEC・LLM禁止） */
 function labelsFromAssociatedHighRaw(raw) {
   const t = String(raw || "");
   const out = [];
@@ -11001,11 +11317,8 @@ function collectRedHighRiskCombinationLabels(state) {
     else candidates.push({ label: "痛み方が強い側", inv: COMBO_INV_PRI_PAIN_TYPE });
   }
   if (norm?.cause_category?.riskLevel === RISK_LEVELS.HIGH) {
-    const cr = String(state?.slotAnswers?.cause_category || "").trim();
-    if (cr && !/^(ない|なし|思い当たらない|わからない|不明)/.test(cr)) {
-      const p = polishBulletColloquialSentence(cr.replace(/です$|ます$/, "").slice(0, 22));
-      if (p) candidates.push({ label: p, inv: COMBO_INV_PRI_CAUSE });
-    }
+    const rc = buildRedCauseComboShortLabelForState(state);
+    if (rc) candidates.push({ label: rc, inv: COMBO_INV_PRI_CAUSE });
   }
 
   let picked = applyRedComboUserWordGuards(state, pickRedComboPartsInCandidateOrder(candidates, 2, 3));
@@ -11155,7 +11468,7 @@ async function buildRedStateAboutEmpathyBlockAsync(state) {
   ].join("\n");
 }
 
-/** まとめ「🤝/📝 今の状態について」箇条書き直後（🟢🟡は KAIRO_SPEC 3 ブロック固定・🔴は別構成・🔴意味行は async 版を使用） */
+/** まとめ「🤝/📝 Kairoの判断」箇条書き直後（🟢🟡は KAIRO_SPEC 3 ブロック固定・🔴は別構成・🔴意味行は async 版を使用） */
 function buildStateAboutEmpathyAndJudgment(state, level) {
   if (level === "🔴") {
     return buildRedStateAboutEmpathyBlock(state);
@@ -11172,7 +11485,7 @@ async function buildStateAboutEmpathyAndJudgmentAsync(state, level) {
 
 const PRE_SUMMARY_CONFIRMATION_MAX_BULLETS = 14;
 
-/** 確認文直後レスポンス用：LLM なし・箇条書きキャッシュから「今の状態について」簡易版のみ（1秒以内目標） */
+/** 確認文直後レスポンス用：LLM なし・箇条書きキャッシュから「Kairoの判断」簡易版のみ（1秒以内目標） */
 function buildSummaryQuickPreviewFromState(state) {
   if (!state) return "";
   const level = finalizeRiskLevel(state);
@@ -11185,7 +11498,7 @@ function buildSummaryQuickPreviewFromState(state) {
     `${level} ここまでの情報を整理します`,
     buildSummaryIntroTemplate(),
     "",
-    "🤝 今の状態について（簡易）",
+    "🤝 Kairoの判断（簡易）",
     bulletBlock,
   ].join("\n");
 }
@@ -11255,7 +11568,7 @@ function pickSymptomInfoForJudgment(state, level) {
   return null;
 }
 
-/** まとめ「🤝/📝 今の状態について」：箇条書き直後は共感＋判断 */
+/** まとめ「🤝/📝 Kairoの判断」：箇条書き直後は共感＋判断 */
 function buildStateAboutLine(state, level) {
   const lv =
     level === "🟢" || level === "🟡" || level === "🔴"
@@ -11508,7 +11821,7 @@ function collectModalUserFactsAndSummaryOneAttempt(state, summaryFacts = [], sum
 }
 
 /**
- * 「今の状態について」由来の事実配列と結合テキスト（🤝/📝モーダル用）。
+ * 「Kairoの判断」由来の事実配列と結合テキスト（🤝/📝モーダル用）。
  * 1回目で空なら会話同期のうえ**最大2回**再試行し、それでも空なら最小フォールバック。
  */
 function collectModalUserFactsAndSummary(state, summaryFacts = [], summarySection = "") {
@@ -11704,7 +12017,7 @@ async function generateYellowCautionBulletsFromSummary(mainSymptom, userSummary,
         { role: "system", content: prompt },
         {
           role: "user",
-          content: `主症状: ${mainSymptom}\n\n${material.includes("緊急度の内訳") ? material : `【今の状態について（ユーザー言動・中・高の要因のみに絞る）】\n${material}`}`,
+          content: `主症状: ${mainSymptom}\n\n${material.includes("緊急度の内訳") ? material : `【Kairoの判断（ユーザー言動・中・高の要因のみに絞る）】\n${material}`}`,
         },
       ],
       temperature: 0.2,
@@ -12265,13 +12578,11 @@ function modalArrowReasonReferencesCause(causeHead, reason) {
 }
 
 /**
- * 「→」右が左と対応しない／定型に落ちたときのフォールバック：**一文**で左の原因（疾患・機序名）がどのような病態として扱われるかを述べ、主症状と鑑別上どう対応づけられるか（ユーザー状態の下りではない）。
+ * 「→」右が左と対応しない／定型に落ちたときのフォールバック。
+ * 旧テンプレ（「…説明されうる病態・機序として整理…」系）はモーダルに出さない（`MODAL_REASON_FALLBACK_GENERIC` のみ使用）。
  */
-function buildModalCauseAlignedReasonTail(causeHead, mainSymptomDisplay) {
-  const h = String(causeHead || "").replace(/^・\s*/, "").trim();
-  const label = String(mainSymptomDisplay || "症状").trim() || "症状";
-  if (!h) return MODAL_REASON_FALLBACK_GENERIC;
-  return `「${h}」は、${label}を症状の一つとして説明されうる病態・機序として整理されることがあります。`;
+function buildModalCauseAlignedReasonTail(_causeHead, _mainSymptomDisplay) {
+  return MODAL_REASON_FALLBACK_GENERIC;
 }
 
 /**
@@ -12349,6 +12660,12 @@ function sanitizeModalArrowReasonTail(raw) {
     t.length < 5 ||
     /\d+\s*\/\s*10/.test(t) ||
     /痛みはやや|やや強め|痛みスコア|痛みは(?:やや|中程度|軽い|強い|弱い)|やや強い痛み|中程度の痛み/.test(t)
+  ) {
+    return MODAL_REASON_FALLBACK_GENERIC;
+  }
+  // LLM や旧実装が混入しても出さない：教科書調の「病態・機序として整理」系
+  if (
+    /説明されうる病態|機序として整理|症状の一つとして説明されうる|病態・機序として整理/.test(t)
   ) {
     return MODAL_REASON_FALLBACK_GENERIC;
   }
@@ -12796,7 +13113,7 @@ async function buildDiseaseSafetyFilteredMessage(
       "",
       `緊急度レベル: ${level}`,
       state
-        ? `\n【今の状態について】\n${String(stateAboutForCautionPrompt || "").trim() || buildMinimalModalUserSummaryFallback(state)}`
+        ? `\n【Kairoの判断】\n${String(stateAboutForCautionPrompt || "").trim() || buildMinimalModalUserSummaryFallback(state)}`
         : "",
       `\n【検索結果（タイトル・スニペットのみ）】\n${searchText}`,
     ].join("\n");
@@ -13598,8 +13915,8 @@ function buildGreenYellowStateModalBridgeLine(state) {
 /** 🤝/📝モーダル：🟢/🟡のとき `acceptanceConviction`（納得文）の直後に付ける締め（ランダム二択） */
 function pickGreenYellowModalRestClosingLine() {
   return Math.random() < 0.5
-    ? "👉 今は無理に動かず、しっかり休むことが最も適切な対応です。"
-    : "👉 今は無理に動かず、休息を優先させてください。";
+    ? "👉 今は無理に動かず、安心して休んでください。"
+    : "👉 今は無理に動かず、安心して休息を優先させてください。";
 }
 
 /** 🤝/📝モーダル：🟢は安心材料／🟡は注意理由（本文は `reassuranceBullets` と `cautionWhyBullets` で別フィールド） */
@@ -14224,7 +14541,7 @@ function buildCurrentStateContext(state, historyText = "", concreteMessage = "")
   ].join(" "));
   /** 初回安全文・まとめと同一の主症状表示（検索・今すぐやることの LLM に必ず添える） */
   const mainSymptomDisplay = String(getSyncedMainSymptomDisplayLabel(state) || "").trim();
-  // 🤝今の状態についてのクエリ（主症状表示＋カテゴリ＋箇条書き全文）。今すぐやることはこれに「対処法」を加える。
+  // 🤝 Kairoの判断のクエリ（主症状表示＋カテゴリ＋箇条書き全文）。今すぐやることはこれに「対処法」を加える。
   const stateAboutFacts = buildStateFactsBullets(state).map((line) => toBulletText(line)).join(" ");
   const queryParts = [];
   if (mainSymptomDisplay) queryParts.push(mainSymptomDisplay);
@@ -14254,7 +14571,7 @@ function buildCurrentStateContext(state, historyText = "", concreteMessage = "")
 }
 
 function buildMandatoryGoogleQuery(context) {
-  // 今すぐやること: 🤝今の状態についてのクエリ + 対処法
+  // 今すぐやること: 🤝 Kairoの判断のクエリ + 対処法
   if (context?.stateAboutQuery) {
     return `${context.stateAboutQuery} 対処法`.replace(/\s{2,}/g, " ").trim().slice(0, 260);
   }
@@ -14531,7 +14848,7 @@ async function normalizeStateBlockForGreenYellowAsync(text, state) {
   }
   const decisionLine = buildStateDecisionLine(state, level);
   const newBlock = [
-    "🤝 今の状態について",
+    "🤝 Kairoの判断",
     ...buildStateFactsBullets(state, { forSummary: true }),
     "",
     aboutLine,
@@ -14580,7 +14897,7 @@ async function buildLocalSummaryFallback(level, history, state) {
     );
     const hospitalBlock = buildHospitalBlock(state, historyText, hospitalRec);
     const memoWithJudgment = [
-      "📝 今の状態について",
+      "📝 Kairoの判断",
       buildStateFactsBullets(state, { forSummary: true }).join("\n"),
       "",
       await buildStateAboutEmpathyAndJudgmentAsync(state, "🔴"),
@@ -14604,7 +14921,7 @@ async function buildLocalSummaryFallback(level, history, state) {
   const aboutLineGy = await buildStateAboutLineAsync(state, level);
   const baseBlocks = [
     `${level} ここまでの情報を整理します\n${buildSummaryIntroTemplate()}`,
-    `🤝 今の状態について\n${buildStateFactsBullets(state, { forSummary: true }).join("\n")}\n\n${aboutLineGy}\n${buildStateDecisionLine(state, level)}`,
+    `🤝 Kairoの判断\n${buildStateFactsBullets(state, { forSummary: true }).join("\n")}\n\n${aboutLineGy}\n${buildStateDecisionLine(state, level)}`,
     immediateBlock,
     `⏳ 今後の見通し\nこのタイプの症状は、時間の経過で変化することがあります。\n・もし明日の朝も同じ痛みが続いていたら\n・もし痛みが7以上に強くなったら\nそのタイミングで、もう一度Kairoに聞いてください。`,
   ];
@@ -15694,7 +16011,7 @@ async function generateSummaryForConfirmation(conversationId) {
         "🔴 ここまでの情報を整理します",
         buildSummaryIntroTemplate(),
         "",
-        "📝 今の状態について",
+        "📝 Kairoの判断",
         stateBlock || "症状の状態を確認しました。",
         ...(aboutRedMemo ? ["", aboutRedMemo] : []),
         "",
@@ -15714,7 +16031,7 @@ async function generateSummaryForConfirmation(conversationId) {
       `${level} ここまでの情報を整理します`,
       buildSummaryIntroTemplate(),
       "",
-      "🤝 今の状態について",
+      "🤝 Kairoの判断",
       stateBlock || "症状の状態を確認しました。",
       ...(aboutLineGy ? ["", aboutLineGy] : []),
       "",
@@ -15724,7 +16041,7 @@ async function generateSummaryForConfirmation(conversationId) {
       "⏳ 今後の見通し",
       "症状の変化には気をつけて、悪化したら再度ご相談ください。",
       "",
-      lastBlock || "🌱 最後に\n今は体を休めることを優先してください。",
+      lastBlock || "🌱 最後に\n今の情報なら安心して休んで大丈夫です。まずは休息を優先し、不安になったらまたここで確認してください。",
     ].join("\n");
     setSummaryPartialSectionsFromFinalText(state, minimal, level);
     return { message: minimal, followUpQuestion: null, followUpMessage: null };
@@ -16017,7 +16334,7 @@ app.post("/api/chat", async (req, res) => {
             `${level} ここまでの情報を整理します`,
             buildSummaryIntroTemplate(),
             "",
-            "🤝 今の状態について",
+            "🤝 Kairoの判断",
             stateBlock,
             "",
             "✅ 今すぐやること",
@@ -16039,7 +16356,7 @@ app.post("/api/chat", async (req, res) => {
           `${level} ここまでの情報を整理します`,
           buildSummaryIntroTemplate(),
           "",
-          "🤝 今の状態について",
+          "🤝 Kairoの判断",
           stateBlock,
           "",
           "✅ 今すぐやること",
@@ -17683,7 +18000,15 @@ function getSummarySectionSpecsByJudgement(judgement) {
   if (judgement === "🔴") {
     return [
       { id: 1, title: "🔴 ここまでの情報を整理します", patterns: [/^🔴\s*ここまでの情報を整理します/] },
-      { id: 2, title: "📝 今の状態について", patterns: [/^📝\s*今の状態について/, /^📝\s*いまの状態を整理します（メモ）/, /^📝\s*いまの状態を整理します/] },
+      {
+        id: 2,
+        title: "📝 Kairoの判断",
+        patterns: [
+          /^📝\s*(?:今の状態について|Kairoの判断)/,
+          /^📝\s*いまの状態を整理します（メモ）/,
+          /^📝\s*いまの状態を整理します/,
+        ],
+      },
       { id: 3, title: "✅ 今すぐやること", patterns: [/^✅\s*今すぐやること（これだけでOK）/, /^✅\s*今すぐやること/] },
       { id: 4, title: "🏥 受診先の候補", patterns: [/^🏥\s*受診先の候補/, /^🏥\s*Kairoの判断/] },
       { id: 5, title: "💬 最後に", patterns: [/^💬\s*最後に/] },
@@ -17696,7 +18021,7 @@ function getSummarySectionSpecsByJudgement(judgement) {
         title: "🟢 ここまでの情報を整理します",
         patterns: [/^🟢\s*ここまでの情報を整理します/, /^🟡\s*ここまでの情報を整理します/],
       },
-      { id: 2, title: "🤝 今の状態について", patterns: [/^🤝\s*今の状態について/] },
+      { id: 2, title: "🤝 Kairoの判断", patterns: [/^🤝\s*(?:今の状態について|Kairoの判断)/] },
       { id: 3, title: "✅ 今すぐやること", patterns: [/^✅\s*今すぐやること（これだけでOK）/, /^✅\s*今すぐやること/] },
       { id: 4, title: "⏳ 今後の見通し", patterns: [/^⏳\s*今後の見通し/, /^⏳\s*この先の見通し/] },
       { id: 5, title: "🌱 最後に", patterns: [/^🌱\s*最後に/] },
@@ -17708,7 +18033,7 @@ function getSummarySectionSpecsByJudgement(judgement) {
       title: "🟢 ここまでの情報を整理します",
       patterns: [/^🟢\s*ここまでの情報を整理します/, /^🟡\s*ここまでの情報を整理します/],
     },
-    { id: 2, title: "🤝 今の状態について", patterns: [/^🤝\s*今の状態について/] },
+    { id: 2, title: "🤝 Kairoの判断", patterns: [/^🤝\s*(?:今の状態について|Kairoの判断)/] },
     { id: 3, title: "✅ 今すぐやること", patterns: [/^✅\s*今すぐやること（これだけでOK）/, /^✅\s*今すぐやること/] },
     { id: 4, title: "⏳ 今後の見通し", patterns: [/^⏳\s*今後の見通し/, /^⏳\s*この先の見通し/] },
     { id: 5, title: "🌱 最後に", patterns: [/^🌱\s*最後に/] },
