@@ -604,10 +604,9 @@ function setConcreteModalBody(textOrStructured, options = {}) {
 const GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK =
   "今すぐ受診しても、得られる対応は自宅と大きく変わりません\n逆に動くと悪化しやすいので、";
 
-/** 🟢/🟡モーダル：🟢は安心材料／🟡は注意理由（本文は `reassuranceBullets` / `cautionWhyBullets`） */
-function getGreenYellowModalMiddleBlockHeadingClient(triageLevel) {
-  if (triageLevel === "🟡") return "なぜ注意が必要か";
-  return "現時点の安心材料";
+/** 🤝/📝モーダル中間ブロック：見出し固定（本文は `whyOkayBullets`・**必ず3件**） */
+function getGreenYellowModalMiddleBlockHeadingClient(_triageLevel) {
+  return "なぜ大丈夫か";
 }
 
 /** サーバ `buildGreenYellowStateModalBridgeLine` と同文言（`mainSymptom` は `getSyncedMainSymptomDisplayLabel` と API で同期） */
@@ -643,6 +642,31 @@ function normalizeModalCauseLineClient(line) {
   return s === "[object Object]" ? "" : s;
 }
 
+/** 各項目に ` → ` を含める（APIが旧形式のときの保険。サーバ `ensureWhyOkayBulletHasArrow` と同趣旨） */
+function ensureWhyOkayBulletHasArrowClient(line) {
+  const raw = String(line || "").trim();
+  if (!raw) return "・事実の整理 → 手がかりに沿って受け止めやすい";
+  let t = raw;
+  if (!/^・/.test(t)) t = `・${t.replace(/^・\s*/, "")}`;
+  const m = t.match(/^・\s*(.+?)\s*→\s*(.*)$/);
+  if (m) {
+    const left = m[1].trim();
+    const right = (m[2] || "").trim();
+    return `・${left} → ${right || "手がかりに沿って受け止めやすい"}`;
+  }
+  const left = t.replace(/^・\s*/, "").trim();
+  if (!left) return "・手がかりが得られている範囲 → 受け止め方を立てやすい";
+  return `・${left} → 今の事実の置き方で受け止めやすい`;
+}
+
+/** 「なぜ大丈夫か」1項目：` → ` の前で改行 */
+function formatWhyOkayBulletForDisplayClient(line) {
+  const s = ensureWhyOkayBulletHasArrowClient(line);
+  const m = s.match(/^(.*?)\s*→\s*(.+)$/);
+  if (!m) return s;
+  return `${m[1].trimEnd()}\n→ ${m[2].trimStart()}`;
+}
+
 function renderStructuredStateModal(body, { structured, message, triageLevel, mainSymptom, restClosingLine }) {
   const s = structured;
   if (!s) {
@@ -670,17 +694,11 @@ function renderStructuredStateModal(body, { structured, message, triageLevel, ma
   lines.push("");
   if (triageLevel === "🟢" || triageLevel === "🟡") {
     lines.push(getGreenYellowModalMiddleBlockHeadingClient(triageLevel));
-    if (triageLevel === "🟢") {
-      (s.reassuranceBullets || []).forEach((b) => {
-        const t = normalizeModalCauseLineClient(b);
-        if (t) lines.push(t);
-      });
-    } else {
-      (s.cautionWhyBullets || []).forEach((b) => {
-        const t = normalizeModalCauseLineClient(b);
-        if (t) lines.push(t);
-      });
-    }
+    const mid = s.whyOkayBullets || s.reassuranceBullets || s.cautionWhyBullets || [];
+    mid.forEach((b) => {
+      const t = normalizeModalCauseLineClient(b);
+      if (t) lines.push(formatWhyOkayBulletForDisplayClient(t));
+    });
     lines.push("");
     const conv = String(s.acceptanceConviction || "").trim() || GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK;
     lines.push(conv);
@@ -794,12 +812,11 @@ async function showConcreteStateDetails(blockContent) {
     }
   } catch (error) {
     console.error("具体化モーダル生成エラー:", error);
-    const middleHeading =
-      appState.riskLevel === "YELLOW" ? "なぜ注意が必要か" : "現時点の安心材料";
-    const middleBullet =
-      appState.riskLevel === "YELLOW"
-        ? "・経過や付随症状が変わると判断が変わる → 注意して見る必要がある"
-        : "・今わかっている範囲では、強い緊急サインははっきりしていません";
+    const middleBullets = [
+      "・表示用の本文は、接続が戻ったあとに再取得すると都度の内容に差し替わります",
+      "・「具体的に」を再度押すと、同じ会話の内容で作り直されます",
+      "・一時的な取得失敗のときは、少し時間をおいてからお試しください",
+    ];
     const fallbackLines = [
       "🟢 よくある原因",
       "・生活リズムの乱れや睡眠不足 → 自律神経のバランスが崩れやすくなるとされ、不調の出やすさに関与することがあります。",
@@ -808,8 +825,8 @@ async function showConcreteStateDetails(blockContent) {
       "",
       "🟡 状況によっては確認が必要",
       "",
-      middleHeading,
-      middleBullet,
+      "なぜ大丈夫か",
+      ...middleBullets,
     ];
     if (appState.riskLevel === "GREEN" || appState.riskLevel === "YELLOW") {
       fallbackLines.push("", pickGreenYellowModalRestClosingLineClient());
