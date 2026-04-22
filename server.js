@@ -3785,15 +3785,6 @@ async function buildSingaporeModalContent(places, plan, state) {
   return normalizeHospitalModalText(lines.join("\n"));
 }
 
-const RED_GP_JUDGMENT_SENTENCES = [
-  "今の症状の出方をふまえると、念のため医療機関で確認しておくと安心できる状態です。",
-  "現在の症状からは、自己判断で様子を見るよりも、一度医療機関で確認しておく方が安心できそうです。",
-];
-
-function buildRedCushionLine(historyText) {
-  return RED_GP_JUDGMENT_SENTENCES[Math.floor(Math.random() * RED_GP_JUDGMENT_SENTENCES.length)];
-}
-
 const RED_PAIN_INFECTION_SAFE_WAIT_FIRST = {
   title: "今すぐ受診が難しい場合は、今はベッドに入り、横になって数時間ゆっくり過ごしてください",
   reason: "体を休息モードに切り替えることで、自然な回復の流れが働きやすくなります。",
@@ -3803,11 +3794,8 @@ const RED_MODAL_CLOSING_LINE =
   "今動いていること自体が、安全に近づく行動です。今は慌てる段階ではありません。ひとつずつ確認していけば大丈夫です。";
 
 function buildRedModalContent(state, historyText = "", research = null) {
-  const cushion = buildRedCushionLine(historyText);
   const safeWaitItems = buildRedSafeWaitSection(state, research);
   const parts = [
-    cushion,
-    "",
     "① 今すぐやること（受診優先）",
     "・本日中に医療機関へ連絡する",
     "→ 早い段階で確認することで、重大な問題でないことが分かるケースも多くあります。",
@@ -3846,7 +3834,6 @@ function buildRedSafeWaitSection(state, research, refinedActionsOverride = null)
 }
 
 function buildRedImmediateActionsBlock(state, historyText, research = null, refinedSafeWaitActions = null) {
-  const cushion = buildRedCushionLine(historyText);
   const fixedFirst = [
     "・本日中に医療機関へ連絡する",
     "→ 早い段階で確認することで、重大な問題でないことが分かるケースも多くあります。",
@@ -3854,7 +3841,6 @@ function buildRedImmediateActionsBlock(state, historyText, research = null, refi
   const safeWaitSection = buildRedSafeWaitSection(state, research, refinedSafeWaitActions);
   return [
     "✅ 今すぐやること",
-    cushion,
     "",
     ...fixedFirst,
     "",
@@ -4246,6 +4232,10 @@ function ensureReliableReason(reason, evidence = {}) {
   let sanitized = stripSearchTraceFromReason(raw);
   sanitized = stripBulletFromReason(sanitized);
   sanitized = stripNumberingFromText(sanitized);
+  // パナドールの理由行はモーダルで完成形を保つ（追記・締めの付与で変えない）
+  if (/パナドール|Panadol/i.test(sanitized)) {
+    return sanitized.replace(/。?$/, "。");
+  }
   if (sanitized.length > 15) return sanitized.replace(/。?$/, "。");
   const sourceText = [
     ...(Array.isArray(evidence?.selfCare) ? evidence.selfCare : []),
@@ -4474,29 +4464,19 @@ function resolvePanadolPackForPainInfection(state, topic) {
 }
 
 /**
- * パナドール表示時は必ずパッケージ色を含め、理由にコンビニ・ドラッグストア販売の別文を付与する（LLM／固定の両方）。
+ * パナドール（SG）：**・行（action）のみ**「パナドール（色）を服用する」に短縮。**→行（reason）は一切変更しない**（詳細・販売場所は LLM／既存の理由文に任せる）。
  */
 function ensurePanadolSingaporeDisplayCopy(action, reason, state, topicForPack) {
   const a = String(action || "");
   if (!/パナドール|Panadol/i.test(a)) return { action, reason };
   const pack = resolvePanadolPackForPainInfection(state, topicForPack);
-  const colorPack =
-    pack === "red" ? "赤いパッケージの" : pack === "green" ? "緑のパッケージの" : "青いパッケージの";
-  let newAction = a;
-  if (!/(青い|赤い|緑の)パッケージ/.test(newAction)) {
-    if (/市販のパナドール/.test(newAction)) {
-      newAction = newAction.replace(/市販のパナドール/, `${colorPack}市販のパナドール`);
-    } else if (/Panadol/i.test(newAction)) {
-      newAction = newAction.replace(/\bPanadol\b/i, `${colorPack}市販のPanadol`);
-    } else {
-      newAction = newAction.replace(/パナドール/, `${colorPack}市販のパナドール`);
-    }
-  }
-  let r = String(reason || "").trim();
-  if (!/コンビニ.*ドラッグストア|ドラッグストア.*コンビニ/.test(r)) {
-    r = r ? `${r} ${PANADOL_SG_RETAIL_AVAILABILITY_LINE}` : PANADOL_SG_RETAIL_AVAILABILITY_LINE;
-  }
-  return { action: newAction, reason: r };
+  const shortAction =
+    pack === "red"
+      ? "パナドール（赤色）を服用する"
+      : pack === "green"
+        ? "パナドール（緑色）を服用する"
+        : "パナドール（青色）を服用する";
+  return { action: shortAction, reason: String(reason || "").trim() };
 }
 
 function applyPanadolSingaporeDisplayToDoActionItems(items, state, ctx) {
@@ -4514,21 +4494,21 @@ function getPanadolOtcActionForModal(state, topic) {
   const retailLine = PANADOL_SG_RETAIL_AVAILABILITY_LINE;
   const byPack = {
     red: {
-      action: "赤いパッケージの市販パナドール Extra（エキストラ）を用法通りに使ってください",
+      action: "パナドール（赤色）を服用する",
       reason:
         "鎮痛効果を高めるカフェインが配合され、強い痛み（頑固な頭痛・重い生理痛・激しい筋肉痛など）に使われます。痛みを和らげることで、休息を取りやすくなります。" +
         " " +
         retailLine,
     },
     green: {
-      action: "緑のパッケージの市販パナドール Cold & Flu（コールド＆フル）を用法通りに使ってください",
+      action: "パナドール（緑色）を服用する",
       reason:
         "風邪の症状に合わせた配合で、鼻水・咳・のどの痛み・発熱・頭痛などに使われます。症状を和らげることで休みやすくなります。" +
         " " +
         retailLine,
     },
     blue: {
-      action: "青いパッケージの市販パナドール（オリジナル）を用法通りに使ってください",
+      action: "パナドール（青色）を服用する",
       reason:
         "パラセタモール（アセトアミノフェン）500mgの一般的な服用で、頭痛・発熱・生理痛・歯痛・筋肉痛などに使われます。痛みを和らげることで、休息を取りやすくなります。" +
         " " +
@@ -4625,7 +4605,7 @@ async function refineDoActionsWithLLM(plan, state, level, options = {}) {
               : "doは2件。各reasonは検索要点と整合する確実な理由にする。"
             : "doは必ずちょうど4件。各reasonは検索要点と整合する確実な理由にする。",
           isYellow && !forSummary
-            ? "OTC（市販薬）を1件必ず含める。PAIN/INFECTION かつ鎮痛のときはシンガポール市販のパナドール（オリジナル／Extra／Cold&Fluのいずれか1種）を具体的に。**パッケージの色（青／赤／緑のいずれか）を行動文に必ず書く。**理由には、薬の説明とは別文として**「シンガポールのコンビニやドラッグストアで市販されています」**を必ず1文追加する。整腸剤・のど飴・ワセリン等は他部位向け。"
+            ? "OTC（市販薬）を1件必ず含める。PAIN/INFECTION かつ鎮痛のときはシンガポールのパナドールを扱う。**action（・行）は**「パナドール（青色）を服用する」「パナドール（赤色）を服用する」「パナドール（緑色）を服用する」のいずれか**1行のみ**（短く）。**パッケージの説明・成分・シンガポールでの入手先は reason（→行）にのみ**書く（行動文に書き足さない）。整腸剤・のど飴・ワセリン等は他部位向け。"
             : "",
           "「症状メモを2時間ごとに1回...」は禁止。",
         ]
@@ -6893,6 +6873,9 @@ function parseDaysAgoFromDurationString(text) {
       if (n !== null && n >= 1) return n;
     }
   }
+  if (/(?:1|１|一)週間前|一週間前/.test(normalized)) return 7;
+  const wm = normalized.match(/(\d{1,2})\s*週間前/);
+  if (wm) return Number(wm[1]) * 7;
   return null;
 }
 
@@ -7535,6 +7518,12 @@ function detectSymptomCategory(text) {
 const FIRST_QUESTION_SAFETY_TEMPLATES = [
   (symptom) => `慌てなくて大丈夫です。\n多くの${symptom}は命に関わるものではありません。\n一緒に安全を固めていきましょう。`,
   (symptom) => `まず安心してください。\n${symptom}のほとんどは深刻なものではありません。\nまず落ち着いて、ひとつずつ安全を確認していきましょう。`,
+  (symptom) =>
+    `まずは落ち着いてください。\n多くの${symptom}はすぐに大きな問題になるものではありません。\n今の状態を一緒に確認していきましょう。`,
+  (symptom) =>
+    `心配しすぎなくて大丈夫です。\n${symptom}の多くは、適切に様子を見ることで落ち着くことが多いです。\n今の安全を一緒に整理していきましょう。`,
+  (symptom) =>
+    `まず慌てなくて大丈夫です。\n${symptom}のほとんどは、すぐに強い対応が必要なものではありません。\n安心して判断できるように、一緒に確認していきましょう。`,
 ];
 
 function toMainSymptomLabelForSafety(text) {
@@ -8392,7 +8381,10 @@ function lightBulletCleanupForUserWords(raw) {
   t = t.replace(/です$|ます$/, "");
   t = t.replace(/かも$|かな$/g, "").trim();
   t = polishBulletColloquialSentence(t);
-  return t.trim();
+  t = t.trim();
+  if (/続いてい$/.test(t) && !/続いている$/.test(t)) t = `${t}る`;
+  if (/始まってい$/.test(t) && !/始まっている$/.test(t)) t = `${t}る`;
+  return t;
 }
 
 /** 程度・弱気の表現（箇条書きで落とさない／網羅・ヒューリスティック用） */
@@ -8471,6 +8463,14 @@ function isMainSymptomOnlyBulletLine(state, bulletLine) {
   }
   const synced = getSyncedMainSymptomDisplayLabel(state);
   const labelForInner = toMainSymptomLabelForSafety(inner);
+  const flatInner = inner.replace(/\s+/g, "");
+  if (
+    /^(お腹が痛い|お腹が痛くて|腹痛がある|腹痛が出ている|お腹の調子が悪い)(。)?$/.test(flatInner) &&
+    synced &&
+    /腹|お腹|胃痛|腹部/.test(synced)
+  ) {
+    return true;
+  }
   if (
     synced &&
     labelForInner === synced &&
@@ -8565,7 +8565,8 @@ function sanitizeBulletPoints(bullets, state) {
   const byDurAnchor = dedupeBulletLinesByDurationAnchor(giShort);
   const bySlot = dedupeBulletsOneLinePerInferenceSlot(byDurAnchor);
   const bySubsume = dedupeBulletsBySubsumption(bySlot);
-  const bySoftIncl = dedupeStateAboutBulletsBySoftInclusion(bySubsume);
+  const byPrefixComplete = dedupeBulletsShorterPrefixWhenLongerCompletesThought(bySubsume);
+  const bySoftIncl = dedupeStateAboutBulletsBySoftInclusion(byPrefixComplete);
   const byFourRun = dedupeBulletsByFourCharRunOverlap(bySoftIncl);
   const deduped = dedupeBulletsSequentialSimilarity(byFourRun);
   const dedupedAgg = dedupeBulletLinesByAggressiveNormalizedEquality(deduped);
@@ -9070,6 +9071,38 @@ function dedupeBulletsBySubsumption(bullets) {
     }
   }
   return uniq.filter((b) => !toRemove.has(b));
+}
+
+/**
+ * 「冷え」と「冷えの可能性」、「お腹が痛くて」と「お腹が痛くて 4日間も続いている」のように、
+ * 短い行が長い行の先頭と一致し長い行に追加情報があるときは**短い行を削除**（minCore で落ちる重複向け）。
+ */
+function dedupeBulletsShorterPrefixWhenLongerCompletesThought(bullets) {
+  if (!Array.isArray(bullets) || bullets.length <= 1) return bullets || [];
+  const lines = bullets.map((b) => String(b || "").trim()).filter(Boolean);
+  const innerOf = (b) => b.replace(/^・\s*/, "").trim();
+  const longerAddsInfo = (longer) =>
+    /(の可能性|きっかけ|がきっかけ|気温|変化|寒さ|冷え込|続い|続く|始まっ|日間|時間前|日前|週間前|から|であり|である|いる|ある|みられる)/.test(
+      longer
+    );
+  const removeIdx = new Set();
+  for (let i = 0; i < lines.length; i++) {
+    for (let j = 0; j < lines.length; j++) {
+      if (i === j) continue;
+      const ai = innerOf(lines[i]);
+      const aj = innerOf(lines[j]);
+      if (ai.length < 2 || aj.length < 2) continue;
+      const [shorter, longer, shortIdx] =
+        ai.length < aj.length ? [ai, aj, i] : aj.length < ai.length ? [aj, ai, j] : [null, null, -1];
+      if (!shorter || !longer || shortIdx < 0) continue;
+      if (shorter.length > 36) continue;
+      if (longer.length <= shorter.length) continue;
+      if (!longer.startsWith(shorter)) continue;
+      if (!longerAddsInfo(longer)) continue;
+      removeIdx.add(shortIdx);
+    }
+  }
+  return lines.filter((_, idx) => !removeIdx.has(idx));
 }
 
 /** 体温・体の熱感（体感熱）系の箇条書きか（痛みの話と区別） */
@@ -10022,6 +10055,8 @@ async function polishConfirmationBulletsWithLlm(state) {
       "【必須】同じ質問への回答に複数の事実（例：読点や中黒で並んだ内容）があるときは、まとめずに別々の「・」行に分ける。",
       "【禁止】「不調」「症状がある」「状態が気になる」など具体性を失う言い換えだけに置き換えること。元の箇条書きより情報量を落としてはいけない。",
       "【形式】各行は「・」で始まる1行。行数は入力と同程度（最大14行）。完全に同一趣旨の重複のみ統合してよい。",
+      "【必須】主症状の言い換えだけの行は出さない（痛み・部位の繰り返しは省き、経過・付随・きっかけなどの情報だけを書く）。",
+      "【必須】各行の文末を途中で切らない（語の半端・「続いてい」で終わる等は禁止）。",
       '厳密なJSON: {"bullets":["・...","・...",...]} のみ。説明文は禁止。',
     ].join("\n");
     const completion = await openai.chat.completions.create({
@@ -10548,7 +10583,7 @@ async function finalizeCombinationPartsWithLlm(state, rawParts) {
   return heuristic;
 }
 
-/** 組み合わせ行の逆優先度（🟢🟡の候補並び用）：きっかけ・痛み方はなるべく出さない（数値が高いほど先に採用）。🔴は `pickRedComboPartsInCandidateOrder` で逆優先度を使わない。※きっかけ本文は `buildGreenYellowComboPlusClause` で先頭項として注入も可 */
+/** 組み合わせ行の逆優先度（🟢🟡の候補並び用）：きっかけはなるべく後回し。**痛み方②は `pickGreenYellowComboPartsReservingPainManner` で必ず先に確保**（数値が高いほど先に採用するのは痛み方以外）。🔴は `pickRedComboPartsInCandidateOrder` で逆優先度を使わない。※きっかけ本文は `buildGreenYellowComboPlusClause` で先頭項として注入も可 */
 const COMBO_INV_PRI_CAUSE = 8;
 const COMBO_INV_PRI_PAIN_TYPE = 10;
 const COMBO_INV_PRI_NORMAL = 88;
@@ -10691,13 +10726,11 @@ function applyGreenYellowComboUserWordGuards(state, picked) {
       return p;
     });
   }
-  const seen = new Set();
   const deduped = [];
   for (const p of out) {
     const fp = finalizeComboLabelForCombinationLine(p) || String(p).trim();
     if (!fp) continue;
-    if (seen.has(fp)) continue;
-    seen.add(fp);
+    if (deduped.some((d) => comboLabelsAreDuplicateForCombo(d, fp))) continue;
     deduped.push(fp);
     if (deduped.length >= 3) break;
   }
@@ -10853,7 +10886,7 @@ function collectGreenYellowLowMediumCombinationParts(state) {
 
   if (comboSlotAllowsGreenYellowCombo(state, "duration")) {
     const dur = String(getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "") || "").trim();
-    if (!shouldBlockRedByRecentShortDuration(state)) {
+    if (!shouldBlockRedByDurationGuards(state)) {
       if (dur && /(さっき|数時間前|数十分|今さっき)/.test(dur)) {
         const dlab = buildRedComboLabelFromDurationSlotAnswer(state) || "発症から時間が短い";
         candidates.push({ label: dlab, inv: 85 });
@@ -10866,7 +10899,7 @@ function collectGreenYellowLowMediumCombinationParts(state) {
       }
     }
   }
-  if (shouldBlockRedByRecentShortDuration(state)) {
+  if (shouldBlockRedByDurationGuards(state)) {
     const sp = buildDurationTemporaryPossibilityLabelForRedGuard(state);
     if (sp && !candidates.some((c) => /一時的な可能性/.test(String(c.label || "")))) {
       candidates.push({ label: sp, inv: 92 });
@@ -10883,16 +10916,18 @@ function collectGreenYellowLowMediumCombinationParts(state) {
       state?.slotAnswers?.associated_symptoms || getSlotStatusValue(state, "associated", "") || ""
     ).trim();
     if (assocRaw && !/^(ない|なし|特にない|これ以外は特にない|特に変化はない)/i.test(assocRaw)) {
-      const p = polishBulletColloquialSentence(assocRaw.replace(/です$|ます$/, "").slice(0, 28));
+      const p = polishBulletColloquialSentence(assocRaw.replace(/です$|ます$/, ""));
       if (p) candidates.push({ label: p, inv: 86 });
     }
   }
 
-  const comboMaxParts = shouldBlockRedByRecentShortDuration(state) ? 2 : 3;
+  const comboMaxParts = shouldBlockRedByDurationGuards(state) ? 2 : 3;
   const applyRedGuardComboFilter = (arr) => filterComboCandidatesForRedGuardOnset(arr, state);
   const finish = (arr) => applyGreenYellowComboUserWordGuards(state, arr);
 
-  let picked = finish(pickComboPartsByInversePriority(applyRedGuardComboFilter(candidates), 2, comboMaxParts));
+  let picked = finish(
+    pickGreenYellowComboPartsReservingPainManner(applyRedGuardComboFilter(candidates), state, 2, comboMaxParts)
+  );
   if (picked.length >= 2) return picked;
 
   const parts = [];
@@ -10921,7 +10956,9 @@ function collectGreenYellowLowMediumCombinationParts(state) {
     const extra = parts.map((p) => ({ label: shortenComboLabelFromBulletText(p) || p, inv: 72 }));
     candidates.push(...extra);
   }
-  picked = finish(pickComboPartsByInversePriority(applyRedGuardComboFilter(candidates), 2, comboMaxParts));
+  picked = finish(
+    pickGreenYellowComboPartsReservingPainManner(applyRedGuardComboFilter(candidates), state, 2, comboMaxParts)
+  );
   if (picked.length >= 2) return picked;
 
   const mainSafe = main && main !== "症状" ? main : "症状の出方";
@@ -10930,7 +10967,9 @@ function collectGreenYellowLowMediumCombinationParts(state) {
     { label: "急いで受診が必要な所見は見えにくい", inv: 54 },
     { label: "付随の所見は限定的", inv: 53 }
   );
-  return finish(pickComboPartsByInversePriority(applyRedGuardComboFilter(candidates), 2, comboMaxParts));
+  return finish(
+    pickGreenYellowComboPartsReservingPainManner(applyRedGuardComboFilter(candidates), state, 2, comboMaxParts)
+  );
 }
 
 /**
@@ -11042,7 +11081,7 @@ function filterGreenYellowComboPartsAgainstBulletFacts(state, labels) {
 }
 
 /**
- * 🟢🟡 ①：選んだ短語を **「〇〇＋〇〇＋…」** で列挙し、**「〜ことから、」** に繋ぐ主部を返す。
+ * 🟢🟡 ①：選んだ短語を **「〇〇＋〇〇＋…」** で列挙し、**「…」このことから、** の形で②に繋ぐ（主部は `「…」` のみ返す）。
  * きっかけは **3〜7 文字目安の短語**（`buildCauseComboShortLabelSync`／非同期時は `causeShortOverride`）を**先頭**に付与（parts 内のきっかけ相当短語は重複回避で除外）。
  * **合計チャンク数は最大 3**（きっかけ＋短語で 4 連になるのを防ぐ）。箇条書きと事実重複する短語は列挙しない。
  * @param {string} [causeShortOverride] - 非同期経路で LLM 済みのきっかけ短語。未指定時は同期ヒューリスティック。
@@ -11061,6 +11100,16 @@ function buildGreenYellowComboPlusClause(state, parts, causeShortOverride) {
     labels = labels.filter((p) => inferComboBulletInverseKind(p) !== "cause");
   }
   labels = dedupeComboLabelsBySubsumption(labels);
+  {
+    const pair = [];
+    for (const l of labels) {
+      const t = finalizeComboLabelForCombinationLine(String(l || "").trim()) || String(l || "").trim();
+      if (!t) continue;
+      if (pair.some((o) => comboLabelsAreDuplicateForCombo(o, t))) continue;
+      pair.push(t);
+    }
+    labels = pair;
+  }
   if (state) {
     labels = filterGreenYellowComboPartsAgainstBulletFacts(state, labels);
   }
@@ -11075,7 +11124,7 @@ function buildGreenYellowComboPlusClause(state, parts, causeShortOverride) {
 }
 
 /**
- * 🤝🟢🟡 ①の「〇〇＋〇〇」列挙と②パターン文を1段落に統合（KAIRO_SPEC・「〜ことから、一時的な〇〇として…」）。
+ * 🤝🟢🟡 ①の「〇〇＋〇〇」列挙と②パターン文を1段落に統合（KAIRO_SPEC・「…」このことから、一時的な〇〇として…）。
  * @param {string} [causeShortOverride] - `buildCauseComboShortLabelAsync` 結果を渡す（省略時は同期短語）。
  */
 function buildGreenYellowComboIntegratedParagraph(state, level, parts, causeShortOverride) {
@@ -11084,7 +11133,7 @@ function buildGreenYellowComboIntegratedParagraph(state, level, parts, causeShor
   const clause = buildGreenYellowComboPlusClause(state, parts, causeShortOverride);
 
   if (windy) {
-    const lead = clause ? `${clause}ことから、` : `これらの症状の組み合わせから、`;
+    const lead = clause ? `${clause}このことから、` : `これらの症状の組み合わせから、`;
     const tail =
       lv === "🟡"
         ? `風の初期症状としてよく見られる一方で、注意が必要なサインも含まれます。`
@@ -11093,7 +11142,7 @@ function buildGreenYellowComboIntegratedParagraph(state, level, parts, causeShor
   }
 
   const noun = greenYellowPatternNounForTemporary(state);
-  const lead = clause ? `${clause}ことから、` : `今の状態の組み合わせから、`;
+  const lead = clause ? `${clause}このことから、` : `今の状態の組み合わせから、`;
   const tail =
     lv === "🟡"
       ? `一時的な${noun}としてよく見られる一方で、注意が必要なサインも含まれます。`
@@ -11224,6 +11273,66 @@ function redComboUserWordInclusiveMatch(canonicalLab, part) {
   if (!a || !b) return false;
   if (a === b) return true;
   return b.includes(a) || a.includes(b);
+}
+
+/** 🟢🟡「〇〇＋〇〇」：短語同士が同一・包含か（重複列挙禁止・KAIRO_SPEC） */
+function comboLabelsAreDuplicateForCombo(a, b) {
+  if (redComboUserWordInclusiveMatch(a, b)) return true;
+  const na = normalizeBulletKeyForDedupe(String(a || ""));
+  const nb = normalizeBulletKeyForDedupe(String(b || ""));
+  if (na.length >= 2 && nb.length >= 2 && na === nb) return true;
+  if (na.length >= 4 && nb.length >= 4 && (na.includes(nb) || nb.includes(na))) return true;
+  return false;
+}
+
+/**
+ * 🟢🟡：痛み方②（worsening）を回答がある限り必ず含め、重複なく min〜max 件を選ぶ（逆優先度は痛み方以外に適用）。
+ */
+function pickGreenYellowComboPartsReservingPainManner(candidates, state, min, max) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return [];
+  const painRaw =
+    comboSlotAllowsGreenYellowComboForPainManner(state) && buildRedComboLabelFromWorseningSlotAnswer(state);
+  const painLab = painRaw
+    ? finalizeComboLabelForCombinationLine(painRaw) || String(painRaw).trim()
+    : "";
+
+  const uniq = [];
+  const pushIfNew = (lab) => {
+    const t = finalizeComboLabelForCombinationLine(String(lab || "").trim()) || String(lab || "").trim();
+    if (!t) return false;
+    for (const u of uniq) {
+      if (comboLabelsAreDuplicateForCombo(u, t)) return false;
+    }
+    uniq.push(t);
+    return true;
+  };
+
+  const list = candidates
+    .map((c) => ({
+      label: String(c.label || "").trim(),
+      inv: Number.isFinite(c.inv) ? c.inv : COMBO_INV_PRI_NORMAL,
+    }))
+    .filter((c) => c.label);
+
+  const sorted = [...list].sort((a, b) => b.inv - a.inv);
+
+  if (painLab) pushIfNew(painLab);
+
+  for (const x of sorted) {
+    if (uniq.length >= max) break;
+    if (painLab && comboLabelsAreDuplicateForCombo(painLab, x.label)) continue;
+    pushIfNew(x.label);
+  }
+
+  if (uniq.length >= min) return uniq.slice(0, max);
+
+  const low = [...list].sort((a, b) => a.inv - b.inv);
+  for (const x of low) {
+    if (uniq.length >= max) break;
+    pushIfNew(x.label);
+  }
+
+  return uniq.slice(0, max);
 }
 
 /**
@@ -12975,8 +13084,8 @@ function getModalCommonNonInfectionFallbackPair(mainSymptom) {
 
 /** 🟢/🟡モーダル：🟡ブロックと中間見出し（🟢「現時点の安心材料」／🟡「なぜ注意が必要か」）のあとに出す納得文（LLM・失敗時フォールバック） */
 const GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK = [
-  "今すぐ受診しても、得られる対応は自宅と大きく変わりません。",
-  "逆に動くと悪化しやすいので、休む方が合理的です。",
+  "今すぐ受診しても、得られる対応は自宅と大きく変わりません",
+  "逆に動くと悪化しやすいので、",
 ].join("\n");
 
 /** 納得文に推量語が含まれる場合は不採用（断定形「です／ます／あります」系に寄せる） */
@@ -12988,7 +13097,9 @@ function acceptanceConvictionHasHedging(text) {
   );
 }
 
-/** 「。」終わりの文がちょうど2つ・長さ仕様内・推量表現なしなら採用。それ以外はフォールバック（KAIRO_SPEC：必ず二文・断定形） */
+/**
+ * 納得文：2行（改行区切り）・長さ仕様内・推量表現なしなら採用。1行目は**句点「。」を付けない**、2行目は**「〜ので、」のように読点「、」で終えてよい**（KAIRO_SPEC）。1行に「。」2文も可（採用時は行分割し句点除去）。
+ */
 function enforceAcceptanceConvictionTwoSentences(text) {
   const fallback = GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK;
   const raw = String(text || "")
@@ -12997,10 +13108,15 @@ function enforceAcceptanceConvictionTwoSentences(text) {
     .replace(/^["「『]|["」』]$/g, "")
     .trim();
   if (!raw) return fallback;
-  const linear = raw.replace(/\s*\n\s*/g, "").trim();
-  const parts = linear.match(/[^。．]+[。．]/g);
-  if (!parts || parts.length !== 2) return fallback;
-  const out = parts.map((p) => p.trim()).join("\n");
+  let lines = raw.split(/\n/).map((s) => s.trim()).filter(Boolean);
+  if (lines.length === 1 && /[。．]/.test(lines[0])) {
+    const parts = lines[0].match(/[^。．]+[。．]/g);
+    if (parts && parts.length === 2) {
+      lines = parts.map((p) => p.trim().replace(/[。．]+$/g, "").trim());
+    }
+  }
+  if (lines.length !== 2) return fallback;
+  const out = lines.map((s) => s.replace(/[。．]+$/g, "").trim()).join("\n");
   if (acceptanceConvictionHasHedging(out)) return fallback;
   if (out.length >= 35 && out.length <= 450) return out;
   return fallback;
@@ -13019,15 +13135,15 @@ async function generateGreenYellowModalAcceptanceText(mainSymptom = "", userSumm
             role: "system",
             content: [
               "あなたは医療情報を要約するアシスタントです。",
-              "🟢または🟡判定のユーザー向け補助モーダル用に、「納得文」を必ずちょうど2文で書いてください（「。」で終わる文が2つ。3文以上・1文のみは禁止）。",
-              "各文の文末は「です。」「ます。」「あります。」など断定形に統一する（「かもしれません」「でしょう」「だろう」「のではないか」など推量・婉曲は禁止）。",
+              "🟢または🟡判定のユーザー向け補助モーダル用に、「納得文」を必ず**改行区切りで2行**で書いてください（1行目＋2行目。3行以上・1行のみは禁止）。",
+              "1行目の文末は「です。」「ます。」「あります。」など断定形（「。」は付けない）。2行目は**「逆に動くと悪化しやすいので、」のように読点「、」で終える**（「休む方が合理的です」等の続きは書かない）。推量・婉曲は禁止。",
               "次の2文の意味・トーンに必ず寄せること（語句は完全に同じでなくてよい）：",
               "1文目の型：今すぐ受診しても、得られる対応は自宅と大きく変わらない、という趣旨（断定で述べる。「可能性が高いです」に頼らない）。",
-              "2文目の型：逆に動くと悪化しやすいので、休む方が合理的、という趣旨（文末は断定形）。",
-              "意図：受診で得られる対応が自宅と大きく変わらないこと・無理に動くと負担が増えやすいので休む合理性を、落ち着いたトーンで伝える。",
+              "2文目の型：逆に動くと悪化しやすいので、（このとおり**読点「、」で終わる**。「休む方が合理的です」などの**続きの文を書かない**）。",
+              "意図：受診で得られる対応が自宅と大きく変わらないこと・無理に動くと悪化しやすい、を落ち着いたトーンで示す。",
               "受診という選択肢を罵ったり禁止したりはしない。医学的に不適切な断定診断・煽り・恐怖訴求は禁止。",
               "「あなたの場合」「この症状は」などの個別化は禁止。主症状ラベルは必要なら1回まで。",
-              "出力は本文のみ（JSON不要）。2文のあいだは改行1つ（計2行）か、同一行に「。」で区切って2文。",
+              "出力は本文のみ（JSON不要）。2文は**改行1つで区切る（計2行）**を推奨。同一行に「。」で2文を書く場合も可（サーバで句点は除去する）。",
             ].join("\n"),
           },
           {
@@ -13087,7 +13203,7 @@ async function buildDiseaseSafetyFilteredMessage(
       `- 出力は必ずJSONのみ：{"common":[],"conditional":[],"rare_emergency":[],"acceptance_conviction":"","caution_why_bullets":[]}`,
       `- common・conditional・rare_emergency の各要素は**必ず文字列**（1行＝「・原因 → 理由」形式の文字列）。オブジェクト・入れ子は禁止。`,
       `- 緊急度レベルはユーザーメッセージの「緊急度レベル」に従う。🔴のとき acceptance_conviction は ""、caution_why_bullets は []。🟢のとき caution_why_bullets は []。🟡のときのみ caution_why_bullets を2〜3件で埋める。`,
-      `- acceptance_conviction（🟢または🟡のみ）：納得文を**ちょうど2文**（各文は「。」終わり）。文末は断定形（「かもしれません」「でしょう」禁止）。意味は「今すぐ受診しても自宅と大きく変わらない」「無理に動くと悪化しやすいので休む方が合理的」に寄せる。主症状ラベルは必要なら1回まで。「あなたの場合」禁止。`,
+      `- acceptance_conviction（🟢または🟡のみ）：納得文を**ちょうど2文**（改行で区切る。1文目は**句点「。」を付けない**・2文目は**「逆に動くと悪化しやすいので、」のように読点「、」で終わる**。「休む方が合理的です」は**出さない**）。断定形（「かもしれません」「でしょう」禁止）。意味は「今すぐ受診しても自宅と大きく変わらない」「無理に動くと悪化しやすい（ので、で終え）」に寄せる。主症状ラベルは必要なら1回まで。「あなたの場合」禁止。`,
       `- caution_why_bullets（🟡のみ）：各要素は「・<今の状態の要約> → <なぜ注意が必要か>」形式。**「→」右は一文**・句点「。」は文末に1つだけ。**緊急度判定で中リスク・高リスクに相当する要因のみ**（低リスク相当だけの行は書かない）。入力に【緊急度の内訳】があるときはその要因に限定。→右に痛みスロット表現（〇/10等）禁止。`,
       "- common = 一般的に頻度が高い**原因・きっかけ・物理的機序**（2〜4件）。各項目は「・<原因名> → <短い理由>」形式。**「→」右は一文**・句点「。」は文末に1つだけ。",
       "- **原因名（→の左）は**：病名・状態名・または**具体的な機序**（例：乾燥・摩擦・軽い切り傷・局所刺激・姿勢負荷・睡眠不足など）。主症状と無関係な病名は含めない。",
@@ -13167,22 +13283,20 @@ async function buildDiseaseSafetyFilteredMessage(
   common = infectionMoved.common;
   conditional = infectionMoved.conditional;
 
-  const userWords = rawFacts;
-
+  // 「→」右は主症状との機械的整合で汎用文に差し替えない（🔴「今回受診をおすすめしている理由」と同様、上書きで不自然になりやすいため。痛みスロット禁止等は sanitize 内で継続）
   common = common.map((item) => {
     const arrowIdx = item.indexOf(" → ");
-    if (arrowIdx === -1) return finalizeModalCauseDisplayLine(item, mainSymptomDisplay);
+    if (arrowIdx === -1) return finalizeModalCauseDisplayLine(item, null);
     const reason = item.slice(arrowIdx + 3).trim();
-    let fixed = replaceUnsaidPhrasesInReason(reason, userWords);
-    fixed = sanitizeModalArrowReasonTail(fixed);
-    return finalizeModalCauseDisplayLine(`${item.slice(0, arrowIdx + 3)}${fixed}`, mainSymptomDisplay);
+    const fixed = sanitizeModalArrowReasonTail(reason);
+    return finalizeModalCauseDisplayLine(`${item.slice(0, arrowIdx + 3)}${fixed}`, null);
   });
 
   // common が4件未満のとき、主症状に紐づいた fallback から補う（感染症系は入れない・例は常に十分出るようにする）
   if (common.length < 4) {
     const buildFallbackLine = (d) => {
       const reason = d.desc.replace(/とされる状態です。?$/, "").trim();
-      const fixed = sanitizeModalArrowReasonTail(replaceUnsaidPhrasesInReason(reason, userWords));
+      const fixed = sanitizeModalArrowReasonTail(reason);
       return `・${d.name} → ${fixed}`;
     };
     let pool = fallbackPair.map(buildFallbackLine).filter((line) => !isInfectionRelatedModalCauseLine(line));
@@ -13206,7 +13320,7 @@ async function buildDiseaseSafetyFilteredMessage(
         continue;
       }
       seen.add(nameKey);
-      common.push(finalizeModalCauseDisplayLine(item, mainSymptomDisplay));
+      common.push(finalizeModalCauseDisplayLine(item, null));
     }
   }
   common = common.slice(0, 4);
@@ -13266,10 +13380,10 @@ async function buildDiseaseSafetyFilteredMessage(
   }
   conditional = conditional.map((item) => {
     const arrowIdx = item.indexOf(" → ");
-    if (arrowIdx === -1) return finalizeModalCauseDisplayLine(item, mainSymptomDisplay);
+    if (arrowIdx === -1) return finalizeModalCauseDisplayLine(item, null);
     const reason = item.slice(arrowIdx + 3).trim();
     const fixed = sanitizeModalArrowReasonTail(reason);
-    return finalizeModalCauseDisplayLine(`${item.slice(0, arrowIdx + 3)}${fixed}`, mainSymptomDisplay);
+    return finalizeModalCauseDisplayLine(`${item.slice(0, arrowIdx + 3)}${fixed}`, null);
   });
 
   common = dedupeModalLinesByNormalizedHead(common);
@@ -13304,7 +13418,7 @@ async function buildDiseaseSafetyFilteredMessage(
       }
       if (overlapCommon) continue;
       if (conditional.some((c) => causeKeyForRefill(c) === nk)) continue;
-      conditional.push(finalizeModalCauseDisplayLine(next, mainSymptomDisplay));
+      conditional.push(finalizeModalCauseDisplayLine(next, null));
     }
   }
   conditional = conditional.slice(0, 4);
@@ -14015,7 +14129,6 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
       lines.push(
         String(structured.acceptanceConviction || "").trim() || GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK
       );
-      lines.push("");
       restClosingLine = pickGreenYellowModalRestClosingLine();
       lines.push(restClosingLine);
       lines.push("");
@@ -14049,7 +14162,7 @@ async function buildConcreteStateDetailsFromSearch(state, summaryFacts = [], sum
 
   if ((level === "🟢" || level === "🟡") && String(message || "").trim() && !restClosingLine) {
     restClosingLine = pickGreenYellowModalRestClosingLine();
-    message = `${String(message).trim()}\n\n${restClosingLine}`;
+    message = `${String(message).trim()}\n${restClosingLine}`;
   }
 
   if (IS_DEBUG) {
@@ -15437,8 +15550,27 @@ function getPainSeverityScore(state) {
 }
 
 /**
+ * INFECTION の体温が「37度台」「38度以上」相当か（RED抑制の痛み8以上解除条件・KAIRO_SPEC §7.1.1 スロット5）。
+ * 平熱・未回答・数値で37未満は false。
+ */
+function isInfectionTemperatureTier37Or38PlusForRedGuard(state) {
+  const cat = state?.triageCategory || resolveQuestionCategoryFromState(state);
+  if (cat !== "INFECTION") return false;
+  const raw = String(
+    getSlotStatusValue(state, "daily_impact", state?.slotAnswers?.daily_impact || "") || ""
+  ).trim();
+  if (raw === "平熱に近い") return false;
+  if (raw === "37度台" || raw === "38度以上") return true;
+  const rl = state?.slotNormalized?.daily_impact?.riskLevel;
+  if (rl === RISK_LEVELS.MEDIUM || rl === RISK_LEVELS.HIGH) return true;
+  const c = extractBodyTemperatureCelsius(raw);
+  if (c != null) return c >= 37;
+  return false;
+}
+
+/**
  * RED抑制：経過が「さっき」「数時間前」相当のときは 🔴 を禁止（PAIN / INFECTION / GI）。
- * INFECTION かつ痛みスコアが 8 以上のときだけガード解除（KAIRO_SPEC RED抑制ガード）。
+ * INFECTION かつ痛みスコアが 8 以上かつ体温が 37度台／38度以上相当のときだけガード解除（KAIRO_SPEC RED抑制ガード）。
  * GI はガードのみ（解除条件なし）。喉主症状 INFECTION は例外にせず、短い経過では痛み高値でも常にガード（🟢/🟡 のみ）。
  */
 function shouldBlockRedByRecentShortDuration(state) {
@@ -15460,7 +15592,10 @@ function shouldBlockRedByRecentShortDuration(state) {
       if (isThroatInfectionSession(state)) {
         return true;
       }
-      return false;
+      if (isInfectionTemperatureTier37Or38PlusForRedGuard(state)) {
+        return false;
+      }
+      return true;
     }
   }
   const durationRaw = String(
@@ -15472,8 +15607,76 @@ function shouldBlockRedByRecentShortDuration(state) {
 }
 
 /**
+ * 経過が「1週間以内」と判定できるとき true（RED抑制ガード・週帯／KAIRO_SPEC）。
+ * 数値・週表現で ≤7 日、極短・数時間、または「この1週間」「ここ数日」等の短期帯のみ。曖昧な長期帯は false。
+ */
+function isDurationWithinOneWeek(state) {
+  const durationRaw = String(
+    getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "")
+  ).trim();
+  const selectedIndex = state?.durationMeta?.selectedIndex;
+  if (selectedIndex === 0 || selectedIndex === 1) return true;
+  const normMeta = state?.durationMeta?.normalized;
+  if (typeof normMeta === "string") {
+    const dm = normMeta.match(/^(\d+)d_ago$/);
+    if (dm) {
+      const d = Number(dm[1]);
+      if (Number.isFinite(d) && d <= 7) return true;
+      if (Number.isFinite(d) && d > 7) return false;
+    }
+    if (normMeta === "short" || normMeta === "today" || normMeta === "hours") return true;
+    if (/^\d+h_ago$/.test(normMeta)) return true;
+  }
+  const nCompact = normalizeUserText(durationRaw).replace(/\s+/g, "");
+  if (/(この|ここ)の?(?:1|１|一)週間|ここ(?:1|１|一)週間/.test(nCompact)) return true;
+  if (/(ここ|この)数日/.test(nCompact)) return true;
+  const daysFromParse = parseDaysAgoFromDurationString(durationRaw);
+  if (daysFromParse !== null && daysFromParse >= 1 && daysFromParse <= 7) return true;
+  return false;
+}
+
+/**
+ * RED抑制：経過が1週間以内かつ悪化トレンド明示でないとき 🔴 を禁止（PAIN / INFECTION / GI / TIRED・KAIRO_SPEC）。
+ * INFECTION かつ痛み 8 以上かつ体温 37度台／38度以上相当は短経過ガードと同様に解除（喉 INFECTION は除く）。
+ */
+function shouldBlockRedByWeekAndNonWorsening(state) {
+  const category = state?.triageCategory || resolveQuestionCategoryFromState(state);
+  if (
+    category !== "PAIN" &&
+    category !== "INFECTION" &&
+    category !== "GI" &&
+    category !== "TIRED"
+  ) {
+    return false;
+  }
+  if (getWorseningTrendIndexForRisk(state) === 2) return false;
+  if (!isDurationWithinOneWeek(state)) return false;
+  if (category === "INFECTION") {
+    if (
+      state?.slotFilled?.pain_score === true &&
+      Number.isFinite(state?.lastPainScore) &&
+      state.lastPainScore >= 8
+    ) {
+      if (isThroatInfectionSession(state)) {
+        return true;
+      }
+      if (isInfectionTemperatureTier37Or38PlusForRedGuard(state)) {
+        return false;
+      }
+      return true;
+    }
+  }
+  return true;
+}
+
+/** 短経過ガードまたは（1週間以内かつ悪化以外）週ガードのいずれかが効いている */
+function shouldBlockRedByDurationGuards(state) {
+  return shouldBlockRedByRecentShortDuration(state) || shouldBlockRedByWeekAndNonWorsening(state);
+}
+
+/**
  * RED抑制ガード時の①組み合わせ行：経過を書くとき「一時的な可能性」を含む短いラベル（KAIRO_SPEC 特例）。
- * 呼び出し元は shouldBlockRedByRecentShortDuration(state) === true のときのみ。
+ * 呼び出し元は shouldBlockRedByDurationGuards(state) === true のときのみ。
  */
 function buildDurationTemporaryPossibilityLabelForRedGuard(state) {
   if (!state) return "";
@@ -15494,7 +15697,7 @@ function buildDurationTemporaryPossibilityLabelForRedGuard(state) {
  * 例:「さっきから（一時的な可能性）」と「症状はさっきから始まっている」を並べない。
  */
 function shouldExcludeComboCandidateDueToRedGuardOnsetOverlap(label, state) {
-  if (!shouldBlockRedByRecentShortDuration(state)) return false;
+  if (!shouldBlockRedByDurationGuards(state)) return false;
   const s = String(label || "").trim();
   if (!s) return false;
   if (/一時的な可能性/.test(s)) return false;
@@ -15507,7 +15710,7 @@ function shouldExcludeComboCandidateDueToRedGuardOnsetOverlap(label, state) {
 
 function filterComboCandidatesForRedGuardOnset(candidates, state) {
   if (!Array.isArray(candidates)) return [];
-  if (!shouldBlockRedByRecentShortDuration(state)) return candidates;
+  if (!shouldBlockRedByDurationGuards(state)) return candidates;
   return candidates.filter((c) => !shouldExcludeComboCandidateDueToRedGuardOnsetOverlap(c.label, state));
 }
 
@@ -15518,8 +15721,7 @@ function calculateRiskFromState(state) {
     if (triageCat === "TIRED") {
       const imp = state?.slotNormalized?.daily_impact?.riskLevel;
       if (imp === RISK_LEVELS.MEDIUM || imp === RISK_LEVELS.HIGH) {
-        const blockRedByRecentShortDuration = shouldBlockRedByRecentShortDuration(state);
-        if (blockRedByRecentShortDuration) {
+        if (shouldBlockRedByDurationGuards(state)) {
           return { ratio: 0.64, level: "🟡", urgency: "yellow" };
         }
         console.log("---- KAIRO URGENCY DEBUG (worsening_trend=悪化 かつ TIRED impact>=少しつらい → RED) ----");
@@ -15531,8 +15733,7 @@ function calculateRiskFromState(state) {
         ? state.lastPainScore
         : Number(String(state?.slotAnswers?.pain_score || "").match(/\d+/)?.[0]) || 0;
     if (painScoreRaw >= 5) {
-      const blockRedByRecentShortDuration = shouldBlockRedByRecentShortDuration(state);
-      if (blockRedByRecentShortDuration) {
+      if (shouldBlockRedByDurationGuards(state)) {
         return { ratio: 0.64, level: "🟡", urgency: "yellow" };
       }
       console.log("---- KAIRO URGENCY DEBUG (worsening_trend=発症時より悪化 かつ pain>=5 → RED) ----");
@@ -15572,11 +15773,10 @@ function calculateRiskFromState(state) {
     scores.cause,
   ];
   const highSlotCount = slotScoreList.filter((v) => v === 3).length;
-  const blockRedByRecentShortDuration = shouldBlockRedByRecentShortDuration(state);
 
   // Phase1: 判断6スロットのうち「高」が2つ以上 → 比率計算なしで即時🔴
   if (highSlotCount >= 2) {
-    if (blockRedByRecentShortDuration) {
+    if (shouldBlockRedByDurationGuards(state)) {
       return { ratio: 0.64, level: "🟡", urgency: "yellow" };
     }
     if (isThroatInfectionSession(state) && !isThroatExplicitWorseningTrend(state)) {
@@ -15607,7 +15807,7 @@ function calculateRiskFromState(state) {
   } else if (severityIndex >= 0.45) {
     urgency = "yellow";
   }
-  if (urgency === "red" && blockRedByRecentShortDuration) {
+  if (urgency === "red" && shouldBlockRedByDurationGuards(state)) {
     urgency = "yellow";
   }
   let level = urgency === "red" ? "🔴" : urgency === "yellow" ? "🟡" : "🟢";

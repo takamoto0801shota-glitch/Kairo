@@ -602,7 +602,7 @@ function setConcreteModalBody(textOrStructured, options = {}) {
 }
 
 const GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK =
-  "今すぐ受診しても、得られる対応は自宅と大きく変わりません。\n逆に動くと悪化しやすいので、休む方が合理的です。";
+  "今すぐ受診しても、得られる対応は自宅と大きく変わりません\n逆に動くと悪化しやすいので、";
 
 /** 🟢/🟡モーダル：🟢は安心材料／🟡は注意理由（本文は `reassuranceBullets` / `cautionWhyBullets`） */
 function getGreenYellowModalMiddleBlockHeadingClient(triageLevel) {
@@ -684,7 +684,6 @@ function renderStructuredStateModal(body, { structured, message, triageLevel, ma
     lines.push("");
     const conv = String(s.acceptanceConviction || "").trim() || GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK;
     lines.push(conv);
-    lines.push("");
     lines.push(
       String(restClosingLine || "").trim() || pickGreenYellowModalRestClosingLineClient()
     );
