@@ -1335,6 +1335,12 @@ function addSummaryBlock(messageDiv, fullText) {
   saveHistory();
 }
 
+function setSummaryCardLayoutVisible(visible) {
+  const c = document.querySelector(".chat-container");
+  if (!c) return;
+  c.classList.toggle("summary-card-visible", !!visible);
+}
+
 function clearSummaryContainer() {
   const summaryCard = document.getElementById("summaryCard");
   if (!summaryCard) return;
@@ -1401,6 +1407,7 @@ function renderSummaryBase(text) {
   summaryCard.style.display = "block";
   summaryCard.style.opacity = "1";
   summaryCard.style.visibility = "visible";
+  setSummaryCardLayoutVisible(true);
 }
 
 function renderRedCard() {
@@ -1493,6 +1500,7 @@ function hideSummaryCard() {
     summaryCard.style.opacity = "0";
     summaryCard.style.visibility = "hidden";
   }
+  setSummaryCardLayoutVisible(false);
 }
 
 // Call OpenAI API（失敗時は10回までリトライ）

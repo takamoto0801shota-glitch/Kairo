@@ -149,9 +149,10 @@ body {
     border-color: #ddd;
 }
 
+/* サマリー帯が出ていないときはヘッダー直下から。出ているときだけ --summary-height 分下げる（非表示時の謎の空きを防ぐ） */
 .chat-messages {
     position: absolute;
-    top: calc(var(--header-height) + var(--summary-height) + env(safe-area-inset-top));
+    top: calc(var(--header-height) + env(safe-area-inset-top));
     bottom: var(--input-height);
     left: 0;
     right: 0;
@@ -163,6 +164,10 @@ body {
     background-color: #fafafa;
     margin-top: 0;
     overscroll-behavior: contain;
+}
+
+.chat-container.summary-card-visible .chat-messages {
+    top: calc(var(--header-height) + var(--summary-height) + env(safe-area-inset-top));
 }
 
 .message {
