@@ -1044,10 +1044,75 @@ function textIncludesHandshakeAboutHeader(text) {
   return /🤝\s*(?:今の状態について|Kairoの判断)/.test(String(text || ""));
 }
 
+/** まとめ「🤝/📝 Kairoの判断」内の箇条書き（「・」）行の最低行数。これが無いと次ブロックに進まない。 */
+const MIN_KAIRO_JUDGMENT_FACT_BULLETS = 2;
+
+/**
+ * まとめ本文中の Kairoの判断 ブロックに含まれる「・」行数を数える（🤝 / 📝 両方）。
+ */
+function countBulletLinesInKairoJudgmentBlock(text) {
+  const lines = String(text || "").split("\n");
+  const start = lines.findIndex(
+    (l) => isHandshakeStateAboutHeaderLine(l) || isMemoStateAboutHeaderLine(l)
+  );
+  if (start < 0) return 0;
+  const end = lines.findIndex(
+    (l, i) => i > start && /^\s*(✅|⏳|🚨|💊|🌱|🏥|💬)\s/.test(l)
+  );
+  const body = lines.slice(start + 1, end < 0 ? lines.length : end);
+  return body.filter((l) => /^\s*・/.test(String(l).trim())).length;
+}
+
+/**
+ * state を更新し、Kairoの判断用の箇条書きを最低 minCount 行にする。組み合わせ行（〇〇＋〇〇）も箇条書き由来に揃える前提。
+ * @returns {boolean} 目標行数に達したか
+ */
+function ensureKairoJudgmentHasMinimumFactBullets(state, minCount = MIN_KAIRO_JUDGMENT_FACT_BULLETS) {
+  if (!state) return false;
+  enforceConfirmationBulletsCompletenessCore(state);
+  const count = () => sanitizeBulletPoints(buildStateFactsBullets(state, { forSummary: true }) || [], state).length;
+  if (count() >= minCount) return true;
+  let cur = (state.stateAboutBulletsCache || []).slice();
+  for (const line of buildFactsFromSlotAnswers(state) || []) {
+    if (cur.length >= 14) break;
+    const t = String(line).trim();
+    if (t && !cur.some((c) => String(c).trim() === t)) cur.push(line);
+  }
+  state.stateAboutBulletsCache = sanitizeBulletPoints(cur, state);
+  if (count() >= minCount) return true;
+  const userLines = collectUserUtterancesForBulletCoverage(state);
+  const heur = heuristicSupplementBulletsFromUserUtterances(state.stateAboutBulletsCache.slice(), userLines) || [];
+  for (const h of heur) {
+    if (count() >= minCount) break;
+    if (h) {
+      const line = /^・/.test(h) ? h : `・${h}`;
+      mergeMissingBulletLinesIntoStateAboutCache(state, state.stateAboutBulletsCache, [line]);
+    }
+  }
+  if (count() >= minCount) return true;
+  const mainSym = String(getSyncedMainSymptomDisplayLabel(state) || "").trim();
+  if (mainSym && count() < minCount) {
+    state.stateAboutBulletsCache = sanitizeBulletPoints(
+      [...(state.stateAboutBulletsCache || []), `・${mainSym}について主に話している`].slice(0, 14),
+      state
+    );
+  }
+  if (Number.isFinite(state?.lastPainScore) && count() < minCount) {
+    const ps = `・痛みは${state.lastPainScore} / 10`;
+    if (!state.stateAboutBulletsCache?.some((l) => /痛みは.*\/\s*10/.test(String(l)))) {
+      state.stateAboutBulletsCache = sanitizeBulletPoints(
+        [...(state.stateAboutBulletsCache || []), ps].slice(0, 14),
+        state
+      );
+    }
+  }
+  return count() >= minCount;
+}
+
 /**
  * 🤝 ブロックを `replaceStateAboutBlockOnly` で差し替えるべきか。
- * 空・箇条書きのみ（旧欠落）に加え、KAIRO_SPEC 上 🟢/🟡 の 🤝 に **事実箇条書き（・）を含めてはいけない**ため、
- * 本文に `・` 行が1行でも含まれる（箇条書き＋段落の混在を含む）なら常に正規化する。
+ * 空、**箇条書き（・）が1行もない**、または**箇条書きのみ**（一体段落・👉 が無い未完了形）のとき補正する。
+ * 事実箇条書き＋段落の**完成形**では置換しない（KAIRO_SPEC：箇条書き後に①②一体＋③👉）。
  */
 function handshakeStateBlockNeedsEmpathy(text) {
   if (!textIncludesHandshakeAboutHeader(text)) return false;
@@ -1060,8 +1125,9 @@ function handshakeStateBlockNeedsEmpathy(text) {
   const body = lines.slice(start + 1, end < 0 ? lines.length : end);
   const nonEmpty = body.map((l) => String(l || "").trim()).filter(Boolean);
   if (nonEmpty.length === 0) return true;
-  if (nonEmpty.some((t) => /^・/.test(t))) return true;
-  return false;
+  const hasAnyBullet = nonEmpty.some((t) => /^・/.test(t));
+  if (!hasAnyBullet) return true;
+  return nonEmpty.every((t) => /^・/.test(t));
 }
 
 /** 🔴 LLM の 📝 見出し（空白・「いまの状態を整理します」別表記のゆらぎを許容） */
@@ -1123,7 +1189,7 @@ function hasAllSummaryBlocks(text) {
     : normalized.includes("🟡")
       ? yellowHeaders
       : normalHeaders;
-  return required.every((header) => {
+  const baseOk = required.every((header) => {
     if (header === "🔴 ここまでの情報を整理します") {
       return /🔴\s*ここまでの情報を整理します/.test(normalized);
     }
@@ -1135,6 +1201,17 @@ function hasAllSummaryBlocks(text) {
     }
     return normalized.includes(header);
   });
+  if (!baseOk) return false;
+  if (
+    isHospitalFlow(normalized) ||
+    textIncludesMemoAboutHeader(normalized) ||
+    textIncludesHandshakeAboutHeader(normalized)
+  ) {
+    if (countBulletLinesInKairoJudgmentBlock(normalized) < MIN_KAIRO_JUDGMENT_FACT_BULLETS) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function getRequiredSummaryHeadersByLevel(level) {
@@ -3397,6 +3474,8 @@ function buildOutlookTriggers(state) {
   return triggers.slice(0, 2);
 }
 
+const OUTLOOK_BLOCK_CLOSING = "そのタイミングで、もう一度Kairoに聞いてください。";
+
 function buildOutlookBlock(state) {
   const openers = [
     "このタイプの症状は、時間の経過で変化することがあります。",
@@ -3408,8 +3487,71 @@ function buildOutlookBlock(state) {
     "⏳ 今後の見通し",
     opener,
     ...triggers.map((item) => `・${item}`),
-    "そのタイミングで、もう一度Kairoに聞いてください。",
+    OUTLOOK_BLOCK_CLOSING,
   ].join("\n");
+}
+
+/**
+ * まとめの「⏳ 今後の見通し」：主症状・整理事実に即した1文＋具体トリガー2件を LLM で生成。失敗時は null（呼び出し側で buildOutlookBlock に戻す）。
+ */
+async function buildOutlookBlockWithLlm(state) {
+  if (!process.env.OPENAI_API_KEY) return null;
+  const main = String(getSyncedMainSymptomDisplayLabel(state) || state?.primarySymptom || "症状").trim();
+  const category = state?.triageCategory || resolveQuestionCategoryFromState(state);
+  const level = state?.decisionLevel || finalizeRiskLevel(state);
+  const painScore = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
+  const bulletHints = (buildStateFactsBullets(state, { forSummary: true }) || []).slice(0, 10).join("\n");
+  const seedTriggers = buildOutlookTriggers(state);
+  for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
+    try {
+      const systemPrompt = [
+        "体調相談の「今後の見通し」用。病名の断定、恐怖、具体的な受診指示の新規付与は禁止。",
+        "出力はJSONのみ: {\"opener\":\"1文（50字以内目安。今の会話内容に即す）\",\"triggers\":[\"2行目の本文（先頭の・は不要）。『もし〜なら/〜したら』形式で、具体的な手がかりを1つ入れる\",\"3行目同様、1行目と別の観点\"]}",
+        "triggersは**ちょうど2件**。**痛み**だけに偏らない（会話に熱・のど・胃腸・呼吸・倦怠などがあればそちらに触れよ）。",
+        "汎用テンプレ二連（例: 明日の朝＋痛み悪化だけ）の丸かぶりは避け、**【今の整理】の事実**に合わせて言い換えよ。",
+        `主症状: 「${main}」。カテゴリ: ${category}。緊急度: ${level}。`,
+        painScore !== null ? `痛のスコア(参考): ${painScore}/10` : "",
+        `静的seed（コピー禁止・言い換え必須）: ${JSON.stringify(seedTriggers)}`,
+        bulletHints ? `【今の整理（参考）】\n${bulletHints}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: "{}" },
+        ],
+        temperature: 0.35 + attempt * 0.05,
+        max_tokens: 350,
+      });
+      const parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
+      const opener = String(parsed?.opener || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      const raw = Array.isArray(parsed?.triggers) ? parsed.triggers : [];
+      const triggers = raw
+        .map((t) =>
+          String(t || "")
+            .replace(/^[・\s]+/u, "")
+            .trim()
+        )
+        .filter(Boolean)
+        .slice(0, 2);
+      if (!opener || triggers.length < 2) continue;
+      const out = [
+        "⏳ 今後の見通し",
+        opener,
+        ...triggers.map((t) => `・${t}`),
+        OUTLOOK_BLOCK_CLOSING,
+      ].join("\n");
+      if (out.length < 45) continue;
+      return out;
+    } catch (_) {
+      /* retry */
+    }
+  }
+  return null;
 }
 
 function buildPlaceLines(candidates) {
@@ -3855,6 +3997,7 @@ function buildRedImmediateActionsBlock(state, historyText, research = null, refi
 
 async function ensureHospitalMemoBlock(text, state, historyText = "") {
   if (!text) return text;
+  ensureKairoJudgmentHasMinimumFactBullets(state, MIN_KAIRO_JUDGMENT_FACT_BULLETS);
   const factBullets = sanitizeBulletPoints(buildStateFactsBullets(state, { forSummary: true }) || [], state);
   const memoLines = [
     "📝 Kairoの判断",
@@ -4043,6 +4186,7 @@ async function replaceStateAboutBlockOnly(summaryText, state, historyText = "") 
   if (!summaryText || !state) return summaryText;
   const hasRedStateBlock = textIncludesMemoAboutHeader(summaryText);
   if (hasRedStateBlock) {
+    ensureKairoJudgmentHasMinimumFactBullets(state, MIN_KAIRO_JUDGMENT_FACT_BULLETS);
     const factBullets = sanitizeBulletPoints(buildStateFactsBullets(state, { forSummary: true }) || [], state);
     const memoLines = [
       "📝 Kairoの判断",
@@ -4060,8 +4204,8 @@ async function replaceStateAboutBlockOnly(summaryText, state, historyText = "") 
   if (!String(aboutLine || "").trim()) {
     aboutLine = buildGreenYellowStateAboutBlock(state, level);
   }
-  const decisionLine = buildStateDecisionLine(state, level);
-  const newBlock = ["🤝 Kairoの判断", aboutLine, ...(decisionLine ? [decisionLine] : [])].join("\n");
+  const body = buildGreenYellowHandshakeBlockBodySync(state, aboutLine);
+  const newBlock = ["🤝 Kairoの判断", body].join("\n");
   return replaceSummaryBlock(summaryText, "🤝 Kairoの判断", newBlock);
 }
 
@@ -4118,8 +4262,17 @@ function setSummaryPartialSectionsFromFinalText(state, text, level) {
   }
 }
 
-function ensureOutlookBlock(text, state) {
-  return replaceSummaryBlock(text, "⏳ 今後の見通し", buildOutlookBlock(state));
+async function ensureOutlookBlockAsync(text, state) {
+  let block = null;
+  try {
+    block = await buildOutlookBlockWithLlm(state);
+  } catch (_) {
+    /* 静的へ */
+  }
+  if (!block || !String(block).trim()) {
+    block = buildOutlookBlock(state);
+  }
+  return replaceSummaryBlock(text, "⏳ 今後の見通し", block);
 }
 
 /** 🌱/💬 最後にブロック本文を「。」の数で制限する（いずれも最大2文）。 */
@@ -4675,6 +4828,67 @@ async function refineDoActionsWithLLM(plan, state, level, options = {}) {
 }
 
 /**
+ * 今すぐやることモーダル「■やらないほうがいいこと」：静的 seed を起点に、主症状・箇条書き・ evidence に即した2件を LLM で生成
+ */
+async function refineDontActionsWithLLM(plan, state, seedDontActions, actionSection = "") {
+  const ctx = plan?.currentStateContext || buildCurrentStateContext(state, state?.historyTextForCare || "", String(actionSection || ""));
+  const category = state?.triageCategory || resolveQuestionCategoryFromState(state);
+  const level = state?.decisionLevel || "🟢";
+  const mainSym = String(ctx?.mainSymptomDisplay || ctx?.mainSymptom || "症状").trim();
+  const bulletHints = (buildStateFactsBullets(state, { forSummary: true }) || []).slice(0, 10).join("\n");
+
+  for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
+    try {
+      const systemPrompt = [
+        "一般向けセルフケアで、今の状態では避けた方がよい行動（やらないほうがいいこと）を2件。",
+        "出力はJSONのみ: {\"dont\":[{\"action\":\"20字以内の短い行動名\",\"reason\":\"1文（40～90字目安）\"}]}",
+        "action: 体言止め可。「〜は控える」「〜を避ける」など。同じテンプレの重複（例: 汎用の活動量だけ）禁止。",
+        `主症状: 「${mainSym}」。緊急度: ${level}。カテゴリ: ${category}。`,
+        "主症状の部位・性質（痛み/熱/のど/腹/皮膚/疲れ等）に即した2件にし、**どの症状でも同じ文に見える内容は禁止**",
+        "ユーザーが言っていない病名の断定、恐怖、医療行為の禁止は厳守。",
+        "検索要約（danger / observe / selfCare）に触れうる事があれば、忌避行動の理由に反映。",
+        bulletHints ? `【今の整理（参考）】\n${bulletHints}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      const userPayload = {
+        seedDont: (Array.isArray(seedDontActions) ? seedDontActions : []).slice(0, 2),
+        evidence: {
+          danger: (plan?.evidence?.danger || []).slice(0, 6),
+          observe: (plan?.evidence?.observe || []).slice(0, 6),
+          selfCare: (plan?.evidence?.selfCare || []).slice(0, 4),
+        },
+        actionSectionExcerpt: String(actionSection || "").slice(0, 2000),
+      };
+
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: JSON.stringify(userPayload) },
+        ],
+        temperature: 0.35 + attempt * 0.05,
+        max_tokens: 400,
+      });
+      const parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
+      const out = Array.isArray(parsed?.dont) ? parsed.dont : [];
+      const valid = out
+        .filter((d) => d && d.action && d.reason)
+        .map((d) => ({
+          action: toConciseActionTitle(String(d.action).trim()) || String(d.action).trim(),
+          reason: String(ensureReliableReason(String(d.reason).trim(), plan?.evidence || {})).trim(),
+        }))
+        .filter((d) => d.action && d.reason);
+      if (valid.length >= 2) return valid.slice(0, 2);
+    } catch (_) {
+      /* retry */
+    }
+  }
+  return (Array.isArray(seedDontActions) ? seedDontActions : []).filter((d) => d && d.action && d.reason).slice(0, 2);
+}
+
+/**
  * モーダル・本文共通：doActions を plan から構築する。
  * @param {object} plan - buildImmediateActionHypothesisPlan の戻り値
  * @param {object} state - conversationState
@@ -5071,8 +5285,33 @@ function sanitizeImmediateActions(actions = [], fallbackAction = null) {
   return fallbackAction ? [fallbackAction] : [];
 }
 
+/**
+ * `context.location` が PAIN/INFECTION 等のカテゴリ名になりがちで normalize が頭/腹/喉に当たらないため、
+ * mainSymptom・表示ラベル・症状語から推論する（「やらないこと」が常に汎用テンプレに落ちるのを防ぐ）
+ */
+function inferDontActionTopicFromContext(context = {}) {
+  const bundle = [
+    context?.location,
+    context?.mainSymptom,
+    context?.mainSymptomDisplay,
+    Array.isArray(context?.symptoms) ? context.symptoms.join(" ") : "",
+    typeof context?.summaryFacts === "string" ? context.summaryFacts : Array.isArray(context?.summaryFacts) ? context.summaryFacts.join(" ") : "",
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, "");
+  if (!bundle) return "";
+  if (/(腹|胃|腸|下痢|便秘|便|お腹|みぞおち|吐き気|嘔吐)/.test(bundle)) return "お腹";
+  if (/(頭|こめかみ|片頭|後頭|ずきん|脳|ズキ|ずき|頭痛)/.test(bundle)) return "頭";
+  if (/(喉|のど|咽|扁桃|上気道|咳|せき|痰|鼻水|鼻づまり|風邪|かぜ)/.test(bundle)) return "喉";
+  if (/(皮膚|唇|かゆ|発疹|水ぶくれ|湿疹|蕁麻|紅潮)/.test(bundle)) return "皮膚";
+  if (/(肩|首|眠|疲労|だる|倦怠|寝不足)/.test(bundle)) return "疲労";
+  return "";
+}
+
 function buildDontActionsFromContext(context = {}, evidence = {}) {
-  const topic = normalizeContextLocation(context?.location || "");
+  const topic =
+    inferDontActionTopicFromContext(context) || normalizeContextLocation(context?.location || "");
   const base = [];
   if (topic === "頭") {
     base.push({
@@ -5101,10 +5340,32 @@ function buildDontActionsFromContext(context = {}, evidence = {}) {
       action: "冷たい飲み物や刺激物を連続して摂る",
       reason: "局所刺激が増えると、経過が読みづらくなる可能性があります。",
     });
+  } else if (topic === "皮膚") {
+    base.push({
+      action: "患部を掻きむしる・強くこする",
+      reason: "刺激が重なると、局所の状態変化を追いづらくなります。",
+    });
+    base.push({
+      action: "判別できない市販薬を多く併用する",
+      reason: "負担が重なると、体調の要因分けが難しくなることがあります。",
+    });
+  } else if (topic === "疲労") {
+    base.push({
+      action: "寝る時間をさらに削る",
+      reason: "回復の足がかりが減ると、改善の見極めがしづらくなります。",
+    });
+    base.push({
+      action: "無理に激しい運動を取り入れる",
+      reason: "急な負荷は、体調の波を読みづらくすることがあります。",
+    });
   } else {
     base.push({
       action: "つらい状態のまま無理に活動量を上げる",
       reason: "負荷が増えると、改善傾向の判断がしづらくなることがあります。",
+    });
+    base.push({
+      action: "体調のメモを取らずに我慢を続ける",
+      reason: "推移が分かりづらいと、次の判断のタイミングを逃しやすいです。",
     });
   }
 
@@ -5200,18 +5461,22 @@ function renderActionDetailMessage(cushion, doActions = [], dontActions = [], si
 async function buildConcreteImmediateActionsDetails(state, actionSection = "") {
   const historyText = state?.historyTextForCare || "";
   const plan = await buildImmediateActionHypothesisPlan(state, historyText, actionSection || "");
-  const dontActions = buildDontActionsFromContext(plan?.currentStateContext || {}, plan?.evidence || {});
+  const ctxForDont = plan?.currentStateContext || {};
+  const seedDont = buildDontActionsFromContext(ctxForDont, plan?.evidence || {});
   const cushion = buildYellowPsychologicalCushionLine();
 
   const appendSingaporeRest = shouldAppendSingaporeRestSection(state);
-  // refine と Singapore は互いに独立のため並列化し、モーダル応答の待ち時間を短縮する
-  const [refinedActions, singaporeRestLines] = await Promise.all([
+  // refine do / refine dont / Singapore を並列化
+  const [refinedActions, refinedDont, singaporeRestLines] = await Promise.all([
     refineDoActionsWithLLM(plan, state, state?.decisionLevel || "🟢", { forSummary: false }),
+    refineDontActionsWithLLM(plan, state, seedDont, actionSection),
     appendSingaporeRest ? generateSingaporeRestSection() : Promise.resolve(null),
   ]);
   const ensuredDo = buildDoActionsFromPlan(plan, state, state?.decisionLevel || "🟢", {
     actionsOverride: refinedActions.length > 0 ? refinedActions : undefined,
   });
+  const dontActions =
+    Array.isArray(refinedDont) && refinedDont.length > 0 ? refinedDont : seedDont;
   return {
     message: renderActionDetailMessage(cushion, ensuredDo, dontActions, singaporeRestLines),
     query: plan?.searchQuery || "",
@@ -7749,14 +8014,29 @@ function buildPainQualityOptions(category) {
   return ["チクチクする", "ズキズキする", "重だるい感じ"];
 }
 
-/** 喉・のどが主症状かどうか（喉が痛い、のどの違和感など） */
-function isThroatMainSymptom(text) {
+/**
+ * 喉が痛い系を INFECTION トリアージに乗せる（`isThroatMainSymptom` より広く、「喉に違和感」・嚥下痛・上気道/扁桃 等を含む）
+ */
+function isThroatInfectionTriageText(text) {
   if (!text || typeof text !== "string") return false;
   const n = String(text).replace(/\s+/g, "");
-  return (
-    /(喉|のど)(が|の)?(痛|違和|いたい|痛い|痛む|炎症|腫れ|腫れた|赤い|乾燥|カラカラ|イガイガ)/.test(n) ||
-    /(咽頭痛|咽頭|扁桃|のどの痛み|喉の痛み|のどの違和感|喉の違和感|喉がひりひり|のどがひりひり|喉がゴロゴロ|のどがゴロゴロ)/.test(n)
-  );
+  if (!n) return false;
+  if (
+    /(喉|のど)(が|の|は|に|も)?(痛|違和|いたい|痛い|痛む|刺す|炎症|腫れ|腫れた|赤い|乾燥|カラカラ|イガイガ|しみる|かれ)/.test(n) ||
+    /(咽頭痛|咽頭|扁桃|上気道|のどの痛み|喉の痛み|のどの違和感|喉の違和感|喉がひりひり|のどがひりひり|喉がゴロゴロ|のどがゴロゴロ)/.test(n)
+  ) {
+    return true;
+  }
+  if (/(飲み込|嚥下).{0,12}(痛|困難|しにく|つかえ|違和|でき)|嚥下痛/.test(n)) return true;
+  if (/(喉|のど)(に|が|のは|は).{0,8}(痛|違和|不快感|しゃべ|声|いが|イガ|腫|赤|熱|かす)/.test(n)) return true;
+  if (/(喉|のど).{0,5}(痛|腫|赤|いが|刺す|かす|壊死|違和|しゃべり|声が出|焼け)/.test(n)) return true;
+  if (/(ノド|のーど|nodo|throat|sorethroat|sore[\s-]*throat|pharyng|tonsill)/i.test(n)) return true;
+  return false;
+}
+
+/** 喉・のどが主症状かどうか（喉が痛い、のどの違和感など） */
+function isThroatMainSymptom(text) {
+  return isThroatInfectionTriageText(text);
 }
 
 /** triage が INFECTION かつ主訴・履歴・スロットから喉主症状と判定できるとき */
@@ -7788,13 +8068,14 @@ function isThroatExplicitWorseningTrend(state) {
 function detectQuestionCategory4(text) {
   const normalized = (text || "").replace(/\s+/g, "");
   if (/(腹痛|お腹|下痢|吐き気|胃|嘔吐|便)/.test(normalized)) return "GI";
+  if (isThroatInfectionTriageText(normalized)) return "INFECTION";
   const infectionCue = /(熱|発熱|咳|せき|喉|のど|寒気|風邪|鼻水|鼻づまり)/.test(normalized);
-  if (
-    /(肩こり|首こり|首がこる|疲れ|疲労|だるさ|倦怠|睡眠不足|眠れない|寝不足|眠気|体が重い|慢性的)/.test(
+  // だるい: INFECTION 手がかり（風邪・微熱等）があるときは後段 INFECTION へ。だる[さくんが] は活用形（だるくて・だるさ等）で「だるい」自体は含まない
+  const tiredDirect =
+    /(肩こり|首こり|首がこる|疲れ|疲労|だる[さくんが]|倦怠|睡眠不足|眠れない|寝不足|眠気|体が重い|慢性的|脱力|ぐったり|無気力)/.test(
       normalized
-    ) ||
-    (/(だるい|倦怠)/.test(normalized) && !infectionCue)
-  ) {
+    ) || (/(だるい|倦怠)/.test(normalized) && !infectionCue);
+  if (tiredDirect) {
     return "TIRED";
   }
   if (/(熱|発熱|だるい|咳|せき|喉|のど|寒気|風邪)/.test(normalized)) return "INFECTION";
@@ -7804,12 +8085,26 @@ function detectQuestionCategory4(text) {
 }
 
 function resolveLockedQuestionCategory(state, historyText = "") {
+  const throatTriageText = [
+    historyText,
+    state?.primarySymptom || "",
+    state?.historyTextForCare || "",
+    state?.slotAnswers?.pain_score || "",
+    state?.slotAnswers?.worsening || "",
+    state?.slotAnswers?.duration || "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  if (isThroatInfectionTriageText(throatTriageText)) {
+    state.triageCategory = "INFECTION";
+    return "INFECTION";
+  }
   if (state?.triageCategory) return state.triageCategory;
   const fromState = resolveQuestionCategoryFromState(state);
   if (fromState === "INFECTION" && state?.slotFilled?.associated_symptoms) {
     const as = String(state?.slotAnswers?.associated_symptoms || "");
     const hasFeverSignal = textImpliesFeverForInfectionTriage(as);
-    const hasThroatInPrior = isThroatMainSymptom(
+    const hasThroatInPrior = isThroatInfectionTriageText(
       [
         state?.primarySymptom || "",
         state?.slotAnswers?.pain_score || "",
@@ -7841,11 +8136,6 @@ function resolveLockedQuestionCategory(state, historyText = "") {
     return fromState;
   }
   const detected = detectQuestionCategory4(historyText);
-  // 喉が痛いなど、喉的なものが主症状の時は必ず初めからずっとINFECTION系にする
-  if (isThroatMainSymptom(historyText)) {
-    state.triageCategory = "INFECTION";
-    return "INFECTION";
-  }
   if (detected === "TIRED") {
     state.triageCategory = "TIRED";
     return "TIRED";
@@ -8650,9 +8940,9 @@ function sanitizeBulletPoints(bullets, state) {
   const bySlot = dedupeBulletsOneLinePerInferenceSlot(byDurAnchor);
   const bySubsume = dedupeBulletsBySubsumption(bySlot);
   const byPrefixComplete = dedupeBulletsShorterPrefixWhenLongerCompletesThought(bySubsume);
-  const bySoftIncl = dedupeStateAboutBulletsBySoftInclusion(byPrefixComplete);
-  const byFourRun = dedupeBulletsByFourCharRunOverlap(bySoftIncl);
-  const deduped = dedupeBulletsSequentialSimilarity(byFourRun);
+      const bySoftIncl = dedupeStateAboutBulletsBySoftInclusion(byPrefixComplete);
+      const byRunOverlap3 = dedupeBulletsByThreeCharRunOverlapRespectingPolarity(bySoftIncl);
+      const deduped = dedupeBulletsSequentialSimilarity(byRunOverlap3);
   const dedupedAgg = dedupeBulletLinesByAggressiveNormalizedEquality(deduped);
   return state ? stripMainSymptomOnlyBullets(state, dedupedAgg) : dedupedAgg;
 }
@@ -9096,6 +9386,56 @@ function normalizeBulletKeyForDedupe(s) {
   return normalizeBulletLineForAggressiveDedupe(String(s || "").replace(/^・\s*/, "").trim());
 }
 
+/**
+ * 正規化文字列 a,b で、**minRun 字以上**の連続列が a にも b にも**部分列として**存在するか（箇条書き・「〇〇＋〇〇」重複用）。
+ */
+function hasMinConsecutiveRunOverlap(a, b, minRun = 3) {
+  const na = String(a || "");
+  const nb = String(b || "");
+  if (na.length < minRun || nb.length < minRun) return false;
+  for (let k = 0; k <= na.length - minRun; k++) {
+    if (nb.includes(na.slice(k, k + minRun))) return true;
+  }
+  for (let k = 0; k <= nb.length - minRun; k++) {
+    if (na.includes(nb.slice(k, k + minRun))) return true;
+  }
+  return false;
+}
+
+/**
+ * 3文字連続重複、または片方の正規化が他方に**全包含**されるとき、**長い行を除き短い行を残す**（KAIRO_SPEC：箇条書きと組み合わせの両方で統一）。
+ * @param {(s: string) => string} [getNorm] - 比較用。箇条書きは ・ 除去＋正規化、短語は正規化のみなど。
+ */
+function dedupeLinesKeepShorterOnOverlap(rawLines, getNorm) {
+  if (!Array.isArray(rawLines) || rawLines.length <= 1) return rawLines || [];
+  const normfn =
+    getNorm || ((s) => normalizeBulletKeyForDedupe(String(s || "").replace(/^・\s*/, "")));
+  const lines = rawLines.map((b) => String(b || "").trim()).filter(Boolean);
+  const toRemove = new Set();
+  for (let i = 0; i < lines.length; i++) {
+    for (let j = i + 1; j < lines.length; j++) {
+      if (toRemove.has(i) || toRemove.has(j)) continue;
+      const lineI = lines[i].replace(/^・\s*/, "").trim();
+      const lineJ = lines[j].replace(/^・\s*/, "").trim();
+      const ni = normfn(lines[i]);
+      const nj = normfn(lines[j]);
+      if (ni.length < 2 && nj.length < 2) continue;
+      const full = (A, B) => A.length > B.length && A.includes(B) && B.length >= 2;
+      let shouldMerge = false;
+      if (full(ni, nj) || full(nj, ni)) {
+        shouldMerge = true;
+      } else if (ni.length >= 3 && nj.length >= 3 && hasMinConsecutiveRunOverlap(ni, nj, 3)) {
+        shouldMerge = true;
+      }
+      if (!shouldMerge) continue;
+      if (lineI.length < lineJ.length) toRemove.add(j);
+      else if (lineJ.length < lineI.length) toRemove.add(i);
+      else toRemove.add(j);
+    }
+  }
+  return lines.filter((_, idx) => !toRemove.has(idx));
+}
+
 /** スロット推定が別キーになっても、正規化後に同一なら1行にまとめる */
 function dedupeBulletLinesByAggressiveNormalizedEquality(bullets) {
   if (!Array.isArray(bullets) || bullets.length <= 1) return bullets || [];
@@ -9123,43 +9463,29 @@ function bulletsAreSimilar(a, b) {
   if (na === nb) return true;
   const minSub = 6;
   if (na.length >= minSub && nb.length >= minSub && (na.includes(nb) || nb.includes(na))) return true;
+  if (na.length >= 3 && nb.length >= 3 && hasMinConsecutiveRunOverlap(na, nb, 3)) return true;
   return false;
 }
 
 /**
- * 一方の行が他方に含まれる（同じ文・連語の重複）とき、長い行を落とし短い行を残す。
+ * 一方が他方に**全包含**、または3文字連続**部分列**重複（正規化後）なら、**長い行を除き短い行を残す**。
  */
 function dedupeBulletsBySubsumption(bullets) {
   if (!Array.isArray(bullets) || bullets.length <= 1) return bullets || [];
-  const norm = (x) => normalizeBulletKeyForDedupe(x);
-  const minCore = 4;
-  const lines = [...new Set(bullets.map((b) => String(b || "").trim()).filter(Boolean))];
   const seenNorm = new Set();
   const uniq = [];
-  for (const b of lines) {
-    const n = norm(b);
+  for (const b of [...new Set(bullets.map((x) => String(x || "").trim()).filter(Boolean))]) {
+    const n = normalizeBulletKeyForDedupe(b);
     if (!n || seenNorm.has(n)) continue;
     seenNorm.add(n);
     uniq.push(b);
   }
-  const toRemove = new Set();
-  for (let i = 0; i < uniq.length; i++) {
-    for (let j = 0; j < uniq.length; j++) {
-      if (i === j) continue;
-      const ni = norm(uniq[i]);
-      const nj = norm(uniq[j]);
-      if (ni.length < minCore || nj.length < minCore) continue;
-      if (ni.length > nj.length && ni.includes(nj)) {
-        toRemove.add(uniq[i]);
-      }
-    }
-  }
-  return uniq.filter((b) => !toRemove.has(b));
+  return dedupeLinesKeepShorterOnOverlap(uniq, (s) => normalizeBulletKeyForDedupe(s));
 }
 
 /**
  * 「冷え」と「冷えの可能性」、「お腹が痛くて」と「お腹が痛くて 4日間も続いている」のように、
- * 短い行が長い行の先頭と一致し長い行に追加情報があるときは**短い行を削除**（minCore で落ちる重複向け）。
+ * 短い行が長い行の先頭と一致し長い行に追加情報があるときは**長い行を削除**（同趣旨重複を短い行に圧縮。KAIRO_SPEC と `dedupeLinesKeepShorterOnOverlap` 整合）。
  */
 function dedupeBulletsShorterPrefixWhenLongerCompletesThought(bullets) {
   if (!Array.isArray(bullets) || bullets.length <= 1) return bullets || [];
@@ -9176,14 +9502,14 @@ function dedupeBulletsShorterPrefixWhenLongerCompletesThought(bullets) {
       const ai = innerOf(lines[i]);
       const aj = innerOf(lines[j]);
       if (ai.length < 2 || aj.length < 2) continue;
-      const [shorter, longer, shortIdx] =
-        ai.length < aj.length ? [ai, aj, i] : aj.length < ai.length ? [aj, ai, j] : [null, null, -1];
-      if (!shorter || !longer || shortIdx < 0) continue;
+      const [shorter, longer, longIdx] =
+        ai.length < aj.length ? [ai, aj, j] : aj.length < ai.length ? [aj, ai, i] : [null, null, -1];
+      if (!shorter || !longer || longIdx < 0) continue;
       if (shorter.length > 36) continue;
       if (longer.length <= shorter.length) continue;
       if (!longer.startsWith(shorter)) continue;
       if (!longerAddsInfo(longer)) continue;
-      removeIdx.add(shortIdx);
+      removeIdx.add(longIdx);
     }
   }
   return lines.filter((_, idx) => !removeIdx.has(idx));
@@ -9228,7 +9554,7 @@ function dedupeBulletsKeepShortestInGroup(bullets, testFn) {
 }
 
 /**
- * 正規化後に一方が他方に含まれる場合は**長い行を落とし短い行を残す**（「異常に熱いことが多い」vs「体が熱い」等）。
+ * 正規化（soften）後の**包含**もしくは**3文字連続**重複で、**長い行を除き短い行を残す**（「体が熱い」vs「異常に熱いことが多い」等）。
  * 否定と肯定が食い違う行はマージしない。
  */
 function dedupeStateAboutBulletsBySoftInclusion(bullets) {
@@ -9257,27 +9583,36 @@ function dedupeStateAboutBulletsBySoftInclusion(bullets) {
       const si = soften(ai);
       const sj = soften(aj);
       if (si.length < minCore || sj.length < minCore) continue;
-      if (si.length <= sj.length && sj.includes(si)) removeIdx.add(j);
-      if (sj.length <= si.length && si.includes(sj)) removeIdx.add(i);
+      if (si.length < sj.length && sj.includes(si)) {
+        removeIdx.add(j);
+      } else if (sj.length < si.length && si.includes(sj)) {
+        removeIdx.add(i);
+      } else if (si.length >= 3 && sj.length >= 3 && hasMinConsecutiveRunOverlap(si, sj, 3)) {
+        if (ai.length < aj.length) removeIdx.add(j);
+        else if (aj.length < ai.length) removeIdx.add(i);
+        else if (i < j) removeIdx.add(j);
+      }
     }
   }
   return lines.filter((_, idx) => !removeIdx.has(idx));
 }
 
 /**
- * 正規化後の文字列で **同一の4文字連続** を共有する行のペアは、**長い方を削除**（短い方を残す）。
- * 「悪化している可能性がある」と「経過の様子は悪化してる」等の重複向け。肯定／否定が食い違う行は対象外。
+ * 正規化後、**3文字連続**を共有する行のペアは、**長い行を除き短い行を残す**（4文字連続・長文削除方針から変更）。
+ * 肯定／否定が食い違う行は対象外。
  */
-function dedupeBulletsByFourCharRunOverlap(bullets) {
+function dedupeBulletsByThreeCharRunOverlapRespectingPolarity(bullets) {
   if (!Array.isArray(bullets) || bullets.length <= 1) return bullets || [];
   const lines = bullets.map((b) => String(b || "").trim()).filter(Boolean);
-  const norm = (x) => normalizeBulletKeyForDedupe(x);
   const polBucket = (inner) => {
     const s = String(inner || "");
-    if (/ない|なし|見られない|出ていない|しません|しなかった|ないです/.test(s) && !/(可能性|ことが)/.test(s)) return "neg";
+    if (/ない|なし|見られない|出ていない|しません|しなかった|ないです/.test(s) && !/(可能性|ことが)/.test(s)) {
+      return "neg";
+    }
     if (/ある|続い|見られる|出ている|多い|続く|可能性がある|してる/.test(s)) return "pos";
     return "neu";
   };
+  const norm = (x) => normalizeBulletKeyForDedupe(x);
   const toRemoveIdx = new Set();
   for (let i = 0; i < lines.length; i++) {
     for (let j = i + 1; j < lines.length; j++) {
@@ -9289,22 +9624,11 @@ function dedupeBulletsByFourCharRunOverlap(bullets) {
       if (pi !== pj && pi !== "neu" && pj !== "neu") continue;
       const ni = norm(ai);
       const nj = norm(aj);
-      if (ni.length < 4 || nj.length < 4) continue;
-      const shorter = ni.length <= nj.length ? ni : nj;
-      const longer = ni.length > nj.length ? ni : nj;
-      let shareFour = false;
-      for (let k = 0; k <= shorter.length - 4; k++) {
-        const run = shorter.slice(k, k + 4);
-        if (longer.includes(run)) {
-          shareFour = true;
-          break;
-        }
-      }
-      if (!shareFour) continue;
-      const leni = ai.length;
-      const lenj = aj.length;
-      if (leni > lenj) toRemoveIdx.add(i);
-      else if (lenj > leni) toRemoveIdx.add(j);
+      if (ni.length < 3 || nj.length < 3) continue;
+      if (!hasMinConsecutiveRunOverlap(ni, nj, 3)) continue;
+      if (ai.length < aj.length) toRemoveIdx.add(j);
+      else if (aj.length < ai.length) toRemoveIdx.add(i);
+      else toRemoveIdx.add(j);
     }
   }
   return lines.filter((_, idx) => !toRemoveIdx.has(idx));
@@ -10138,7 +10462,8 @@ async function polishConfirmationBulletsWithLlm(state) {
       "【禁止・サボり対策】複数行を1行に寄せて曖昧な要約にする・行数を不当に減らすこと。根拠テキストのスロット別の事実は、可能な限り別行で区別して残す。",
       "【必須】同じ質問への回答に複数の事実（例：読点や中黒で並んだ内容）があるときは、まとめずに別々の「・」行に分ける。",
       "【禁止】「不調」「症状がある」「状態が気になる」など具体性を失う言い換えだけに置き換えること。元の箇条書きより情報量を落としてはいけない。",
-      "【形式】各行は「・」で始まる1行。行数は入力と同程度（最大14行）。完全に同一趣旨の重複のみ統合してよい。",
+      "【重複禁止】3文字同連続に相当する**同趣旨**の行を複数出さない。近い言い回し（包含・重なり）があるときは**短い1行**に圧し、**冗長に長い行は捨てる**（事実の数は落とさないが、同じ事実の二重表現は出さない）。",
+      "【形式】各行は「・」で始まる1行。行数は入力と同程度（最大14行）。行の統合は上記の**同趣旨重複の除去**に限る。",
       "【必須】主症状の言い換えだけの行は出さない（痛み・部位の繰り返しは省き、経過・付随・きっかけなどの情報だけを書く）。",
       "【必須】各行の文末を途中で切らない（語の半端・「続いてい」で終わる等は禁止）。",
       '厳密なJSON: {"bullets":["・...","・...",...]} のみ。説明文は禁止。',
@@ -10613,7 +10938,7 @@ async function shortenComboLabelsForCombinationLineWithLlm(state, rawParts) {
       "【きっかけ】「〜の可能性」「がきっかけの可能性」などの**定型語尾は短語に含めない**。**ユーザーが述べた負荷・要因の語だけ**を3〜7文字程度の名詞句にする（例：寝不足がきっかけの可能性→寝不足、画面を長時間見た→画面見過ぎ）。新語の捏造は禁止。",
       `【文字数】各ラベルは**目安 ${KAIRO_COMBO_SHORT_LABEL_TARGET_MIN_CHARS}〜${KAIRO_COMBO_SHORT_LABEL_TARGET_MAX_CHARS}文字**（意味が通る最短の名詞句）。1〜2文字だけの出力は避ける。絶対上限は ${KAIRO_COMBO_SHORT_LABEL_MAX_CHARS} 文字まで（超過禁止）。`,
       "【禁止】新しい症状・病名推測・入力にない事実の追加。",
-      "【重複禁止】まとめ箇条書きに**すでに書いた事実**（体温・下痢・痛みの程度など）を、組み合わせ行で**言い換えて繰り返さない**。候補同士が同じ事実を指すなら**短い名詞句に寄せる**（新事実の推測はしない）。",
+      "【重複禁止】まとめ箇条書きに**すでに書いた事実**を、組み合わせ行で**言い換えて繰り返さない**。**labels 内で3文字以上の同一部分列に相当する同趣旨が複数ある場合は1つにまとめ、**より短く区別可能な1語**を残し、冗長に長い表現は捨てる**（候補同士が同じ事実を指すなら重複を1語に。新事実の推測はしない）。",
       `【形式】厳密なJSON: {"labels":["..."]} のみ。labels の要素数は必ず ${items.length} 個（上の候補と同じ順序）。`,
     ].join("\n");
     const userContent = [
@@ -10994,137 +11319,68 @@ function gatherRedHighComboCandidatesFromBullets(state, tier = "high") {
 }
 
 /**
- * 🟢🟡「① 状態の定義」：スロット候補をマージ（**高・中・低スコア不問**で回答のある候補を含む）。箇条書き＋スロット、きっかけ・痛み方は逆優先度で後回し（KAIRO_SPEC）。
+ * 🟢🟡「① 状態の定義」：組み合わせ短語は**まとめ箇条書き**由来のみ。スロット生値直列・`extractFeatures(履歴+…)` は使わない（KAIRO_SPEC・🔴と同方針）。
  */
 function collectGreenYellowLowMediumCombinationParts(state) {
-  const candidates = [];
-  const bulletCands = gatherGreenYellowComboCandidatesFromBullets(state);
-  if (bulletCands.length) candidates.push(...bulletCands);
-
+  ensureKairoJudgmentHasMinimumFactBullets(state, MIN_KAIRO_JUDGMENT_FACT_BULLETS);
   const main = compactMainSymptomNounForRed(state);
   const isMainLabel = (t) => main && main !== "症状" && String(t || "").trim() === main;
-
-  const pain = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
-  if (comboSlotAllowsGreenYellowCombo(state, "pain_score") && pain !== null && main && main !== "症状") {
-    let p1;
-    if (pain <= 3) p1 = `軽い${main}`;
-    else if (pain <= 6) p1 = `中程度の${main}`;
-    else if (pain <= 8) p1 = `やや強い${main}`;
-    else p1 = `強い${main}`;
-    candidates.push({ label: p1, inv: 84 });
+  const seenLab = new Set();
+  const candidates = [];
+  const pushC = (c) => {
+    const lab = String(c?.label || "").trim();
+    if (!lab || isMainLabel(lab) || seenLab.has(lab)) return;
+    seenLab.add(lab);
+    candidates.push(c);
+  };
+  for (const c of [
+    ...gatherGreenYellowComboCandidatesFromBullets(state),
+    ...supplementGreenYellowComboCandidatesFromAllBulletLines(state),
+  ]) {
+    pushC(c);
   }
-
-  const dailyRaw = String(
-    state?.slotAnswers?.daily_impact || getSlotStatusValue(state, "impact", state?.slotAnswers?.daily_impact || "") || ""
-  ).trim();
-  if (comboSlotAllowsGreenYellowCombo(state, "daily_impact")) {
-    if (/38|高熱|39|40/.test(dailyRaw)) candidates.push({ label: "高めの体温", inv: 87 });
-    else if (/37|微熱/.test(dailyRaw)) candidates.push({ label: "微熱", inv: 87 });
-    else if (/平熱|36/.test(dailyRaw)) candidates.push({ label: "平熱に近い体温", inv: 86 });
-    else if (dailyRaw && !/^(ない|なし|特に)/.test(dailyRaw)) {
-      const polished = polishBulletColloquialSentence(dailyRaw.replace(/です$|ます$/, ""));
-      if (polished && polished.length < 28) candidates.push({ label: polished, inv: 86 });
-    }
-  }
-
-  const trendRaw = String(
-    getSlotStatusValue(state, "worsening_trend", state?.slotAnswers?.worsening_trend || "") || ""
-  ).trim();
-  if (comboSlotAllowsGreenYellowCombo(state, "worsening_trend") && trendRaw) {
-    const tl = buildRedComboLabelFromWorseningTrendSlotAnswer(state);
-    if (tl) candidates.push({ label: tl, inv: 87 });
-  }
-
-  if (comboSlotAllowsGreenYellowComboForPainManner(state)) {
-    const pl = buildRedComboLabelFromWorseningSlotAnswer(state);
-    if (pl) candidates.push({ label: pl, inv: 96 });
-  }
-
-  if (comboSlotAllowsGreenYellowCombo(state, "duration")) {
-    const dur = String(getSlotStatusValue(state, "duration", state?.slotAnswers?.duration || "") || "").trim();
-    if (!shouldBlockRedByDurationGuards(state)) {
-      if (dur && /(さっき|数時間前|数十分|今さっき)/.test(dur)) {
-        const dlab = buildRedComboLabelFromDurationSlotAnswer(state) || "発症から時間が短い";
-        candidates.push({ label: dlab, inv: 85 });
-      } else if (dur && /(日|週|昨日|一昨日|一日以上)/.test(dur)) {
-        const dlab =
-          buildRedComboLabelFromDurationSlotAnswer(state) ||
-          shrinkDurationLineForComboShortLabel(dur) ||
-          "症状が続いている";
-        candidates.push({ label: dlab, inv: 85 });
-      }
-    }
-  }
-  if (shouldBlockRedByDurationGuards(state)) {
-    const sp = buildDurationTemporaryPossibilityLabelForRedGuard(state);
-    if (sp && !candidates.some((c) => /一時的な可能性/.test(String(c.label || "")))) {
-      candidates.push({ label: sp, inv: 92 });
-    }
-  }
-
-  if (comboSlotAllowsGreenYellowCombo(state, "cause_category")) {
-    const cs = buildCauseComboShortLabelSync(state);
-    if (cs) candidates.push({ label: cs, inv: COMBO_INV_PRI_CAUSE });
-  }
-
-  if (comboSlotAllowsGreenYellowCombo(state, "associated_symptoms") && !isDisplayOnlyNoOtherSymptomsSlotCondition(state)) {
-    const assocRaw = String(
-      state?.slotAnswers?.associated_symptoms || getSlotStatusValue(state, "associated", "") || ""
-    ).trim();
-    if (assocRaw && !/^(ない|なし|特にない|これ以外は特にない|特に変化はない)/i.test(assocRaw)) {
-      const p = polishBulletColloquialSentence(assocRaw.replace(/です$|ます$/, ""));
-      if (p) candidates.push({ label: p, inv: 86 });
-    }
-  }
-
   const comboMaxParts = shouldBlockRedByDurationGuards(state) ? 2 : 3;
   const applyRedGuardComboFilter = (arr) => filterComboCandidatesForRedGuardOnset(arr, state);
   const finish = (arr) => applyGreenYellowComboUserWordGuards(state, arr);
-
   let picked = finish(
     pickGreenYellowComboPartsReservingPainManner(applyRedGuardComboFilter(candidates), state, 2, comboMaxParts)
   );
   if (picked.length >= 2) return picked;
-
-  const parts = [];
-  const seen = new Set();
-  const push = (s) => {
-    const t = String(s || "").trim();
-    if (!t || seen.has(t)) return;
-    seen.add(t);
-    parts.push(t);
-  };
-  const combinedText = [
-    state?.historyTextForCare || "",
-    state?.slotAnswers?.associated_symptoms || "",
-    (buildStateFactsBullets(state, { forSummary: true }) || []).join(" "),
-  ].join(" ");
-  try {
-    const feats = extractFeatures(combinedText);
-    for (const a of feats.associatedSymptoms || []) {
-      if (!isMainLabel(a)) push(a);
-      if (parts.length >= 3) break;
+  // 箇条書きから直出し（最終・重複除き）
+  const raw = state?.stateAboutBulletsCache;
+  if (Array.isArray(raw) && raw.length >= 1) {
+    const hasPainHead = raw[0] && /^痛みは\s*\d+\s*\/\s*10/.test(stripBulletLead(raw[0]));
+    const mainIdx = hasPainHead ? 1 : 0;
+    const directCands = [];
+    for (let i = 0; i < raw.length; i++) {
+      if (i === mainIdx) continue;
+      const t =
+        shortenComboLabelFromBulletText(stripBulletLead(raw[i])) ||
+        finalizeComboLabelForCombinationLine(stripBulletLead(raw[i]));
+      if (t && !isMainLabel(t) && !directCands.some((d) => d.label === t)) {
+        directCands.push({ label: t, inv: 60 - i });
+      }
     }
-  } catch (_) {
-    /* ignore */
+    picked = finish(
+      pickGreenYellowComboPartsReservingPainManner(
+        applyRedGuardComboFilter(directCands),
+        state,
+        2,
+        comboMaxParts
+      )
+    );
   }
-  if (parts.length) {
-    const extra = parts.map((p) => ({ label: shortenComboLabelFromBulletText(p) || p, inv: 72 }));
-    candidates.push(...extra);
-  }
-  picked = finish(
-    pickGreenYellowComboPartsReservingPainManner(applyRedGuardComboFilter(candidates), state, 2, comboMaxParts)
-  );
   if (picked.length >= 2) return picked;
-
-  const mainSafe = main && main !== "症状" ? main : "症状の出方";
-  candidates.push(
-    { label: `${mainSafe}に関する所見は限定的`, inv: 55 },
-    { label: "急いで受診が必要な所見は見えにくい", inv: 54 },
-    { label: "付随の所見は限定的", inv: 53 }
-  );
   return finish(
-    pickGreenYellowComboPartsReservingPainManner(applyRedGuardComboFilter(candidates), state, 2, comboMaxParts)
+    pickGreenYellowComboPartsReservingPainManner(
+      applyRedGuardComboFilter([
+        { label: "つらさが強い", inv: 50 },
+        { label: "注意が必要な兆候", inv: 49 },
+      ]),
+      state,
+      2,
+      comboMaxParts
+    )
   );
 }
 
@@ -11174,25 +11430,11 @@ function getPolishedCauseForGreenYellowCombo(state) {
   return w.length > 52 ? `${w.slice(0, 50)}…` : w;
 }
 
-/** 組み合わせ短語同士：正規化後の包含関係で長い方を落とす（箇条書き dedupe と同系） */
+/** 組み合わせ短語同士：3文字連続重複 or 全包含 → **長い方を除き短い1語を残す**（`dedupeLinesKeepShorterOnOverlap`） */
 function dedupeComboLabelsBySubsumption(labels) {
   if (!Array.isArray(labels) || labels.length <= 1) return labels || [];
-  const norm = (x) => normalizeBulletKeyForDedupe(x);
-  const minCore = 4;
   const lines = [...new Set(labels.map((l) => String(l || "").trim()).filter(Boolean))];
-  const toRemove = new Set();
-  for (let i = 0; i < lines.length; i++) {
-    for (let j = 0; j < lines.length; j++) {
-      if (i === j) continue;
-      const ni = norm(lines[i]);
-      const nj = norm(lines[j]);
-      if (ni.length < minCore || nj.length < minCore) continue;
-      if (ni.length > nj.length && ni.includes(nj)) {
-        toRemove.add(lines[i]);
-      }
-    }
-  }
-  return lines.filter((b) => !toRemove.has(b));
+  return dedupeLinesKeepShorterOnOverlap(lines, (s) => normalizeBulletKeyForDedupe(s));
 }
 
 /**
@@ -11220,7 +11462,14 @@ function buildGreenYellowComboPlusClause(state, parts, causeShortOverride) {
     for (const l of labels) {
       const t = finalizeComboLabelForCombinationLine(String(l || "").trim()) || String(l || "").trim();
       if (!t) continue;
-      if (pair.some((o) => comboLabelsAreDuplicateForCombo(o, t))) continue;
+      let skip = false;
+      for (let k = 0; k < pair.length; k++) {
+        if (!comboLabelsAreDuplicateForCombo(pair[k], t)) continue;
+        if (t.length < pair[k].length) pair[k] = t;
+        skip = true;
+        break;
+      }
+      if (skip) continue;
       pair.push(t);
     }
     labels = pair;
@@ -11234,7 +11483,12 @@ function buildGreenYellowComboPlusClause(state, parts, causeShortOverride) {
     if (chunks.length >= MAX_CHUNKS_IN_COMBO_CLAUSE) break;
   }
   if (chunks.length === 0) return "";
-  return `「${chunks.join("＋")}」`;
+  const merged = dedupeLinesKeepShorterOnOverlap(
+    chunks,
+    (s) => normalizeBulletKeyForDedupe(String(s || ""))
+  ).slice(0, MAX_CHUNKS_IN_COMBO_CLAUSE);
+  if (merged.length === 0) return "";
+  return `「${merged.join("＋")}」`;
 }
 
 /**
@@ -11382,13 +11636,14 @@ function redComboUserWordInclusiveMatch(canonicalLab, part) {
   return b.includes(a) || a.includes(b);
 }
 
-/** 🟢🟡「〇〇＋〇〇」：短語同士が同一・包含か（重複列挙禁止・KAIRO_SPEC） */
+/** 🟢🟡「〇〇＋〇〇」：短語同士が同一・3文字連続重複・包含か（重複列挙禁止・KAIRO_SPEC） */
 function comboLabelsAreDuplicateForCombo(a, b) {
   if (redComboUserWordInclusiveMatch(a, b)) return true;
   const na = normalizeBulletKeyForDedupe(String(a || ""));
   const nb = normalizeBulletKeyForDedupe(String(b || ""));
   if (na.length >= 2 && nb.length >= 2 && na === nb) return true;
-  if (na.length >= 4 && nb.length >= 4 && (na.includes(nb) || nb.includes(na))) return true;
+  if (na.length >= 3 && nb.length >= 3 && hasMinConsecutiveRunOverlap(na, nb, 3)) return true;
+  if (na.length >= 2 && nb.length >= 2 && (na.includes(nb) || nb.includes(na))) return true;
   return false;
 }
 
@@ -11407,8 +11662,11 @@ function pickGreenYellowComboPartsReservingPainManner(candidates, state, min, ma
   const pushIfNew = (lab) => {
     const t = finalizeComboLabelForCombinationLine(String(lab || "").trim()) || String(lab || "").trim();
     if (!t) return false;
-    for (const u of uniq) {
-      if (comboLabelsAreDuplicateForCombo(u, t)) return false;
+    for (let k = 0; k < uniq.length; k++) {
+      const u = uniq[k];
+      if (!comboLabelsAreDuplicateForCombo(u, t)) continue;
+      if (t.length < u.length) uniq[k] = t;
+      return false;
     }
     uniq.push(t);
     return true;
@@ -11473,148 +11731,91 @@ function applyRedComboUserWordGuards(state, picked) {
       return p;
     });
   }
-  const seen = new Set();
-  const deduped = [];
-  for (const p of out) {
-    const fp = finalizeComboLabelForCombinationLine(p) || String(p).trim();
-    if (!fp) continue;
-    if (seen.has(fp)) continue;
-    seen.add(fp);
-    deduped.push(fp);
-    if (deduped.length >= 3) break;
-  }
-  out = deduped.length > 3 ? deduped.slice(0, 3) : deduped;
+  out = dedupeLinesKeepShorterOnOverlap(
+    out.map((p) => finalizeComboLabelForCombinationLine(p) || String(p).trim()).filter(Boolean),
+    (s) => normalizeBulletKeyForDedupe(String(s || ""))
+  );
+  if (out.length > 3) out = out.slice(0, 3);
   if (out.length >= 2) return out;
   return picked;
 }
 
-function collectRedHighRiskCombinationLabels(state) {
-  const norm = state?.slotNormalized || {};
-  const candidates = [];
-  const bulletCands = [
-    ...gatherRedHighComboCandidatesFromBullets(state, "high"),
-    ...gatherRedHighComboCandidatesFromBullets(state, "medium"),
-  ];
-  if (bulletCands.length) candidates.push(...bulletCands);
+/**
+ * まとめ箇条書きから主症状行（痛み/10 直後等）を除き、各行を組み合わせ短語化（🔴/🟢/🟡 共通。確認文・生履歴は使わない）。
+ */
+function enumerateComboShortLabelsFromNonMainBullets(state) {
+  const raw = state?.stateAboutBulletsCache;
+  if (!Array.isArray(raw) || raw.length < 1) return [];
+  const main = compactMainSymptomNounForRed(state);
+  const hasPainHead = raw[0] && /^痛みは\s*\d+\s*\/\s*10/.test(stripBulletLead(raw[0]));
+  const mainIdx = hasPainHead ? 1 : 0;
+  const out = [];
+  for (let i = 0; i < raw.length; i++) {
+    if (i === mainIdx) continue;
+    const rawLine = stripBulletLead(raw[i]);
+    if (!rawLine) continue;
+    if (main && main !== "症状" && rawLine === main) continue;
+    const short =
+      shortenComboLabelFromBulletText(rawLine) || finalizeComboLabelForCombinationLine(rawLine);
+    if (!short) continue;
+    out.push({ label: short, inv: 50 - i });
+  }
+  return out;
+}
 
+/**
+ * まとめ箇条書き（Kairoの判断の・行と同一キャッシュ）から〇〇用の短語候補を得る。🔴 用（redComboTier 付与）。
+ */
+function supplementRedComboCandidatesFromAllBulletLines(state) {
+  return enumerateComboShortLabelsFromNonMainBullets(state).map((c) => ({
+    ...c,
+    redComboTier: 1,
+  }));
+}
+
+/** 🟢🟡 用：上と同内容で `{ label, inv }` のみ。 */
+function supplementGreenYellowComboCandidatesFromAllBulletLines(state) {
+  return enumerateComboShortLabelsFromNonMainBullets(state);
+}
+
+/**
+ * 🔴 組み合わせ行「〇〇＋〇〇」：KAIRO_SPEC — 用語はまとめ箇条書き由来のみ（推定・確認文抜粋は使わない）。
+ */
+function collectRedHighRiskCombinationLabels(state) {
+  ensureKairoJudgmentHasMinimumFactBullets(state, MIN_KAIRO_JUDGMENT_FACT_BULLETS);
   const main = compactMainSymptomNounForRed(state);
   const isMainLabel = (t) => main && main !== "症状" && String(t || "").trim() === main;
-
-  const pushAssoc = (tier) => {
-    const rl = tier === 2 ? RISK_LEVELS.HIGH : RISK_LEVELS.MEDIUM;
-    if (norm?.associated_symptoms?.riskLevel !== rl) return;
-    const inv = tier === 2 ? 95 : 83;
-    for (const x of labelsFromAssociatedHighRaw(state?.slotAnswers?.associated_symptoms || "")) {
-      if (!isMainLabel(x)) candidates.push({ label: x, inv, redComboTier: tier });
-    }
-  };
-  pushAssoc(2);
-  pushAssoc(1);
-
-  const dailyRaw = String(
-    state?.slotAnswers?.daily_impact || getSlotStatusValue(state, "impact", state?.slotAnswers?.daily_impact || "") || ""
-  );
-  const pushDaily = (tier) => {
-    const rl = tier === 2 ? RISK_LEVELS.HIGH : RISK_LEVELS.MEDIUM;
-    if (norm?.daily_impact?.riskLevel !== rl) return;
-    const invBase = tier === 2 ? 0 : -10;
-    if (/38|高熱|39|40/.test(dailyRaw)) candidates.push({ label: "発熱", inv: 93 + invBase, redComboTier: tier });
-    else if (/37|微熱/.test(dailyRaw)) candidates.push({ label: "微熱", inv: 93 + invBase, redComboTier: tier });
-    else if (/動けない|寝込|起き上がれない|強いつらさ/.test(dailyRaw)) {
-      candidates.push({ label: "つらさが強い", inv: 91 + invBase, redComboTier: tier });
-    } else {
-      candidates.push({ label: "日常生活への影響が大きい", inv: 90 + invBase, redComboTier: tier });
-    }
-  };
-  pushDaily(2);
-  pushDaily(1);
-
-  const pushPainScore = (tier) => {
-    const rl = tier === 2 ? RISK_LEVELS.HIGH : RISK_LEVELS.MEDIUM;
-    if (norm?.pain_score?.riskLevel !== rl) return;
-    const m = String(main || "");
-    if (!/(痛|頭痛|腹痛|歯痛|腰痛|喉|のど)/.test(m)) {
-      candidates.push({ label: "強い痛み", inv: 85 - (tier === 1 ? 10 : 0), redComboTier: tier });
-    }
-  };
-  pushPainScore(2);
-  pushPainScore(1);
-
-  const pushWorseningTrend = (tier) => {
-    const rl = tier === 2 ? RISK_LEVELS.HIGH : RISK_LEVELS.MEDIUM;
-    if (norm?.worsening_trend?.riskLevel !== rl) return;
-    const inv = tier === 2 ? 91 : 80;
-    const tl = buildRedComboLabelFromWorseningTrendSlotAnswer(state);
-    if (tl) candidates.push({ label: tl, inv, redComboTier: tier });
-    else candidates.push({ label: "経過の変化", inv, redComboTier: tier });
-  };
-  pushWorseningTrend(2);
-  pushWorseningTrend(1);
-
-  const pushDuration = (tier) => {
-    const rl = tier === 2 ? RISK_LEVELS.HIGH : RISK_LEVELS.MEDIUM;
-    if (norm?.duration?.riskLevel !== rl) return;
-    const inv = tier === 2 ? 89 : 78;
-    const dl = buildRedComboLabelFromDurationSlotAnswer(state);
-    if (dl) candidates.push({ label: dl, inv, redComboTier: tier });
-    else candidates.push({ label: "長く続いている", inv, redComboTier: tier });
-  };
-  pushDuration(2);
-  pushDuration(1);
-
-  const pushWorsening = (tier) => {
-    const rl = tier === 2 ? RISK_LEVELS.HIGH : RISK_LEVELS.MEDIUM;
-    if (norm?.worsening?.riskLevel !== rl) return;
-    const inv = COMBO_INV_PRI_PAIN_TYPE - (tier === 1 ? 8 : 0);
-    const pl = buildRedComboLabelFromWorseningSlotAnswer(state);
-    if (pl) candidates.push({ label: pl, inv, redComboTier: tier });
-    else candidates.push({ label: "痛み方が強い側", inv, redComboTier: tier });
-  };
-  pushWorsening(2);
-  pushWorsening(1);
-
-  const pushCause = (tier) => {
-    const rl = tier === 2 ? RISK_LEVELS.HIGH : RISK_LEVELS.MEDIUM;
-    if (norm?.cause_category?.riskLevel !== rl) return;
-    const inv = COMBO_INV_PRI_CAUSE - (tier === 1 ? 5 : 0);
-    const rc = buildRedCauseComboShortLabelForState(state);
-    if (rc) candidates.push({ label: rc, inv, redComboTier: tier });
-  };
-  pushCause(2);
-  pushCause(1);
-
+  const seenLab = new Set();
+  const candidates = [];
+  for (const c of [
+    ...gatherRedHighComboCandidatesFromBullets(state, "high"),
+    ...gatherRedHighComboCandidatesFromBullets(state, "medium"),
+    ...supplementRedComboCandidatesFromAllBulletLines(state),
+  ]) {
+    const lab = String(c?.label || "").trim();
+    if (!lab || isMainLabel(lab) || seenLab.has(lab)) continue;
+    seenLab.add(lab);
+    candidates.push(c);
+  }
   let picked = applyRedComboUserWordGuards(state, pickRedComboPartsInCandidateOrder(candidates, 2, 3));
   if (picked.length >= 2) return picked;
-
-  const combinedText = [
-    state?.historyTextForCare || "",
-    state?.slotAnswers?.associated_symptoms || "",
-    dailyRaw,
-    (buildStateFactsBullets(state, { forSummary: true }) || []).join(" "),
-  ].join(" ");
-  try {
-    const feats = extractFeatures(combinedText);
-    for (const a of feats.associatedSymptoms || []) {
-      if (!isMainLabel(a)) {
-        const lab = shortenComboLabelFromBulletText(a) || a;
-        candidates.push({ label: lab, inv: 78, redComboTier: 2 });
-      }
+  // 箇条書きからの直出し（重複除き）
+  const raw = state?.stateAboutBulletsCache;
+  if (Array.isArray(raw) && raw.length >= 1) {
+    const hasPainHead = raw[0] && /^痛みは\s*\d+\s*\/\s*10/.test(stripBulletLead(raw[0]));
+    const mainIdx = hasPainHead ? 1 : 0;
+    const direct = [];
+    for (let i = 0; i < raw.length; i++) {
+      if (i === mainIdx) continue;
+      const t =
+        shortenComboLabelFromBulletText(stripBulletLead(raw[i])) ||
+        finalizeComboLabelForCombinationLine(stripBulletLead(raw[i]));
+      if (t && !isMainLabel(t) && !direct.includes(t)) direct.push(t);
     }
-    if (feats.bodyPart && feats.severityHint === "high") {
-      candidates.push({ label: `${feats.bodyPart}の症状`, inv: 76, redComboTier: 2 });
-    }
-  } catch (_) {
-    /* ignore */
+    picked = applyRedComboUserWordGuards(state, direct.slice(0, 3));
   }
-
-  picked = applyRedComboUserWordGuards(state, pickRedComboPartsInCandidateOrder(candidates, 2, 3));
   if (picked.length >= 2) return picked;
-
-  candidates.push(
-    { label: "つらさが強い", inv: 58, redComboTier: 1 },
-    { label: "複数のサイン", inv: 57, redComboTier: 1 }
-  );
-  return applyRedComboUserWordGuards(state, pickRedComboPartsInCandidateOrder(candidates, 2, 3));
+  return applyRedComboUserWordGuards(state, ["つらさが強い", "注意が必要な兆候"]);
 }
 
 const RED_STATE_ABOUT_MEANING_TEMPLATES = [
@@ -11782,6 +11983,7 @@ function computeSummaryPrefetchFingerprint(state) {
 
 /** まとめ前確認文：①導入 ②箇条書き ③確認2行（共感・判断はまとめ側へ移動） */
 function buildPreSummaryConfirmationMessage(state) {
+  ensureKairoJudgmentHasMinimumFactBullets(state, MIN_KAIRO_JUDGMENT_FACT_BULLETS);
   let bulletLines = buildStateFactsBullets(state, { forSummary: true }) || [];
   if (!Array.isArray(bulletLines) || bulletLines.length === 0) {
     bulletLines = enforceConfirmationBulletsCompletenessCore(state);
@@ -15283,6 +15485,21 @@ function buildStateDecisionLine(state, level) {
   return "";
 }
 
+/** 🟢/🟡「🤝 Kairoの判断」本文：KAIRO_SPEC（事実箇条書き → 空行 → ①②一体段落＋③👉） */
+function buildGreenYellowHandshakeBlockBodySync(state, aboutLine) {
+  ensureKairoJudgmentHasMinimumFactBullets(state, MIN_KAIRO_JUDGMENT_FACT_BULLETS);
+  const factBullets = sanitizeBulletPoints(buildStateFactsBullets(state, { forSummary: true }) || [], state);
+  const core = String(aboutLine || "").trim();
+  const lines = [...factBullets];
+  if (factBullets.length > 0 && core) lines.push("");
+  if (core) {
+    lines.push(core);
+  } else if (lines.length === 0) {
+    lines.push("症状の状態を確認しました。");
+  }
+  return lines.join("\n");
+}
+
 async function normalizeStateBlockForGreenYellowAsync(text, state) {
   if (!text) return text;
   const lines = text.split("\n");
@@ -15299,8 +15516,8 @@ async function normalizeStateBlockForGreenYellowAsync(text, state) {
   if (!String(aboutLine || "").trim()) {
     aboutLine = buildGreenYellowStateAboutBlock(state, level);
   }
-  const decisionLine = buildStateDecisionLine(state, level);
-  const newBlock = ["🤝 Kairoの判断", aboutLine, ...(decisionLine ? [decisionLine] : [])];
+  const body = buildGreenYellowHandshakeBlockBodySync(state, aboutLine);
+  const newBlock = ["🤝 Kairoの判断", body];
   return [...lines.slice(0, start), ...newBlock, ...lines.slice(sliceEnd)].join("\n");
 }
 
@@ -15368,11 +15585,17 @@ async function buildLocalSummaryFallback(level, history, state) {
   const aboutLineGy =
     (await buildStateAboutLineAsync(state, level).catch(() => "")) ||
     buildGreenYellowStateAboutBlock(state, level);
+  const handshakeBodyGy = buildGreenYellowHandshakeBlockBodySync(
+    state,
+    String(aboutLineGy || "").trim() || "症状の状態を確認しました。"
+  );
+  const outlookBlockText =
+    (await buildOutlookBlockWithLlm(state).catch(() => null)) || buildOutlookBlock(state);
   const baseBlocks = [
     `${level} ここまでの情報を整理します\n${buildSummaryIntroTemplate()}`,
-    `🤝 Kairoの判断\n${String(aboutLineGy || "").trim() || "症状の状態を確認しました。"}`,
+    `🤝 Kairoの判断\n${handshakeBodyGy}`,
     immediateBlock,
-    `⏳ 今後の見通し\nこのタイプの症状は、時間の経過で変化することがあります。\n・もし明日の朝も同じ痛みが続いていたら\n・もし痛みが7以上に強くなったら\nそのタイミングで、もう一度Kairoに聞いてください。`,
+    outlookBlockText,
   ];
   const closing = await generateLastBlockWithLLM(level, state, historyText);
 
@@ -16393,7 +16616,7 @@ async function generateSummaryForConfirmation(conversationId) {
       }
     }
   }
-  aiResponse = ensureOutlookBlock(aiResponse, state);
+  aiResponse = await ensureOutlookBlockAsync(aiResponse, state);
   aiResponse = await ensureLastBlock(aiResponse, level, state, historyTextForOtc || aiResponse);
   aiResponse = enforceYellowOtcPositionStrict(aiResponse, level);
   if (level === "🔴") {
@@ -16498,7 +16721,7 @@ async function generateSummaryForConfirmation(conversationId) {
     const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "";
     const historyText = (history || []).filter((m) => m.role === "user").map((m) => m.content).join("\n");
     const ctx = buildCurrentStateContext(state, historyText, state?.lastConcreteDetailsText || "");
-    const [lastBlock, actionsBlock] = await Promise.all([
+    const [lastBlock, actionsBlock, outlookBlockMinimal] = await Promise.all([
       (async () => {
         for (let i = 0; i < 5; i++) {
           try {
@@ -16522,6 +16745,7 @@ async function generateSummaryForConfirmation(conversationId) {
           return "・無理をせず、安静を優先してください\n→ 今の状態で負担を減らす行動は、回復を早める助けになります。";
         }
       })(),
+      (async () => (await buildOutlookBlockWithLlm(state).catch(() => null)) || buildOutlookBlock(state))(),
     ]);
     if (state.summaryGenerationEpoch !== epochAtStart) {
       return { message: state.summaryText || "", followUpQuestion: null, followUpMessage: null };
@@ -16563,25 +16787,25 @@ async function generateSummaryForConfirmation(conversationId) {
       setSummaryPartialSectionsFromFinalText(state, minimalRed, level);
       return { message: minimalRed, followUpQuestion: null, followUpMessage: null };
     }
-    let handshakeGy =
+    let handshakeAbout =
       aboutLineGy && String(aboutLineGy).trim()
         ? aboutLineGy
         : buildGreenYellowStateAboutBlock(state, level);
-    if (!String(handshakeGy || "").trim()) {
-      handshakeGy = "症状の状態を確認しました。";
+    if (!String(handshakeAbout || "").trim()) {
+      handshakeAbout = "症状の状態を確認しました。";
     }
+    const handshakeBody = buildGreenYellowHandshakeBlockBodySync(state, handshakeAbout);
     const minimal = [
       `${level} ここまでの情報を整理します`,
       buildSummaryIntroTemplate(),
       "",
       "🤝 Kairoの判断",
-      handshakeGy,
+      handshakeBody,
       "",
       "✅ 今すぐやること",
       actionsBlock,
       "",
-      "⏳ 今後の見通し",
-      "症状の変化には気をつけて、悪化したら再度ご相談ください。",
+      ...String(outlookBlockMinimal || buildOutlookBlock(state)).split("\n"),
       "",
       lastBlock || "🌱 最後に\n今の情報なら安心して休んで大丈夫です。まずは休息を優先し、不安になったらまたここで確認してください。",
     ].join("\n");
@@ -16671,12 +16895,14 @@ app.post("/api/chat", async (req, res) => {
     }
     if (!state.triageCategory) {
       const detected = detectQuestionCategory4(message);
-      // 喉が痛いなど、喉的なものが主症状の時は必ず初めからずっとINFECTION系にする
-      state.triageCategory = isThroatMainSymptom(message)
-        ? "INFECTION"
-        : detected === "INFECTION"
-          ? "PAIN"
-          : detected;
+      // 喉が痛い系は KAIRO_SPEC どおり INFECTION。上気道に寄らない曖昧な INFECTION 検出だけ PAIN に落とす
+      if (isThroatInfectionTriageText(message)) {
+        state.triageCategory = "INFECTION";
+      } else if (detected === "INFECTION") {
+        state.triageCategory = "PAIN";
+      } else {
+        state.triageCategory = detected;
+      }
     }
     console.log("[DEBUG] request init", {
       conversationId,
@@ -16871,27 +17097,32 @@ app.post("/api/chat", async (req, res) => {
           const level = finalizeRiskLevel(state);
           const stateBullets = buildStateFactsBullets(state, { forSummary: true });
           const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "";
-          let handshakeGy =
+          let handshakeAbout =
             level === "🟢" || level === "🟡"
               ? (await buildStateAboutLineAsync(state, level).catch(() => "")) ||
                 buildGreenYellowStateAboutBlock(state, level)
               : "";
-          if ((level === "🟢" || level === "🟡") && !String(handshakeGy || "").trim()) {
-            handshakeGy = "症状の状態を確認しました。";
+          if ((level === "🟢" || level === "🟡") && !String(handshakeAbout || "").trim()) {
+            handshakeAbout = "症状の状態を確認しました。";
           }
+          const handshakeBlock =
+            level === "🟢" || level === "🟡"
+              ? buildGreenYellowHandshakeBlockBodySync(state, handshakeAbout)
+              : stateBlock;
           const lastBlock = await generateLastBlockWithLLM(level, state, stateBlock);
+          const outlookConf =
+            (await buildOutlookBlockWithLlm(state).catch(() => null)) || buildOutlookBlock(state);
           summaryMsg = [
             `${level} ここまでの情報を整理します`,
             buildSummaryIntroTemplate(),
             "",
             "🤝 Kairoの判断",
-            level === "🟢" || level === "🟡" ? handshakeGy : stateBlock,
+            handshakeBlock,
             "",
             "✅ 今すぐやること",
             "・無理をせず、安静を優先してください",
             "",
-            "⏳ 今後の見通し",
-            "症状の変化には気をつけて、悪化したら再度ご相談ください。",
+            ...outlookConf.split("\n"),
             "",
             lastBlock,
           ].join("\n");
@@ -16901,27 +17132,32 @@ app.post("/api/chat", async (req, res) => {
         const level = finalizeRiskLevel(state);
         const stateBullets = buildStateFactsBullets(state, { forSummary: true });
         const stateBlock = stateBullets.length > 0 ? stateBullets.join("\n") : "";
-        let handshakeGy =
+        let handshakeAbout =
           level === "🟢" || level === "🟡"
             ? (await buildStateAboutLineAsync(state, level).catch(() => "")) ||
               buildGreenYellowStateAboutBlock(state, level)
             : "";
-        if ((level === "🟢" || level === "🟡") && !String(handshakeGy || "").trim()) {
-          handshakeGy = "症状の状態を確認しました。";
+        if ((level === "🟢" || level === "🟡") && !String(handshakeAbout || "").trim()) {
+          handshakeAbout = "症状の状態を確認しました。";
         }
+        const handshakeBlock =
+          level === "🟢" || level === "🟡"
+            ? buildGreenYellowHandshakeBlockBodySync(state, handshakeAbout)
+            : stateBlock;
         const lastBlock = await generateLastBlockWithLLM(level, state, stateBlock);
+        const outlookBlockStr =
+          (await buildOutlookBlockWithLlm(state).catch(() => null)) || buildOutlookBlock(state);
         summaryMsg = [
           `${level} ここまでの情報を整理します`,
           buildSummaryIntroTemplate(),
           "",
           "🤝 Kairoの判断",
-          level === "🟢" || level === "🟡" ? handshakeGy : stateBlock,
+          handshakeBlock,
           "",
           "✅ 今すぐやること",
           "・無理をせず、安静を優先してください",
           "",
-          "⏳ 今後の見通し",
-          "症状の変化には気をつけて、悪化したら再度ご相談ください。",
+          ...outlookBlockStr.split("\n"),
           "",
           lastBlock,
         ].join("\n");
@@ -17819,7 +18055,7 @@ app.post("/api/chat", async (req, res) => {
           immediateActionPlan = null;
         }
       }
-      aiResponse = ensureOutlookBlock(aiResponse, conversationState[conversationId]);
+      aiResponse = await ensureOutlookBlockAsync(aiResponse, conversationState[conversationId]);
       aiResponse = await ensureLastBlock(aiResponse, level, conversationState[conversationId], historyTextForOtc || aiResponse);
       aiResponse = enforceYellowOtcPositionStrict(aiResponse, level);
       if (level === "🔴") {

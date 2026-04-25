@@ -230,7 +230,7 @@ GI（消化器系）：
   - 便秘
   - 食あたり
 
-TIRED（疲労・肩こり・睡眠不足系）：
+TIRED（疲労・肩こり・睡眠不足系。**主訴が「だるい」「だるさ」等の疲労表現のときも本カテゴリ**）：
 - スロット数は5個。`pain_score` と痛みの質（`worsening`）は使わない。質問順は **①期間 → ②強さ（日常生活への影響）→ ③経過（worsening_trend）→ ④危険サイン（付随）→ ⑤きっかけ（最後）**。選択肢は上から **低リスク→中→高**（緊急度集計の段階と整合）。
 - ① `duration`：「どのくらい続いていますか？」— 今日から / 数日前 / 一週間以上前
 - ② `daily_impact`：「日常生活にどれくらい影響がありますか？」— ほぼ問題ない / 少しつらい / かなりつらい（動くのがしんどい）
@@ -618,11 +618,21 @@ slot_status = {
 - 行動指示禁止
 
 #### 🤝 Kairoの判断（🟢/🟡・完全置き換え）
-🟢・🟡は**3 ブロック固定**（**LLM 禁止・サーバ固定**）。**① 状態の定義**と**② パターン化**を**1 段落**にまとめ（**`「…」このことから、`** 接続）、**③ 判断**の本文は 🟢／🟡 同一。緊急度の違いは**パターン句**等で出す。旧「共感＋ただ、＋1文」は廃止。
+🟢・🟡は**3 ブロック固定**（**LLM 禁止・サーバ固定**）。**① 状態の定義**と**② パターン化**を**1 段落**にまとめ（**`「…」このことから、`** 接続）、**③ 判断**の本文は 🟢／🟡 同一。緊急度の違いは**パターン句**等で出す。旧「共感＋ただ、＋1文」は廃止。  
+**箇条書き**（`stateAboutBulletsCache`／`buildStateFactsBullets`）は**常に少なくとも 2 行**（「・」）。**組み合わせ `「〇〇＋…」` の 〇〇**は **`collectGreenYellowLowMediumCombinationParts` 経由でまとめ箇条書きに由来する候補のみ**（`gatherGreenYellowComboCandidatesFromBullets` ＋ `supplementGreenYellowComboCandidatesFromAllBulletLines`／`enumerateComboShortLabelsFromNonMainBullets`）。**まとめ前確認文の文言・生履歴抜粋は使わない**（旧: スロット未反映の短語直列挙・`extractFeatures(historyTextForCare+…)` フォールバックは**廃止**）。まとめの成立条件は 🔴 同様 **`hasAllSummaryBlocks`** に含まれる（**箇条書き2行未満は不成立**）。
 
 ##### ① 状態の定義 ＋ ② パターン文（一体）
-- **1 段落・全角`＋`列挙**（`buildGreenYellowComboPlusClause` → `buildGreenYellowComboIntegratedParagraph`）。短語**最低2・上限3**（RED抑制＋**極短経過**のときのみ2で可・§RED抑制ガード）、**目安3〜7字**、重複（同一・包含）禁止。短縮は**LLM**（`shortenComboLabelsForCombinationLineWithLlm` 等）→ 組み立て**直前**に**必ず** `applyKairoSpec647ComboShortLabelFilter`（`finalizeComboLabelForCombinationLine`、上限8字・「…」）。サーバで経過を「一文」再構成はしない。整形前の**ユーザー生値＋箇条書き**を LLM に渡し、経過は**具体の時間軸**（例：◯日前から）に。
-- **🟢／🟡**：`slotNormalized` の**緊急度（高・中・低）に関わらず**、**回答があるスロット**は**組み合わせの短語**に**使う**（`comboSlotAllowsGreenYellowCombo`）。1個しか「〇〇」が出ない事象を防ぐ。**上限は3**。
+
+- **構造**：1 段落・全角 `＋` 列挙（`buildGreenYellowComboPlusClause` → `buildGreenYellowComboIntegratedParagraph`）。
+- **出どころ**：**①に並ぶ 〇〇 候補**は**まとめ箇条書き由来**（`collectGreenYellowLowMediumCombinationParts`）に統一。
+- **短語の長さ**：**最低2・上限3**（RED抑制＋**極短経過**のときのみ2で可・§RED抑制ガード）。**目安3〜7字**。短縮は **LLM**（`shortenComboLabelsForCombinationLineWithLlm`）→ 組み立て直前に必ず `applyKairoSpec647ComboShortLabelFilter`（`finalizeComboLabelForCombinationLine`、上限8字・「…」）。
+- **重複の扱い（箇条書き・「〇〇＋〇〇」共通）**
+  - 正規化後、**3文字連続**が和集合として重なる（一方の部分列が他方に含まれる）ペアは**同趣旨重複**とみなす。
+  - 旧：4文字連続重複時に**長い行を削除**していた → **廃止**。
+  - 現：**3文字連続**重複（または片方の正規化が他方に**全包含**）のときは**長い方を削除し、短い1行（簡潔な表現）を残す**（`dedupeLinesKeepShorterOnOverlap`／`dedupeBulletsByThreeCharRunOverlapRespectingPolarity`／`dedupeStateAboutBulletsBySoftInclusion`／`dedupeComboLabelsBySubsumption`／`buildGreenYellowComboPlusClause` 末尾の `merged` 等）。詳細事実は箇条書き側に任せ、組み合わせ短語列では**同趣旨の言い直し**を重ねない。
+  - `「風邪が…＋喉がかゆい…＋喉のかゆみ」` のような**近い語の二重**は、上記で**必ず潰す**（LLM 整形／組み合わせ短語でも「3文字同連続に相当する同趣旨は1語に圧縮し、**冗長に長い方を捨てる**」）。
+- **LLM 入力**：箇条書きから得た候補列＋制約。経過は**具体の時間軸**（例：◯日前から）に。サーバで経過を「一文」だけ再構成はしない。
+- **🟢／🟡**（`gatherGreenYellow…` 側）：`slotNormalized` により**箇条書きの各行**がどのスロット系か推し、**回答がある**列は**組み合わせ候補**に含め得る（`comboSlotAllowsGreenYellowCombo`）。1個しか「〇〇」が出ない事象を防ぐ。**上限は3**。
 - **痛み方（`worsening`）**は1文字でも入力があれば**必ず**先に確保（スコア不問と整合）。**きっかけ**は `polishCausePhraseToWrittenJapanese` で整え**短語化**し、**`＋`列の先頭**（`buildCauseComboShortLabelAsync`／同期 `buildCauseComboShortLabelSync`、ユーザー語の核を残す）。短語候補の逆優先では後回しでも**事実文に別途**入れ得る。並び優先：**痛み方**は常に先、**きっかけ**は他に十分候補があると**短語列では後**（足りなければ繰り上げ）。
 - **出どころ**：**主症状ラベルは入れない**、まとめ箇条書き（`stateAboutBulletsCache` / `buildStateFactsBullets`）と**同系**でよい（キャッシュ優先可）。`comboSlotAllowsGreenYellowCombo`＋**風の初期**（咳・鼻づまり＋`isThroatMainSymptom`）は従来どおり。
 - **🔴**（`📝 Kairoの判断` の組み合わせ行）：`pickRedComboPartsInCandidateOrder` により、**高リスク候補を先**、**足りなければ中リスク**の順に寄せる（`redComboTier`＋`inv` 順）。`gatherRedHighComboCandidatesFromBullets`／`collectRedHighRiskCombinationLabels`。
@@ -637,6 +647,7 @@ slot_status = {
 - `pickGreenYellowDecisionCoreLines`：👉 **2 行**を **A/B** からランダム（文末「。」）。
   - **A**：`👉 現時点では、病院に行っても対応は自宅での休息と大きく変わりません。`／`👉 今は受診より、休んで回復を優先する方が正しいです。`
   - **B**：`👉 現時点では、受診を急ぐよりも、自宅で安静にして変化を見る方が適切な状態です。`／`👉 無理に動くとかえって負担になりやすいため、今は休むことが正しい対応です。`
+
 ##### 完成例（🟢・パターン A のとき）
 ```
 「中程度の頭痛＋微熱＋大きく悪化していない」このことから、
@@ -654,11 +665,12 @@ slot_status = {
 ※例の「一時的な**体調不良**」は、主症状ラベルを**より汎用に言い換えた例**。**原則**は主症状短縮ラベル（頭痛・唇の痛み等）。🟡 も**同じ `〇〇` 決定**（`getSyncedMainSymptomDisplayLabel`／`greenYellowPatternNounForTemporary`）を用いる。  
 ※**風の初期症状**例外に当てはまる場合：パターン句を **`風の初期症状としてよく見られるパターンです。`**（🟢）／**`風の初期症状としてよく見られる一方で、注意が必要なサインも含まれます。`**（🟡）に差し替え（「一時的な〇〇として〜」は使わない）。
 #### 📝 Kairoの判断（🔴のみ・箇条書きの直後）
-🟢🟡とは**別構成**。サーバが **`slotNormalized` でリスク HIGH のスロット**と回答文から短い語を集め、**必ず「＋」でつなぐ**（**最低 2 つ・上限 3 つ**）。**主症状そのものは〇〇には含めない**（主症状は意味行の LLM 入力として別途渡す）。
+🟢🟡とは**別構成**。**箇条書き（`stateAboutBulletsCache`／`buildStateFactsBullets`）は本ブロック内で常に少なくとも 2 行**（「・」）とし、足りない場合は `ensureKairoJudgmentHasMinimumFactBullets` 等で補う。箇条書きが揃っていないまとめは `hasAllSummaryBlocks` では不成立（次段へ進まない）。  
+**組み合わせ行**の**〇〇**は、**まとめ用箇条書きに書いた事実**から短い語に落とす（`gatherRedHighComboCandidatesFromBullets` ＋ `supplementRedComboCandidatesFromAllBulletLines` 等）。**まとめ前確認文の文言・生履歴の抜粋は引用しない**（旧実装のスロット生値のみ・`extractFeatures(historyTextForCare+…)` 由来の 〇〇 追加は行わない）。**主症状そのものは〇〇に含めない**（主症状は意味行の LLM 入力として別途渡す）。
 1. **固定の導入**（1行目）：`これらの情報から、`
 2. **組み合わせ解釈**（1行）：`「〇〇＋〇〇（必要なら＋〇〇）」が同時に出ている状態です。`（**最低 2 つ・上限 3 つ**。）  
-   - **〇〇** は緊急度が **HIGH** のスロット由来の短い名詞句（付随症状・体温・痛みの強さ・悪化傾向・日常生活への影響・**きっかけ**など）。**きっかけ**は長文のまま並べず、**`buildRedCauseComboShortLabelForState`／`comboCauseBulletInnerToShortLabel`** により **3〜7 文字目安**に変形し、**ユーザー語の核**を含める。**3 つを超える候補があるときは**優先度の高い順に**最大 3 つまで**選ぶ。**主症状ラベルだけはここに入れない。** **箇条書きから取る場合も** `slotNormalized` で **その行が HIGH に対応**する場合のみ**とし、**主症状の説明行**（通常は痛みの強さ行の次の1行）は**除外**する。  
-   - **要約の出どころ**：上記に加え、**まとめの箇条書きと同じ要約**（同一キャッシュ／`buildStateFactsBullets`）から **短い語に要約して 〇〇 を並べてもよい**（整合性・速度のため）。スロットだけを再走査するより**箇条書き側を優先してよい**。  
+   - **〇〇** の第一ソースは、上記**箇条書きの各行**（主症状行・痛み程度行は `gatherRedHigh…` 側の主症状行除外に従う）。**箇条書きに紐づく**緊急度（`slotNormalized`）が **HIGH** のスロットに対応する行を**優先**し、次に**まとまった短語**が得られる行を併用する（`redComboTier` 順の `pickRedComboPartsInCandidateOrder`）。**きっかけ**は長文のまま並べず、**`buildRedCauseComboShortLabelForState`／`comboCauseBulletInnerToShortLabel`** により **3〜7 文字目安**に変形し、**ユーザー語の核**を含める。**3 つを超える候補があるときは**優先度の高い順に**最大 3 つまで**選ぶ。  
+   - **要約の出どころ（必須方針）**：**箇条書きと同じ要約**（同一キャッシュ）に揃える。足りなければ箇条書き行の短縮候補（`shortenComboLabelFromBulletText` 等）を重ね、**箇条書きを読まないと選べない語**にする。  
    - **短い語への要約**：🟢🟡と**同じルール**。**組み合わせ行用にさらに短く**する（例：`ズキズキする痛み` → `ズキズキ`）。**短縮は必ず LLM**、**各「〇〇」の文字目安は 3〜7**（`applyKairoSpec647ComboShortLabelFilter`／`KAIRO_COMBO_SHORT_LABEL_MAX_CHARS`＝8 文字上限・超過は「…」省略）。  
    - **＋** でつなぐ（要素数は **2〜3** に収める）。
 3. **意味**（1行）：**LLM で動的生成**（入力は上記の組み合わせ文字列 `〇〇＋〇〇＋…` と主症状。組み合わせごとに意味が変わるため固定テンプレ不可）。プロンプトはサーバ実装（`server.js`）に定義。ルールの要点：必ず1文・改行なし・「〜可能性があります」で終わる・断定しない・組み合わせとしての意味を説明する（単体説明は禁止）など。**API 失敗時**は従来どおり意味用テンプレ複数からランダムにフォールバック。
