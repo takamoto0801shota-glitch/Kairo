@@ -464,8 +464,15 @@ function parseAIMessage(text) {
     let foundHeader = null;
     for (const pattern of headerPatterns) {
       if (!line.includes(pattern.icon)) continue;
-      if (pattern.icon === '🔴') {
-        if (!/^\s*🔴\s*ここまでの情報を整理します/.test(line)) continue;
+      // リスク絵文字＋「ここまでの情報を整理します」は行頭のみ（全角スペース含む）。誤分割・parse失敗による二重まとめを防ぐ
+      if (pattern.icon === "🟢") {
+        if (!/^\s*🟢[\s\u3000]*ここまでの情報を整理します/.test(line)) continue;
+      }
+      if (pattern.icon === "🟡") {
+        if (!/^\s*🟡[\s\u3000]*ここまでの情報を整理します/.test(line)) continue;
+      }
+      if (pattern.icon === "🔴") {
+        if (!/^\s*🔴[\s\u3000]*ここまでの情報を整理します/.test(line)) continue;
       }
       if (pattern.icon === '🏥') {
         const name = (line.match(new RegExp(`${pattern.icon}\\s*(.+)`)) || [])[1]?.trim() || '';
@@ -514,7 +521,51 @@ function parseAIMessage(text) {
     return null;
   }
 
-  return blocks;
+  return truncateBlocksAfterSecondSummaryIntro(blocks);
+}
+
+/**
+ * 本文が平文表示でも、既にサーバ形の「まとめ列」が含まれているか（parse 失敗時のクライアント要約二重付与を防ぐ）
+ */
+function serverSummaryAlreadyInPlainText(t) {
+  const s = String(t || "");
+  // 先頭行の整形ゆれ（🟢と「ここ」の間スペースなし等）でも「サーバのまとめ列」とみなす
+  const hasIntro = /(🟢|🟡|🔴)\s*ここまでの情報を整理します/.test(s);
+  if (hasIntro) {
+    if (/(?:🤝|📝)\s*(?:Kairoの判断|今の状態について|いまの状態を整理します（メモ）)/.test(s) && /✅\s*今(?:すぐ)?やること/.test(s)) {
+      return true;
+    }
+  }
+  if (/📝\s*Kairoの判断|📝\s*いまの状態を整理します（メモ）/.test(s)) {
+    if (/(?:🏥\s*受診先の候補|✅\s*今(?:すぐ)?やること|💬\s*最後に)/.test(s)) return true;
+  }
+  return false;
+}
+
+/** サーバのまとめ先頭行が本文に含まれるか。parse 失敗時もクライアント要約（summary-block）を足さないための最短判定 */
+function textHasServerSummaryIntroLine(t) {
+  return /(🟢|🟡|🔴)\s*ここまでの情報を整理します/.test(String(t || ""));
+}
+
+/**
+ * サーバが同じ「🟢/🟡/🔴 ここまで…」始まりの列を二重に返したとき、先頭列のみ採用（2列目以降のブロックを捨てる）
+ */
+function truncateBlocksAfterSecondSummaryIntro(blocks) {
+  if (!Array.isArray(blocks) || blocks.length <= 1) return blocks;
+  const out = [];
+  let introCount = 0;
+  for (const b of blocks) {
+    const icon = b?.header?.icon;
+    const name = String(b?.header?.name || "");
+    const isIntro =
+      (icon === "🟢" || icon === "🟡" || icon === "🔴") && /ここまでの情報を整理します/.test(name);
+    if (isIntro) {
+      introCount += 1;
+      if (introCount >= 2) break;
+    }
+    out.push(b);
+  }
+  return out;
 }
 
 function extractStateFactsFromBlock(content) {
@@ -1191,10 +1242,15 @@ function addMessage(text, isUser = false, save = true, options = {}) {
     // サーバが 🟢/🟡/🔴 ブロック付きまとめを返したときは、クライアント生成の summary-block を付けない（二重まとめ防止）
     const hasParsedSummaryBlocks = !!(blocks && blocks.length > 0);
 
+    // parse が失敗して平文のまま表示されるが、本文に既に完全なまとめ列が含まれる場合もクライアント要約を付けない
+    const plainTextHasServerSummary = !hasParsedSummaryBlocks && serverSummaryAlreadyInPlainText(text);
+
     // まとめは初回のみ：summaryGenerated済みの場合やフォロー専用応答では絶対にまとめを追加しない
     const shouldAddSummary =
       decisionCompleted &&
       !hasParsedSummaryBlocks &&
+      !plainTextHasServerSummary &&
+      !textHasServerSummaryIntroLine(text) &&
       !isSummaryLocked() &&
       !options.skipSummaryBlock &&
       !appState.introSummarySuppress &&
@@ -1299,6 +1355,10 @@ function addMessage(text, isUser = false, save = true, options = {}) {
 
 // Add summary block to message (まとめブロックを追加)
 function addSummaryBlock(messageDiv, fullText) {
+  const ft = String(fullText || "");
+  if (textHasServerSummaryIntroLine(ft) || serverSummaryAlreadyInPlainText(ft)) {
+    return;
+  }
   // DOM 上に既にブロック型まとめがある（parseAIMessage 描画済み）場合は付与しない（🟢/🟡/🔴 共通・二重防止）
   if (messageDiv.querySelector(".message-block:not(.summary-block)")) {
     return;

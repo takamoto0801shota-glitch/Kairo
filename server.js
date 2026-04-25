@@ -1328,7 +1328,8 @@ const SUMMARY_BLOCK_NEXT_HEADER_RE =
  */
 function stripAfterSecondSummaryIntroLine(text) {
   const lines = String(text || "").split("\n");
-  const introRe = /^\s*(🟢|🟡|🔴)\s+ここまでの情報を整理します/;
+  // 🟢と「ここまで」の間にスペースが無い／全角スペースのみ、など LLM ゆれで2列目以降の検出が漏れないようにする
+  const introRe = /^\s*(🟢|🟡|🔴)[\s\u3000]*ここまでの情報を整理します/;
   let seen = 0;
   const out = [];
   for (const line of lines) {
@@ -2192,7 +2193,12 @@ function isToothPainSymptom(text) {
 
 /** 🇸🇬 シンガポール専用：日本人クリニック + GP、最適1件決定（main + alternatives）。歯痛時は歯科も検索・表示。 */
 async function fetchCarePlacesForSingapore(location, state) {
-  if (!getPlacesApiKey() || !location?.lat || !location?.lng) return [];
+  if (!location?.lat || !location?.lng) return [];
+  // Places API が無い環境でも、下の SG_CURATED_JAPANESE_CLINICS を距離順に載せる（🔴で日系が出ない原因の一つだった）
+  if (!getPlacesApiKey()) {
+    const curated = buildSingaporeCuratedJapanesePlaces(location);
+    return ensureSingaporeJapaneseClinicSecondSlot(state, curated.slice(0, 8));
+  }
   const historyText = state?.historyTextForCare || "";
   const allowDental = isToothPainSymptom(historyText);
 
@@ -2302,17 +2308,18 @@ async function fetchJapaneseClinicSingaporeForRedModal(state) {
 }
 
 async function fetchCarePlacesWithFallbacks(location, plan, state) {
-  if (!getPlacesApiKey()) {
-    console.warn("[Places] APIキー未設定のため検索をスキップ");
-    return [];
-  }
   if (!location?.lat || !location?.lng) {
     console.warn("[Places] 位置情報がないため検索をスキップ", { location });
     return [];
   }
   const country = String(state?.locationContext?.country || "").trim();
+  // シンガポールは API キー無しでもコード内キュレート（日系クリニック）を返す。上で API を弾くと未設定時に常に空だった
   if (country === "Singapore") {
     return fetchCarePlacesForSingapore(location, state);
+  }
+  if (!getPlacesApiKey()) {
+    console.warn("[Places] APIキー未設定のため検索をスキップ");
+    return [];
   }
   const hasDentalIntent = /dentist|dental/.test((plan?.searchKeywords || []).join(" "));
   const types = hasDentalIntent ? ["dentist", "doctor", "hospital", "health"] : ["doctor", "hospital", "health"];
