@@ -655,7 +655,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 ⸻
 
 
-✅ 今すぐやること
+✅ あなたの今すぐやること
 
 
 今日は次の3つだけ意識してください。
@@ -902,7 +902,7 @@ function buildStateAboutContextForSummary(state) {
   return `【🤝 Kairoの判断（ユーザー固有・必ず参照）】
 ${bullets.join("\n")}
 
-✅ 今すぐやること は、上記の状態に即した具体的な行動を出してください。一般的なテンプレ・汎用表現は禁止。痛みの強さ・きっかけ・経過など、上記の具体語を理由に反映すること。
+✅ あなたの今すぐやること は、上記の状態に即した具体的な行動を出してください。一般的なテンプレ・汎用表現は禁止。痛みの強さ・きっかけ・経過など、上記の具体語を理由に反映すること。
 `;
 }
 
@@ -927,8 +927,8 @@ ${stateContext ? `\n${stateContext}\n` : ""}
 - 選択肢や箇条書きの記号は必ず「・」を使う
 - ❗どのブロックも欠けてはいけない（1ブロックのみの出力は禁止）
 - ❗見出しは必ず以下を全て含める（順番厳守）：
-  - 🟢 ここまでの情報を整理します / 🤝 Kairoの判断 / ✅ 今すぐやること / ⏳ 今後の見通し / 🌱 最後に
-  - または 📝 Kairoの判断 / ✅ 今すぐやること / 🏥 受診先の候補 / 💬 最後に
+  - 🟢 ここまでの情報を整理します / 🤝 Kairoの判断 / ✅ あなたの今すぐやること / ⏳ 今後の見通し / 🌱 最後に
+  - または 📝 Kairoの判断 / ✅ あなたの今すぐやること / 🏥 受診先の候補 / 💬 最後に
 - ❗🟢/🟡/🔴 ここまでの情報を整理します の本文は固定のみ。前文は「必要な情報はそろいました。」「ここまでで判断に必要な情報は確認できました。」「ここまでで、今の状態はかなり整理できました。」のいずれか1文をランダム。改行のあと「今の症状なら、まずどう動くべきかをはっきりお伝えします。」を必ず続ける。自由生成禁止。
 - 📝 Kairoの判断 は事実のみ・具体的に書く
   - 「ない」「不明」「特になし」だけの記述は禁止
@@ -962,7 +962,7 @@ ${stateContext ? `\n${stateContext}\n` : ""}
    - 「だから今日はこれでいいですよ」を必ず含める
 4) Kairoとしての判断（「今の情報を見る限り」「現時点では」の前置き必須）
 
-✅ 今すぐやること：
+✅ あなたの今すぐやること：
 - 項目は最大3つ
 - 各項目は「行動 + 理由（1文）」のセット
 ${stateContext ? "- 上記【🤝 Kairoの判断】の内容を必ず反映し、その状態に即した具体的な行動を出す（テンプレ・汎用表現は禁止）\n" : ""}- 理由は不安を下げる説明に限定（正しさの証明・詳細な医学説明は禁止）
@@ -1016,7 +1016,9 @@ function normalizeHospitalMemoHeaderText(text) {
   return String(text || "")
     .replace(/📝\s*いまの状態を整理します（メモ）?/g, "📝 Kairoの判断")
     .replace(/🤝\s*今の状態について/g, "🤝 Kairoの判断")
-    .replace(/📝\s*今の状態について/g, "📝 Kairoの判断");
+    .replace(/📝\s*今の状態について/g, "📝 Kairoの判断")
+    .replace(/✅\s*今すぐやること（これだけでOK）/g, "✅ あなたの今すぐやること（これだけでOK）")
+    .replace(/✅\s*今すぐやること/g, "✅ あなたの今すぐやること");
 }
 
 function hasAnySummaryBlocks(text) {
@@ -1025,7 +1027,7 @@ function hasAnySummaryBlocks(text) {
     /🔴\s*ここまでの情報を整理します/.test(normalized) ||
     normalized.includes("🟢 ここまでの情報を整理します") ||
     textIncludesHandshakeAboutHeader(normalized) ||
-    normalized.includes("✅ 今すぐやること") ||
+    normalized.includes("✅ あなたの今すぐやること") ||
     normalized.includes("⏳ 今後の見通し") ||
     normalized.includes("💊 一般的な市販薬") ||
     normalized.includes("🌱 最後に") ||
@@ -1170,6 +1172,12 @@ function lineMatchesSummaryHeaderFlex(line, header) {
   if (header === "📝 Kairoの判断" || header === "📝 いまの状態を整理します（メモ）") {
     return isMemoStateAboutHeaderLine(t);
   }
+  if (header === "✅ あなたの今すぐやること") {
+    return (
+      t.startsWith("✅ あなたの今すぐやること") ||
+      t.startsWith("✅ 今すぐやること")
+    );
+  }
   return false;
 }
 
@@ -1178,12 +1186,12 @@ function hasAllSummaryBlocks(text) {
   const hospitalHeaders = [
     "🔴 ここまでの情報を整理します",
     "📝 Kairoの判断",
-    "✅ 今すぐやること",
+    "✅ あなたの今すぐやること",
     "🏥 受診先の候補",
     "💬 最後に",
   ];
-  const normalHeaders = ["🟢 ここまでの情報を整理します", "🤝 Kairoの判断", "✅ 今すぐやること", "⏳ 今後の見通し", "🌱 最後に"];
-  const yellowHeaders = ["🟡 ここまでの情報を整理します", "🤝 Kairoの判断", "✅ 今すぐやること", "⏳ 今後の見通し", "🌱 最後に"];
+  const normalHeaders = ["🟢 ここまでの情報を整理します", "🤝 Kairoの判断", "✅ あなたの今すぐやること", "⏳ 今後の見通し", "🌱 最後に"];
+  const yellowHeaders = ["🟡 ここまでの情報を整理します", "🤝 Kairoの判断", "✅ あなたの今すぐやること", "⏳ 今後の見通し", "🌱 最後に"];
   const required = isHospitalFlow(normalized)
     ? hospitalHeaders
     : normalized.includes("🟡")
@@ -1219,7 +1227,7 @@ function getRequiredSummaryHeadersByLevel(level) {
     return [
       "🔴 ここまでの情報を整理します",
       "📝 Kairoの判断",
-      "✅ 今すぐやること",
+      "✅ あなたの今すぐやること",
       "🏥 受診先の候補",
       "💬 最後に",
     ];
@@ -1228,7 +1236,7 @@ function getRequiredSummaryHeadersByLevel(level) {
     return [
       "🟢 ここまでの情報を整理します",
       "🤝 Kairoの判断",
-      "✅ 今すぐやること",
+      "✅ あなたの今すぐやること",
       "⏳ 今後の見通し",
       "🌱 最後に",
     ];
@@ -1236,7 +1244,7 @@ function getRequiredSummaryHeadersByLevel(level) {
   return [
     "🟢 ここまでの情報を整理します",
     "🤝 Kairoの判断",
-    "✅ 今すぐやること",
+    "✅ あなたの今すぐやること",
     "⏳ 今後の見通し",
     "🌱 最後に",
   ];
@@ -1420,7 +1428,7 @@ const ALL_SUMMARY_HEADERS = [
   "🔴 ここまでの情報を整理します",
   "🟢 ここまでの情報を整理します",
   "🤝 Kairoの判断",
-  "✅ 今すぐやること",
+  "✅ あなたの今すぐやること",
   "⏳ 今後の見通し",
   "🌱 最後に",
   "📝 Kairoの判断",
@@ -1482,10 +1490,10 @@ async function enforceSummaryStructureStrict(text, level, history, state) {
   // PAIN/INFECTION+🟡: ブロック単位で1件目固定を強制適用（所定位置を確実に確保）
   if (level === "🟡" && state) {
     const category = state.triageCategory || resolveQuestionCategoryFromState(state);
-    if ((category === "PAIN" || category === "INFECTION") && blocks.has("✅ 今すぐやること")) {
-      const actionBlock = blocks.get("✅ 今すぐやること");
+    if ((category === "PAIN" || category === "INFECTION") && blocks.has("✅ あなたの今すぐやること")) {
+      const actionBlock = blocks.get("✅ あなたの今すぐやること");
       const fixedBlock = ensurePainInfectionYellowFirstAction(actionBlock, level, state);
-      blocks.set("✅ 今すぐやること", fixedBlock);
+      blocks.set("✅ あなたの今すぐやること", fixedBlock);
     }
   }
   // 強制的に仕様順へ再構成（順序ゆらぎを排除）
@@ -3950,7 +3958,7 @@ const RED_MODAL_CLOSING_LINE =
 function buildRedModalContent(state, historyText = "", research = null) {
   const safeWaitItems = buildRedSafeWaitSection(state, research);
   const parts = [
-    "① 今すぐやること（受診優先）",
+    "① あなたの今すぐやること（受診優先）",
     "・本日中に医療機関へ連絡する",
     "→ 早い段階で確認することで、重大な問題でないことが分かるケースも多くあります。",
     "",
@@ -3994,7 +4002,7 @@ function buildRedImmediateActionsBlock(state, historyText, research = null, refi
   ];
   const safeWaitSection = buildRedSafeWaitSection(state, research, refinedSafeWaitActions);
   return [
-    "✅ 今すぐやること",
+    "✅ あなたの今すぐやること",
     "",
     ...fixedFirst,
     "",
@@ -4047,7 +4055,7 @@ async function ensureRedImmediateActionsBlock(text, state, historyText = "", res
   }
   if (!plan) plan = await buildImmediateActionFallbackPlanFromState(state);
   const block = buildRedImmediateActionsBlock(state, historyText, plan, refinedSafeWait);
-  const replaced = replaceSummaryBlock(text, "✅ 今すぐやること", block);
+  const replaced = replaceSummaryBlock(text, "✅ あなたの今すぐやること", block);
   if (replaced === text) {
     const insertAfter = "📝 Kairoの判断";
     const lines = text.split("\n");
@@ -4163,12 +4171,24 @@ function replaceSummaryBlock(text, header, block) {
     if (header === "📝 Kairoの判断" || header === "📝 いまの状態を整理します") {
       return isMemoStateAboutHeaderLine(line);
     }
+    if (header === "✅ あなたの今すぐやること") {
+      return (
+        line.startsWith("✅ あなたの今すぐやること") ||
+        line.startsWith("✅ 今すぐやること")
+      );
+    }
     return line.startsWith(header);
   });
   if (startIndex === -1) {
-    const altHeader = "✅ 今すぐやること（これだけでOK）";
-    if (header === "✅ 今すぐやること" && lines.some((l) => l.startsWith(altHeader))) {
-      return replaceSummaryBlock(text, altHeader, block);
+    const altHeaderNew = "✅ あなたの今すぐやること（これだけでOK）";
+    const altHeaderOld = "✅ 今すぐやること（これだけでOK）";
+    if (header === "✅ あなたの今すぐやること") {
+      if (lines.some((l) => l.startsWith(altHeaderNew))) {
+        return replaceSummaryBlock(text, altHeaderNew, block);
+      }
+      if (lines.some((l) => l.startsWith(altHeaderOld))) {
+        return replaceSummaryBlock(text, altHeaderOld, block);
+      }
     }
     return text;
   }
@@ -4225,7 +4245,7 @@ async function ensureHandshakeStateBlockFull(text, state, historyTextForCare = "
   return replaceStateAboutBlockOnly(text, state, historyTextForCare);
 }
 
-/** 先行まとめが揃っているとき、確認で追加情報があった場合に「✅ 今すぐやること」だけ差し替える（他ブロックは維持） */
+/** 先行まとめが揃っているとき、確認で追加情報があった場合に「✅ あなたの今すぐやること」だけ差し替える（他ブロックは維持） */
 async function replaceImmediateActionsBlockOnly(summaryText, state, historyText = "") {
   if (!summaryText || !state) return summaryText;
   const level = finalizeRiskLevel(state);
@@ -4938,7 +4958,7 @@ function buildDoActionsFromPlan(plan, state, level, options = {}) {
     { skipSupplements }
   ).map((x) => ({ action: toConciseActionTitle(x.title), reason: ensureReliableReason(x.reason, evidence) }));
 
-  // PAIN/INFECTION+🟡の1件目固定（ベッドで休む）は本文の「✅ 今すぐやること」ブロックのみ。のど・咽頭系は summaryPainInfectionFixedPick=false で未適用
+  // PAIN/INFECTION+🟡の1件目固定（ベッドで休む）は本文の「✅ あなたの今すぐやること」ブロックのみ。のど・咽頭系は summaryPainInfectionFixedPick=false で未適用
   if (summaryPainInfectionFixedPick) {
     const fixed = { action: PAIN_INFECTION_YELLOW_FIRST_ACTION.title, reason: PAIN_INFECTION_YELLOW_FIRST_ACTION.reason };
     ensured = [fixed, ...ensured.filter((x) => String(x.action || "").trim() !== String(fixed.action || "").trim())].slice(
@@ -5079,7 +5099,7 @@ ${fullRules}
 async function buildImmediateActionsBlock(level, state, historyText = "", research = null) {
   const plan = research || {};
   const context = plan?.currentStateContext || buildCurrentStateContext(state, historyText || "", state?.lastConcreteDetailsText || "");
-  const lines = ["✅ 今すぐやること"];
+  const lines = ["✅ あなたの今すぐやること"];
 
   const refinedActions = await refineDoActionsWithLLM(plan, state, level, { forSummary: true });
   let doActions = buildDoActionsFromPlan(plan, state, level, {
@@ -5137,13 +5157,20 @@ function ensurePainInfectionYellowFirstAction(text, level, state) {
   const fixedAction = "・今はベッドに入り、横になって数時間ゆっくり過ごしてください";
   const fixedReason = "→ 体を休息モードに切り替えることで、自然な回復の流れが働きやすくなります。";
   const lines = text.split("\n");
-  const headerPatterns = ["✅ 今すぐやること", "✅ 今すぐやること（これだけでOK）", "🟡 今すぐやること"];
+  const headerPatterns = [
+    "✅ あなたの今すぐやること",
+    "✅ あなたの今すぐやること（これだけでOK）",
+    "🟡 あなたの今すぐやること",
+    "✅ 今すぐやること",
+    "✅ 今すぐやること（これだけでOK）",
+    "🟡 今すぐやること",
+  ];
   const headerIdx = lines.findIndex((l) => headerPatterns.some((p) => l.trim().startsWith(p)));
   if (headerIdx === -1) {
     // ブロックが存在しない場合は、⏳の直前に挿入
     const outlookIdx = lines.findIndex((l) => l.trim().startsWith("⏳ 今後の見通し"));
     const insertIdx = outlookIdx >= 0 ? outlookIdx : lines.length;
-    const newBlock = ["✅ 今すぐやること", "", fixedAction, fixedReason, ""];
+    const newBlock = ["✅ あなたの今すぐやること", "", fixedAction, fixedReason, ""];
     const updated = [...lines.slice(0, insertIdx), ...newBlock, ...lines.slice(insertIdx)];
     return updated.join("\n");
   }
@@ -5185,7 +5212,7 @@ async function ensureImmediateActionsBlock(text, level, state, historyText = "",
   if (!text) return text;
   if (level !== "🟡" && level !== "🟢") return text;
   const block = await buildImmediateActionsBlock(level, state, historyText, research);
-  let result = replaceSummaryBlock(text, "✅ 今すぐやること", block);
+  let result = replaceSummaryBlock(text, "✅ あなたの今すぐやること", block);
   result = ensurePainInfectionYellowFirstAction(result, level, state);
   return result;
 }
@@ -5604,7 +5631,7 @@ function buildRestMcDecisionBlock(level, state) {
 }
 
 function ensureRestMcDecisionBlock(text, level, state) {
-  // 仕様変更：🧾 ブロックは使用しない（MCは✅今すぐやること内でのみ制御）
+  // 仕様変更：🧾 ブロックは使用しない（MCは✅あなたの今すぐやること内でのみ制御）
   return text;
 }
 
@@ -5632,6 +5659,7 @@ function enforceSummaryIntroTemplate(text) {
     const hasGreenStructure =
       textIncludesHandshakeAboutHeader(text) ||
       textIncludesMemoAboutHeader(text) ||
+      text.includes("✅ あなたの今すぐやること") ||
       text.includes("✅ 今すぐやること") ||
       text.includes("⏳ 今後の見通し") ||
       text.includes("🌱 最後に");
@@ -6053,7 +6081,7 @@ function historyContainsSummaryBlock(history) {
     /🤝\s*(?:今の状態について|Kairoの判断)/,
     /📝\s*(?:今の状態について|Kairoの判断)/,
     /📝\s*いまの状態を整理します/,
-    /✅\s*今すぐやること/,
+    /✅\s*(?:あなたの)?今すぐやること/,
     /⏳\s*今後の見通し/,
     /🏥\s*受診先の候補/,
     /🌱\s*最後に/,
@@ -16782,7 +16810,7 @@ async function generateSummaryForConfirmation(conversationId) {
         stateBlock || "症状の状態を確認しました。",
         ...(aboutRedMemo ? ["", aboutRedMemo] : []),
         "",
-        "✅ 今すぐやること",
+        "✅ あなたの今すぐやること",
         actionsBlock,
         "",
         "🏥 受診先の候補",
@@ -16809,7 +16837,7 @@ async function generateSummaryForConfirmation(conversationId) {
       "🤝 Kairoの判断",
       handshakeBody,
       "",
-      "✅ 今すぐやること",
+      "✅ あなたの今すぐやること",
       actionsBlock,
       "",
       ...String(outlookBlockMinimal || buildOutlookBlock(state)).split("\n"),
@@ -17126,7 +17154,7 @@ app.post("/api/chat", async (req, res) => {
             "🤝 Kairoの判断",
             handshakeBlock,
             "",
-            "✅ 今すぐやること",
+            "✅ あなたの今すぐやること",
             "・無理をせず、安静を優先してください",
             "",
             ...outlookConf.split("\n"),
@@ -17161,7 +17189,7 @@ app.post("/api/chat", async (req, res) => {
           "🤝 Kairoの判断",
           handshakeBlock,
           "",
-          "✅ 今すぐやること",
+          "✅ あなたの今すぐやること",
           "・無理をせず、安静を優先してください",
           "",
           ...outlookBlockStr.split("\n"),
@@ -18823,7 +18851,11 @@ function getSummarySectionSpecsByJudgement(judgement) {
           /^📝\s*いまの状態を整理します/,
         ],
       },
-      { id: 3, title: "✅ 今すぐやること", patterns: [/^✅\s*今すぐやること（これだけでOK）/, /^✅\s*今すぐやること/] },
+      {
+        id: 3,
+        title: "✅ あなたの今すぐやること",
+        patterns: [/^✅\s*(?:あなたの)?今すぐやること（これだけでOK）/, /^✅\s*(?:あなたの)?今すぐやること/],
+      },
       { id: 4, title: "🏥 受診先の候補", patterns: [/^🏥\s*受診先の候補/, /^🏥\s*Kairoの判断/] },
       { id: 5, title: "💬 最後に", patterns: [/^💬\s*最後に/] },
     ];
@@ -18836,7 +18868,11 @@ function getSummarySectionSpecsByJudgement(judgement) {
         patterns: [/^🟢\s*ここまでの情報を整理します/, /^🟡\s*ここまでの情報を整理します/],
       },
       { id: 2, title: "🤝 Kairoの判断", patterns: [/^🤝\s*(?:今の状態について|Kairoの判断)/] },
-      { id: 3, title: "✅ 今すぐやること", patterns: [/^✅\s*今すぐやること（これだけでOK）/, /^✅\s*今すぐやること/] },
+      {
+        id: 3,
+        title: "✅ あなたの今すぐやること",
+        patterns: [/^✅\s*(?:あなたの)?今すぐやること（これだけでOK）/, /^✅\s*(?:あなたの)?今すぐやること/],
+      },
       { id: 4, title: "⏳ 今後の見通し", patterns: [/^⏳\s*今後の見通し/, /^⏳\s*この先の見通し/] },
       { id: 5, title: "🌱 最後に", patterns: [/^🌱\s*最後に/] },
     ];
@@ -18848,7 +18884,11 @@ function getSummarySectionSpecsByJudgement(judgement) {
       patterns: [/^🟢\s*ここまでの情報を整理します/, /^🟡\s*ここまでの情報を整理します/],
     },
     { id: 2, title: "🤝 Kairoの判断", patterns: [/^🤝\s*(?:今の状態について|Kairoの判断)/] },
-    { id: 3, title: "✅ 今すぐやること", patterns: [/^✅\s*今すぐやること（これだけでOK）/, /^✅\s*今すぐやること/] },
+    {
+      id: 3,
+      title: "✅ あなたの今すぐやること",
+      patterns: [/^✅\s*(?:あなたの)?今すぐやること（これだけでOK）/, /^✅\s*(?:あなたの)?今すぐやること/],
+    },
     { id: 4, title: "⏳ 今後の見通し", patterns: [/^⏳\s*今後の見通し/, /^⏳\s*この先の見通し/] },
     { id: 5, title: "🌱 最後に", patterns: [/^🌱\s*最後に/] },
   ];

@@ -427,7 +427,7 @@ function parseAIMessage(text) {
     { icon: '🟡', name: 'ここまでの情報を整理します' },
     { icon: '🔴', name: 'ここまでの情報を整理します' },
     { icon: '🤝', name: 'Kairoの判断' },
-    { icon: '✅', name: '今すぐやること' },
+    { icon: '✅', name: 'あなたの今すぐやること' },
     { icon: '⏳', name: '今後の見通し' },
     { icon: '💊', name: '一般的な市販薬' },
     { icon: '🌱', name: '最後に' },
@@ -477,6 +477,9 @@ function parseAIMessage(text) {
       if (pattern.icon === '🏥') {
         const name = (line.match(new RegExp(`${pattern.icon}\\s*(.+)`)) || [])[1]?.trim() || '';
         if (!/受診先の候補|Kairoの判断/.test(name)) continue;
+      }
+      if (pattern.icon === "✅") {
+        if (!/^\s*✅[\s\u3000]*(?:あなたの)?今すぐやること/.test(line)) continue;
       }
       foundHeader = { ...pattern };
       const nameMatch = line.match(new RegExp(`${pattern.icon}\\s*(.+)`));
@@ -532,12 +535,12 @@ function serverSummaryAlreadyInPlainText(t) {
   // 先頭行の整形ゆれ（🟢と「ここ」の間スペースなし等）でも「サーバのまとめ列」とみなす
   const hasIntro = /(🟢|🟡|🔴)\s*ここまでの情報を整理します/.test(s);
   if (hasIntro) {
-    if (/(?:🤝|📝)\s*(?:Kairoの判断|今の状態について|いまの状態を整理します（メモ）)/.test(s) && /✅\s*今(?:すぐ)?やること/.test(s)) {
+    if (/(?:🤝|📝)\s*(?:Kairoの判断|今の状態について|いまの状態を整理します（メモ）)/.test(s) && /✅\s*(?:あなたの)?今(?:すぐ)?やること/.test(s)) {
       return true;
     }
   }
   if (/📝\s*Kairoの判断|📝\s*いまの状態を整理します（メモ）/.test(s)) {
-    if (/(?:🏥\s*受診先の候補|✅\s*今(?:すぐ)?やること|💬\s*最後に)/.test(s)) return true;
+    if (/(?:🏥\s*受診先の候補|✅\s*(?:あなたの)?今(?:すぐ)?やること|💬\s*最後に)/.test(s)) return true;
   }
   return false;
 }
@@ -971,6 +974,7 @@ function isDecisionCompleted(text) {
     '🟡 ここまでの情報を整理します',
     '🤝 Kairoの判断',
     '🤝 今の状態について',
+    '✅ あなたの今すぐやること',
     '✅ 今すぐやること',
     '⏳ 今後の見通し',
     '🏥 受診先の候補',
@@ -1303,7 +1307,7 @@ function addMessage(text, isUser = false, save = true, options = {}) {
         /今の状態について|Kairoの判断|いまの状態を整理します/.test(block?.header?.name || "");
       const isActionBlock =
         block?.header?.icon === "✅" &&
-        /今すぐやること/.test(block?.header?.name || "");
+        /(?:あなたの)?今すぐやること/.test(block?.header?.name || "");
       const isHospitalBlock =
         block?.header?.icon === "🏥" &&
         /受診先の候補|Kairoの判断/.test(block?.header?.name || "");
