@@ -518,6 +518,32 @@ body {
     line-height: 1.8;
 }
 
+/* いまの行動の具体例：パナドールの「・」行の色に、直後の「→」行を揃える */
+.concrete-modal-body--action-details {
+    white-space: normal;
+    font-size: 14px;
+    line-height: 1.8;
+    color: #233935;
+}
+
+.concrete-modal-body--action-details .otc-panadol-phrase--blue,
+.concrete-modal-body--action-details .otc-panadol-reason--blue {
+    color: #0d47a1;
+    font-weight: 600;
+}
+
+.concrete-modal-body--action-details .otc-panadol-phrase--red,
+.concrete-modal-body--action-details .otc-panadol-reason--red {
+    color: #b71c1c;
+    font-weight: 600;
+}
+
+.concrete-modal-body--action-details .otc-panadol-phrase--green,
+.concrete-modal-body--action-details .otc-panadol-reason--green {
+    color: #1b5e20;
+    font-weight: 600;
+}
+
 .message.ai .block-content {
     color: #333;
     font-size: 15px;

@@ -524,7 +524,29 @@ function parseAIMessage(text) {
     return null;
   }
 
-  return truncateBlocksAfterSecondSummaryIntro(blocks);
+  const trimmed = truncateBlocksAfterSecondSummaryIntro(blocks);
+  return dedupeParsedMessageBlocksByHeader(trimmed);
+}
+
+/**
+ * 同一の「絵文字＋見出し名」ブロックが二重（LLM やサーバの重複出力）のとき、先頭のみ採用する。
+ * （例：`🤝 Kairoの判断` や `✅ あなたの今すぐやること` が2回続く）
+ */
+function dedupeParsedMessageBlocksByHeader(blocks) {
+  if (!Array.isArray(blocks) || blocks.length <= 1) return blocks;
+  const seen = new Set();
+  const out = [];
+  for (const b of blocks) {
+    const icon = b?.header?.icon ?? "";
+    const name = String(b?.header?.name ?? "")
+      .replace(/\s+/g, " ")
+      .trim();
+    const key = `${icon}\0${name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(b);
+  }
+  return out;
 }
 
 /**
@@ -618,6 +640,61 @@ function ensureConcreteModal() {
   return overlay;
 }
 
+/**
+ * いまの行動の具体例モーダル：「・」のパッケージ色（青／赤／緑）に合わせ、直後の「→」行の色を揃える（従来は同じ本文色で、→ だけ意図せず同系に見えていた箇所の補正）。
+ * パナドール（X色）を服用する … の次行が → のときにのみペア扱い。
+ */
+function escapeHtmlForActionModal(s) {
+  return String(s || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function formatActionDetailsModalBodyHtml(plain) {
+  const text = String(plain || "");
+  const lines = text.split("\n");
+  const out = [];
+  let pendingPack = null; // "blue" | "red" | "green" | null
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line === "") {
+      out.push("");
+      continue;
+    }
+
+    const mPan = line.match(/^(\s*・\s*)パナドール[（(]([青赤緑])色[）)]を服用する(.*)$/u);
+    if (mPan) {
+      const k = mPan[2] === "青" ? "blue" : mPan[2] === "赤" ? "red" : "green";
+      pendingPack = k;
+      const pre = escapeHtmlForActionModal(mPan[1]);
+      const phrase = `パナドール（${mPan[2]}色）を服用する`;
+      out.push(
+        `${pre}<span class="otc-panadol-phrase otc-panadol-phrase--${k}">${escapeHtmlForActionModal(phrase)}</span>${escapeHtmlForActionModal(
+          mPan[3] || ""
+        )}`
+      );
+      continue;
+    }
+    if (pendingPack && /^\s*→\s?/.test(line)) {
+      const k = pendingPack;
+      pendingPack = null;
+      const afterArrow = line.replace(/^\s*→\s?/, "");
+      out.push(
+        `<span class="otc-panadol-reason otc-panadol-reason--${k}">→ ${escapeHtmlForActionModal(afterArrow)}</span>`
+      );
+      continue;
+    }
+    if (pendingPack) {
+      pendingPack = null;
+    }
+    out.push(escapeHtmlForActionModal(line));
+  }
+  return out.map((h) => (h === "" ? "" : h)).join("<br>\n");
+}
+
 function openConcreteModal() {
   const overlay = ensureConcreteModal();
   overlay.classList.add("is-open");
@@ -640,6 +717,13 @@ function setConcreteModalBody(textOrStructured, options = {}) {
   body.innerHTML = "";
   if (typeof textOrStructured === "string") {
     if (titleEl && options.title) titleEl.textContent = options.title;
+    if (options.title === CONCRETE_ACTION_MODAL_TITLE) {
+      const div = document.createElement("div");
+      div.className = "concrete-modal-body--action-details";
+      div.innerHTML = formatActionDetailsModalBodyHtml(textOrStructured || "");
+      body.appendChild(div);
+      return;
+    }
     const pre = document.createElement("pre");
     pre.style.whiteSpace = "pre-wrap";
     pre.style.fontFamily = "inherit";

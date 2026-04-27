@@ -682,12 +682,13 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 
 ⏳ 今後の見通し
 
-必ず以下の型で生成すること：
-1) 状況の自然な流れを一言で述べる（断定しない）
-2) 次に迷いやすい具体的トリガーを箇条書きで1〜2個
-   - 数値・時間・変化を必ず含める
-3) 末尾は必ず次の一文で締める（固定表現）
-   「そのタイミングで、もう一度Kairoに聞いてください。」
+**型**：
+- **上段**（中黒箇条書き・2行）：いまの🟢/🟡の判断に合い、**大きな心配は要らなそう**な当たりを**幅広**に。今夜休む・悪化しない、等（断定しすぎない）。
+- 次行：**逆に、**（この1行の見出しだけ）
+- **下段**（中黒箇条書き・**ちょうど3行**）：**受診を検討**すべき**明確**な目安。弱い心配事は**入れない**（急変・新症状・活動不能レベル等）。
+- **最終行**：このような変化があれば、その時は**受診**を**考え**てください。ー**同趣旨**で**言い換え**可
+- 上段に**受診**を**混ぜない**／上段で**怖がらせない**／**救急**の断定はしない
+
 
 
 ⸻
@@ -716,11 +717,10 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 - **最後のまとめセクション（💬 最後に または 🌱 最後に）は必ず毎回表示すること**
 
 【今後の見通しのポイント】
-- 一般論や経過説明は禁止
-- 「次に迷いが生まれる具体的タイミング」を1〜2個提示
-- その直後に必ず次の一文で締める
-  「そのタイミングで、もう一度Kairoに聞いてください。」
-- 医療的な断定や予測は禁止
+- **二段**：上は**幅広の安心**、**逆に、**以降は**受診レベルの明確**な目安
+- 上段で**ビビらせない**／下段に**弱い**心配事を**出さない**
+- 締めは**受診**を**考える**の**同趣旨**（表現は**焼き直し**可）
+- 病名**断定**・**救急**の断定は出さない（**下段＋締め**の**受診検討**は**出してよい**）
 
 【病院をおすすめする時の禁止事項 - 最重要】
 - ❌ 冒頭でいきなり「病院に行ってください」と言わない
@@ -942,7 +942,7 @@ ${stateContext ? `\n${stateContext}\n` : ""}
 - 🤝 Kairoの判断は一般論の説明を禁止し、感覚の翻訳にする
   - 「今のあなたの状態なら、こう考えて大丈夫です」
   - 「だから今日はこれでいいですよ」
-- ⏳ 今後の見通しは「自然な流れの一言 → 具体トリガー1〜2個 → 固定締め文」で構成
+- ⏳ 今後の見通しは**二段**（**上**＝心配しすぎない幅広の安心、**下**＝**逆に、**以降**受診を考える**はっきり目安。締めは**受診検討**）。**表現**は**都度**変えよ。buildOutlookBlockWithLlm ／ フォールバック buildOutlookBlock
 
 🤝 Kairoの判断（LLM理解レイヤー）：
 - 情報整理は単なる言い換えではなく「症状の状態を説明する文章」として生成する。
@@ -1351,6 +1351,38 @@ function stripAfterSecondSummaryIntroLine(text) {
 }
 
 /**
+ * 同一の「絵文字＋見出し本文」で始まるブロックが再出する場合、2回目以降の当該ブロック（次のまとめ見出し行まで）を捨てる（LLM の二重セクション抑止。クライアント `dedupeParsedMessageBlocksByHeader` と併用）。
+ */
+function stripDuplicateSummaryBlockHeaders(text) {
+  const lines = String(text || "").split("\n");
+  const seen = new Set();
+  const out = [];
+  let i = 0;
+  const headerLineRe = /^(🟢|🟡|🔴|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬)\s*(.*)$/;
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = String(line || "").trimStart();
+    const m = trimmed.match(headerLineRe);
+    if (m) {
+      const key = `${m[1]}\0${String(m[2] || "").replace(/\s+/g, " ").trim()}`;
+      if (seen.has(key)) {
+        i += 1;
+        while (i < lines.length) {
+          const next = String(lines[i] || "").trimStart();
+          if (/^(🟢|🟡|🔴|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬)\s/.test(next)) break;
+          i += 1;
+        }
+        continue;
+      }
+      seen.add(key);
+    }
+    out.push(line);
+    i += 1;
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/**
  * 見出し1行目が isHeaderLine に一致するブロックを1つ削除（本文〜次見出し直前まで）。
  */
 function removeSummaryBlockByHeaderPredicate(text, isHeaderLine) {
@@ -1386,6 +1418,7 @@ function preprocessSummaryDuplicateGuards(text, level) {
   let t = normalizeHospitalMemoHeaderText(text);
   t = stripEmergencyBlock(t);
   t = stripAfterSecondSummaryIntroLine(t);
+  t = stripDuplicateSummaryBlockHeaders(t);
   t = stripWrongVariantStateAboutBlocks(t, level);
   return t;
 }
@@ -3476,38 +3509,117 @@ function correctKanjiAndTypos(text) {
   return t;
 }
 
-function buildOutlookTriggers(state) {
-  const triggers = [];
-  const painScore = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
-  if (painScore !== null) {
-    const threshold = Math.min(10, Math.max(7, painScore + 2));
-    triggers.push(`もし痛みが${threshold}以上に強くなったら`);
-  } else {
-    triggers.push("もし痛みが今より強くなってきたら");
+/** 上段：幅広に「大きな心配は要らなそう」な当たり（ビビらせない） */
+const OUTLOOK_REASSURANCE_POOL = [
+  "今夜しっかり休んで、明日の朝に軽くなっていれば心配はいりません",
+  "強くならず、他の症状が増えなければ、そのまま回復に向かうことが多いです",
+  "いまの強さのまま、時間が経つにつれ和らいでいく流れを待てているなら、大きな心配をしなくてよいことが多いです",
+  "休息を挟めば、体調の見え方は今日のうちに持ち直しやすいです",
+  "起き上がる・歩くなど普段通りの動きはつらいが「どうにか」なら、今日は自宅で様子を見る流れで多くは足ります",
+  "急に生じた不調は、上がり下がりを繰り返しながら落ち着くことも多く、いまはそういう日ばかりではありません",
+];
+
+/** 下段：受診を検討するレベルの明確な目安（弱い心配事は出さない） */
+const OUTLOOK_ESCALATION_CORE = [
+  "痛みが急に強くなる",
+  "発熱や吐き気が新しく出てくる",
+  "普段どおり動くのがつらくなる",
+];
+
+const OUTLOOK_ESCALATION_INFECTION_EXTRA = [
+  "息苦しさや胸の重さが新しく出る",
+  "水をほとんど飲めない、または意識がはっきり保てない",
+  "同じ不調のまま体力的に急に底をついたように感じる",
+];
+
+const OUTLOOK_ESCALATION_GI_EXTRA = [
+  "激しい嘔吐や下痢が続き、体が大きく弱ってきたように感じる",
+];
+
+const OUTLOOK_ESCALATION_NEURO_EXTRA = [
+  "手足の力が一気に入りにくい、意識がぼんやりする など、いままでにない変化が出る",
+];
+
+const OUTLOOK_VISIT_CLOSING_VARIANTS = [
+  "このような変化があれば、その時は受診を考えてください。",
+  "このような変化がみられたときは、受診を検討してください。",
+];
+
+function pickTwoDistinctFromPool(pool) {
+  const a = pool.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
   }
-  triggers.push("もし明日の朝も同じ痛みが続いていたら");
-  return triggers.slice(0, 2);
+  return a.slice(0, 2);
 }
 
-const OUTLOOK_BLOCK_CLOSING = "そのタイミングで、もう一度Kairoに聞いてください。";
+function buildOutlookReassuranceBullets(_state) {
+  return pickTwoDistinctFromPool(OUTLOOK_REASSURANCE_POOL);
+}
 
-function buildOutlookBlock(state) {
-  const openers = [
-    "このタイプの症状は、時間の経過で変化することがあります。",
-    "しばらく様子を見る中で、気になりやすいタイミングがあります。",
-  ];
-  const opener = openers[Math.floor(Math.random() * openers.length)];
-  const triggers = buildOutlookTriggers(state);
-  return [
-    "⏳ 今後の見通し",
-    opener,
-    ...triggers.map((item) => `・${item}`),
-    OUTLOOK_BLOCK_CLOSING,
-  ].join("\n");
+function buildOutlookEscalationBullets(state) {
+  const category = state?.triageCategory || resolveQuestionCategoryFromState(state);
+  const pool = OUTLOOK_ESCALATION_CORE.slice();
+  if (category === "INFECTION") {
+    pool.push(...OUTLOOK_ESCALATION_INFECTION_EXTRA);
+  }
+  if (category === "GI") {
+    pool.push(...OUTLOOK_ESCALATION_GI_EXTRA);
+  }
+  if (buildStateFactsBullets(state, { forSummary: true }).some((l) => /ふらつ|めまい|痺れ|意識/.test(l))) {
+    pool.push(...OUTLOOK_ESCALATION_NEURO_EXTRA);
+  }
+  const shuffled = pool.slice();
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled.slice(0, 3);
+}
+
+function bulletizeOutlookLine(s) {
+  return `・${String(s || "")
+    .replace(/^[・\s]+/u, "")
+    .trim()}`;
 }
 
 /**
- * まとめの「⏳ 今後の見通し」：主症状・整理事実に即した1文＋具体トリガー2件を LLM で生成。失敗時は null（呼び出し側で buildOutlookBlock に戻す）。
+ * まとめ用「⏳ 今後の見通し」本文組み立て：安心2行 → 逆に、 → 受診目安3行 → 締め
+ */
+function assembleOutlookBlockBody(reassuranceLines, escalationLines, closingLine) {
+  const r = (reassuranceLines || []).map(bulletizeOutlookLine);
+  const e = (escalationLines || []).map(bulletizeOutlookLine);
+  const end = String(closingLine || OUTLOOK_VISIT_CLOSING_VARIANTS[0]).trim();
+  if (r.length < 2 || e.length < 3 || !end) return null;
+  return [
+    "⏳ 今後の見通し",
+    ...r.slice(0, 2),
+    "逆に、",
+    ...e.slice(0, 3),
+    end,
+  ].join("\n");
+}
+
+function buildOutlookBlock(state) {
+  const re = buildOutlookReassuranceBullets(state);
+  const es = buildOutlookEscalationBullets(state);
+  const closing = OUTLOOK_VISIT_CLOSING_VARIANTS[Math.floor(Math.random() * OUTLOOK_VISIT_CLOSING_VARIANTS.length)];
+  return assembleOutlookBlockBody(re, es, closing) || "";
+}
+
+function outlookLlmBodyLooksValid(body) {
+  const t = String(body || "")
+    .replace(/\r\n/g, "\n")
+    .trim();
+  if (t.length < 80) return false;
+  if (!t.includes("逆に")) return false;
+  if (!/受診/.test(t)) return false;
+  return (t.match(/^・/gm) || []).length === 5;
+}
+
+/**
+ * まとめの「⏳ 今後の見通し」：安心2行→逆に、→受診目安（LLM）／失敗時は buildOutlookBlock。
  */
 async function buildOutlookBlockWithLlm(state) {
   if (!process.env.OPENAI_API_KEY) return null;
@@ -3516,17 +3628,26 @@ async function buildOutlookBlockWithLlm(state) {
   const level = state?.decisionLevel || finalizeRiskLevel(state);
   const painScore = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
   const bulletHints = (buildStateFactsBullets(state, { forSummary: true }) || []).slice(0, 10).join("\n");
-  const seedTriggers = buildOutlookTriggers(state);
+  const seedRe = buildOutlookReassuranceBullets(state);
+  const seedEs = buildOutlookEscalationBullets(state);
+  const visitClosings = OUTLOOK_VISIT_CLOSING_VARIANTS;
   for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
     try {
       const systemPrompt = [
-        "体調相談の「今後の見通し」用。病名の断定、恐怖、具体的な受診指示の新規付与は禁止。",
-        "出力はJSONのみ: {\"opener\":\"1文（50字以内目安。今の会話内容に即す）\",\"triggers\":[\"2行目の本文（先頭の・は不要）。『もし〜なら/〜したら』形式で、具体的な手がかりを1つ入れる\",\"3行目同様、1行目と別の観点\"]}",
-        "triggersは**ちょうど2件**。**痛み**だけに偏らない（会話に熱・のど・胃腸・呼吸・倦怠などがあればそちらに触れよ）。",
-        "汎用テンプレ二連（例: 明日の朝＋痛み悪化だけ）の丸かぶりは避け、**【今の整理】の事実**に合わせて言い換えよ。",
+        "体調相談の「⏳ 今後の見通し」ブロック。見出し行「⏳ 今後の見通し」は**出さない**（呼び出し側が付与）。",
+        "必須**型**（この順）:",
+        "1) `・`で始まる行を**ちょうど2行**：**大きな心配は要らなそう**な当たりを**幅広**に。今夜休む・朝までに軽くなる・悪化しない 等。断定しすぎない。**ビビらせない**（上段に**受診**や**心配**の強い表現を混ぜない）。",
+        "2) 次行は**逆に、** だけ（本文は他に書かない）。",
+        "3) `・`で始まる行を**ちょうど3行**：**受診を検討**すべき**明確**な目安。弱い心配事は**出さない**（急激な悪化・新症状・起き上がるのが困難 等、**本気で**行く価値があるライン）。",
+        "4) 最終行：このような変化があれば、その時は**受診**を**考え**てください。ー**同趣旨**で**言い換え**可",
+        "JSONのみ。最優先: {\"reassurance_bullets\":[\"2件・先頭に・を付けない短い行\",\"同\"],\"escalation_bullets\":[\"3件・・なし\"],\"closing\":\"最終行1文（受診）\"}",
+        "互換: {\"body\":\"上記の型を**改行**だけでつないだ本文**のみ**（見出しなし）\"}。**body**は 中黒2行+空行+逆に、行+中黒3行+締め。",
+        "病名**断定**・恐怖・**救急**の断定は禁止。上段に**Kairo**と書く必要は**ない**（**締め**は**受診**）。",
         `主症状: 「${main}」。カテゴリ: ${category}。緊急度: ${level}。`,
         painScore !== null ? `痛のスコア(参考): ${painScore}/10` : "",
-        `静的seed（コピー禁止・言い換え必須）: ${JSON.stringify(seedTriggers)}`,
+        "痛み**以外**（熱・のど・胃腸等）の手がかりが【今の整理】にあるなら、下段に**偏りすぎない**よう反映。",
+        `静的 seed（**コピー禁止・言い換え**） 安心: ${JSON.stringify(seedRe)} ／ 受診目安: ${JSON.stringify(seedEs)}`,
+        `締め候補: ${JSON.stringify(visitClosings)}`,
         bulletHints ? `【今の整理（参考）】\n${bulletHints}` : "",
       ]
         .filter(Boolean)
@@ -3535,33 +3656,39 @@ async function buildOutlookBlockWithLlm(state) {
         model: "gpt-4o-mini",
         messages: [
           { role: "system", content: systemPrompt },
-          { role: "user", content: "{}" },
+          { role: "user", content: "上記に沿ってJSONだけ返してください。" },
         ],
-        temperature: 0.35 + attempt * 0.05,
-        max_tokens: 350,
+        temperature: 0.48 + attempt * 0.06,
+        max_tokens: 550,
       });
       const parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
-      const opener = String(parsed?.opener || "")
-        .replace(/\s+/g, " ")
-        .trim();
-      const raw = Array.isArray(parsed?.triggers) ? parsed.triggers : [];
-      const triggers = raw
-        .map((t) =>
-          String(t || "")
+      const re = Array.isArray(parsed?.reassurance_bullets) ? parsed.reassurance_bullets : [];
+      const es = Array.isArray(parsed?.escalation_bullets) ? parsed.escalation_bullets : [];
+      const closing = String(parsed?.closing || visitClosings[Math.floor(Math.random() * visitClosings.length)]).trim();
+      const rLines = re
+        .map((x) =>
+          String(x || "")
             .replace(/^[・\s]+/u, "")
             .trim()
         )
-        .filter(Boolean)
-        .slice(0, 2);
-      if (!opener || triggers.length < 2) continue;
-      const out = [
-        "⏳ 今後の見通し",
-        opener,
-        ...triggers.map((t) => `・${t}`),
-        OUTLOOK_BLOCK_CLOSING,
-      ].join("\n");
-      if (out.length < 45) continue;
-      return out;
+        .filter(Boolean);
+      const eLines = es
+        .map((x) =>
+          String(x || "")
+            .replace(/^[・\s]+/u, "")
+            .trim()
+        )
+        .filter(Boolean);
+      if (rLines.length >= 2 && eLines.length >= 3) {
+        const block = assembleOutlookBlockBody(rLines.slice(0, 2), eLines.slice(0, 3), closing);
+        if (block && String(block).length > 50) return block;
+      }
+      const bodyFromLlm = String(parsed?.body || "")
+        .replace(/\r\n/g, "\n")
+        .trim();
+      if (bodyFromLlm && outlookLlmBodyLooksValid(bodyFromLlm)) {
+        return ["⏳ 今後の見通し", bodyFromLlm].join("\n");
+      }
     } catch (_) {
       /* retry */
     }
@@ -4631,6 +4758,9 @@ function buildExpectedCourse(context = {}, state = null) {
  * - 青オリジナル: 上記以外の基本
  */
 const PANADOL_SG_RETAIL_AVAILABILITY_LINE = "シンガポールのコンビニやドラッグストアで市販されています。";
+/** 赤パック限定：青（オリジナル等）よりカフェイン配合で「強い」含みの比較を一文で。本文・LLM reason に未含なら補完する。 */
+const PANADOL_RED_EXTRA_CAFFEINE_COMPARISON_JP =
+  "青色（オリジナル等）の基本形に比べ、こちらの赤色の方はカフェインが入っており、同じ市販の中でも鎮痛面をより強く出しにいく一択です。";
 
 function resolvePanadolPackForPainInfection(state, topic) {
   if (!state) return "blue";
@@ -4654,7 +4784,11 @@ function ensurePanadolSingaporeDisplayCopy(action, reason, state, topicForPack) 
       : pack === "green"
         ? "パナドール（緑色）を服用する"
         : "パナドール（青色）を服用する";
-  return { action: shortAction, reason: String(reason || "").trim() };
+  let r = String(reason || "").trim();
+  if (pack === "red" && r && !r.includes("オリジナル等）の基本形に比べ")) {
+    r = `${r} ${PANADOL_RED_EXTRA_CAFFEINE_COMPARISON_JP}`.replace(/\s+/g, " ").trim();
+  }
+  return { action: shortAction, reason: r };
 }
 
 function applyPanadolSingaporeDisplayToDoActionItems(items, state, ctx) {
@@ -4674,7 +4808,8 @@ function getPanadolOtcActionForModal(state, topic) {
     red: {
       action: "パナドール（赤色）を服用する",
       reason:
-        "鎮痛効果を高めるカフェインが配合され、強い痛み（頑固な頭痛・重い生理痛・激しい筋肉痛など）に使われます。痛みを和らげることで、休息を取りやすくなります。" +
+        "鎮痛効果を高めるカフェインが配合され、強い痛み（頑固な頭痛・重い生理痛・激しい筋肉痛など）に使われます。痛みを和らげることで、休息を取りやすくなります。 " +
+        PANADOL_RED_EXTRA_CAFFEINE_COMPARISON_JP +
         " " +
         retailLine,
     },
@@ -12393,6 +12528,10 @@ function buildDiverseLastResortWhyOkayLines(need, existingLines) {
     "・付随の変化が加わりにくい区切り → 見立ての幅を絞りやすい",
     "・体調管理の打ち手を一つ減らす意識 → 負担の上がり方を和らげやすい",
     "・面談の事実同士のつなぎ方 → 次の一歩を小さく保てる余地が残る",
+    "・今がつらさのピーク付近の可能性 → 時間と休息で角が取れやすい",
+    "・静かに休めば持ち直しやすい経過のこともある → 負担を抜くほど改善の余地が見えやすい",
+    "・十分に眠れると回復の土台を作りやすい → 身体の回復力を活かしやすい",
+    "・いまは動かず横にするだけでも負担が抜けやすい → 悪化を防ぎやすい",
   ];
   let h = 0;
   for (const e of exist) for (let i = 0; i < e.length; i++) h = (h * 33 + e.charCodeAt(i)) >>> 0;
@@ -12662,6 +12801,7 @@ async function generateWhyOkayBulletsFromSummary(mainSymptomDisplay, userSummary
       "- bullets は**必ず3件**。**各要素は1行**で、**必ず**「**・事実や観察 → 短い含み（一文）**」。**` → `（半角の矢印、前後に空白）を各要素に必ず含めること。**",
       "- **簡潔**に。Kairoの判断（入力）の事実に沿う。",
       "- 先頭から、体温・経過・痛みの度合い・付随など、安心の置き方が立てやすい点を。",
+      "- **3件は同じ型・同じ観点の言い換えにしない**（例：会話要約の繰り返し3つは避ける）。材料が少ない・似てしまいそうなときは、**観点を分ける**（例：今がピーク付近の可能性・安静・睡眠で持ち直しやすいこと・会話上の1事実＋短い含み など）。**軽く現実的な含み**を入れてよい。",
       "- 痛みの程度は**（6/10）**でよい。診断の断定、恐怖表現、空の括弧（）は禁止。",
       "- 緊急度🟡で重い要因があっても、断定せず短く。",
       "- 毎回同じ3行のコピーは禁止。",
@@ -13743,6 +13883,7 @@ async function buildDiseaseSafetyFilteredMessage(
       `- 出力は必ずJSONのみ：{"common":[],"conditional":[],"rare_emergency":[],"acceptance_conviction":"","why_okay_bullets":[]}`,
       `- common・conditional・rare_emergency の各要素は**必ず文字列**（1行＝「・原因 → 理由」形式の文字列）。オブジェクト・入れ子は禁止。`,
       `- 緊急度レベルはユーザーメッセージの「緊急度レベル」に従う。🔴のとき acceptance_conviction は ""、why_okay_bullets は []。🟢または🟡のとき why_okay_bullets は**必ず3件**（中間「なぜ大丈夫か」。**各要素は必ず**「**・事実や観察 → 短い理由**」1行。半角 \` → \`（前後に空白可）を**必ず含める**）。【Kairoの判断】に簡潔に合わせる。痛み **（6/10）** 可。診断断定・恐怖表現は禁止。同じ文面の固定3行は禁止。`,
+      `- **why_okay_bullets（最重要・重複避け）**：3件**とも**、同じ観点・同じ型の言い回し（例：会話事実の言い換えを3回）にしない。ネタ切れ・似た事実しか無いときは、**観点を分ける**（例①「今がつらさのピーク付近で、**これから落ち着く**こともある」②「**静かに休めば**負担が抜けやすい」③会話事実＋短い含み。など）。3行とも重い医学的安心に固めず、**軽く現実的な含み**を混ぜてよい。`,
       `- acceptance_conviction（🟢または🟡のみ）：納得文を**ちょうど2文**（改行で区切る。1文目は**句点「。」を付けない**・2文目は**「逆に動くと悪化しやすいので、」のように読点「、」で終わる**。「休む方が合理的です」は**出さない**）。断定形（「かもしれません」「でしょう」禁止）。意味は「今すぐ受診しても自宅と大きく変わらない」「無理に動くと悪化しやすい（ので、で終え）」に寄せる。主症状ラベルは必要なら1回まで。「あなたの場合」禁止。`,
       "- common = 一般的に頻度が高い**原因・きっかけ・物理的機序**（**ちょうど3件**）。各項目は「・<原因名> → <短い理由>」形式。**「→」右は一文**・句点「。」は文末に1つだけ。",
       "- **原因名（→の左）は**：病名・状態名・または**具体的な機序**（例：乾燥・摩擦・軽い切り傷・局所刺激・姿勢負荷・睡眠不足など）。主症状と無関係な病名は含めない。",
