@@ -892,6 +892,10 @@ function initConversationState(input = {}) {
     hasIntroBannerSession: false,
     /** 初回安全文（17.1）で使った主症状短縮ラベル。🤝②「一時的な〇〇」と必ず同期する（KAIRO_SPEC 650） */
     safetyIntroMainSymptomLabel: null,
+    /** 箇条書き LLM 整形が成功した直前の `computeBulletLlmPrePolishFingerprint`（同一なら重複呼び出しを省略） */
+    bulletLlmPolishedSourceFingerprint: null,
+    /** 🟢🟡③ `pickGreenYellowDecisionCoreLines` の A/B。初回のみランダム決定し会話中は固定 */
+    greenYellowDecisionCorePattern: null,
   };
 }
 
@@ -10227,6 +10231,7 @@ function ensureUserUtterancesCapturedBeforeConfirmation(conversationId, state) {
   ensureSlotFilledConsistency(state);
   if (htcChanged || spontaneousAdds > 0) {
     state.stateAboutBulletsCache = null;
+    state.bulletLlmPolishedSourceFingerprint = null;
   }
   const missing = [];
   for (let i = 0; i < userMsgs.length; i++) {
@@ -10610,98 +10615,107 @@ function enforceConfirmationBulletsCompletenessCore(state) {
 /**
  * 箇条書き全体を1回の LLM で読みやすい日本語に整える。元はスロット組み立てでかなりぎこちないため、文体の磨き上げが主目的。
  * 事実の追加・病名推測・数値の捏造は禁止。JSON の bullets のみを返す。
+ * `OPENAI_API_KEY` は必須。失敗時は最大 `LLM_RETRY_COUNT` 回再試行し、成功時に `bulletLlmPolishedSourceFingerprint` を記録する。
  */
 async function polishConfirmationBulletsWithLlm(state) {
-  if (!state || !process.env.OPENAI_API_KEY) return;
-  const bulletsIn = Array.isArray(state.stateAboutBulletsCache) ? state.stateAboutBulletsCache.slice() : [];
-  if (bulletsIn.length === 0) return;
-  const { raw } = collectRawInputsForStateBullets(state);
-  const bulletText = bulletsIn.join("\n");
-  try {
-    const systemPrompt = [
-      "あなたは医療用チャットの「Kairoの判断」箇条書きの編集者です。出力はJSONのみ。",
-      "【重要】下に渡す箇条書きは、スロット値をつなぎ合わせて自動生成したものです。文のつながりや語感は元からかなりぎこちなく、読みにくいことがほとんどです。",
-      "だからこそ、あなたの仕事はその内容・事実を変えずに、ユーザーが一読で理解できるよう、自然で整った一文へ書き直すことです。",
-      "【文体】敬語（です・ます・ございます・でした・ました等）は使わない。常体・言い切りで短く（体言止め、〜だ、〜ある、〜の可能性 など）。",
-      "【禁止表現】「が出ている」は使わない（言い換え・省略で除去）。",
-      "【禁止表現】「悪化傾向」という語は使わない（「経過の変化」「痛みの推移の見立て」などに言い換え）。",
-      "【必須】次の事実を落とさないこと。数値（痛みの/10 等）・経過の日数・ユーザーが述べた症状・原因の可能性の内容は維持または言い換えのみ。",
-      "【必須】ユーザーの意図・主張を取り違えない。推測で足りない情報を補わない。言い換えは原文の意味を変えない範囲に限定する。",
-      "【必須】程度・確度を表す語（やや、少し、わずか、多少、ちょっと、かなり、相当、非常に、若干、まあまあ、軽く、だいぶ など）は、根拠テキストや元の行にあれば必ず残す。削除や弱い抽象語への置き換えで落とさない。",
-      "【禁止】新しい症状・病名の推定・受診判断・入力にない事実の追加。",
-      "【禁止・サボり対策】複数行を1行に寄せて曖昧な要約にする・行数を不当に減らすこと。根拠テキストのスロット別の事実は、可能な限り別行で区別して残す。",
-      "【必須】同じ質問への回答に複数の事実（例：読点や中黒で並んだ内容）があるときは、まとめずに別々の「・」行に分ける。",
-      "【禁止】「不調」「症状がある」「状態が気になる」など具体性を失う言い換えだけに置き換えること。元の箇条書きより情報量を落としてはいけない。",
-      "【重複禁止】3文字同連続に相当する**同趣旨**の行を複数出さない。近い言い回し（包含・重なり）があるときは**短い1行**に圧し、**冗長に長い行は捨てる**（事実の数は落とさないが、同じ事実の二重表現は出さない）。",
-      "【形式】各行は「・」で始まる1行。行数は入力と同程度（最大14行）。行の統合は上記の**同趣旨重複の除去**に限る。",
-      "【必須】主症状の言い換えだけの行は出さない（痛み・部位の繰り返しは省き、経過・付随・きっかけなどの情報だけを書く）。",
-      "【必須】各行の文末を途中で切らない（語の半端・「続いてい」で終わる等は禁止）。",
-      '厳密なJSON: {"bullets":["・...","・...",...]} のみ。説明文は禁止。',
-    ].join("\n");
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: systemPrompt },
-        {
-          role: "user",
-          content: [
-            "次の箇条書きは自動生成のため、日本語としてかなりぎこちない。根拠テキストの事実は変えず、文体だけきれいに整えてください。行をまとめすぎず、スロットごとの内容は落とさないこと。やや・少しなど程度を表す語は根拠にあれば必ず残すこと。",
-            "",
-            `【根拠テキスト（スロット・自由記述）】\n${String(raw || "").slice(0, 6000)}`,
-            "",
-            `【現在の箇条書き（要改善）】\n${bulletText.slice(0, 8000)}`,
-          ].join("\n"),
-        },
-      ],
-      temperature: 0.2,
-      max_tokens: 1200,
-    });
-    const text = completion?.choices?.[0]?.message?.content || "";
-    const parsed = parseJsonObjectFromText(text);
-    if (!parsed || !Array.isArray(parsed.bullets) || parsed.bullets.length === 0) return;
-    const prePolish = bulletsIn.slice();
-    const out = parsed.bullets
-      .map((s) => {
-        const t = String(s || "").trim();
-        if (!t) return null;
-        const inner = t.replace(/^・\s*/, "").trim();
-        return inner ? `・${inner}` : null;
-      })
-      .filter(Boolean)
-      .slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS);
-    if (out.length === 0) return;
-    let merged = sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(out), state);
-    merged = mergeRawSlotInputsIntoBullets(state, merged);
-    merged = sanitizeBulletPoints(merged, state);
-    let cov = validateBulletCoverageFromRaw(state, merged);
-    if (!cov.ok && cov.missing?.length) {
-      merged = appendMissingRawValuesAsBullets(merged, cov.missing, state);
-      merged = sanitizeBulletPoints(merged, state);
-      cov = validateBulletCoverageFromRaw(state, merged);
-    }
-    if (!cov.ok) {
-      console.warn("[KAIRO] polishConfirmationBulletsWithLlm: raw coverage failed after polish; reverting to pre-polish", {
-        conversationId: state.conversationId,
-        missingSample: (cov.missing || []).slice(0, 5),
-      });
-      state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
-        sanitizeBulletPoints(prePolish, state),
-        state
-      );
-      return;
-    }
-    state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
-      sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(merged), state).slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS),
-      state
-    );
-  } catch (e) {
-    console.warn("[KAIRO] polishConfirmationBulletsWithLlm", e?.message || e);
+  if (!state) return;
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error("KAIRO: OPENAI_API_KEY is required for confirmation/summary bullet LLM polish.");
   }
+  const preStash = Array.isArray(state.stateAboutBulletsCache) ? state.stateAboutBulletsCache.slice() : [];
+  if (preStash.length === 0) return;
+  const sourceFp = computeBulletLlmPrePolishFingerprint(state);
+  const { raw } = collectRawInputsForStateBullets(state);
+  const bulletText = preStash.join("\n");
+  const systemPrompt = [
+    "あなたは医療用チャットの「Kairoの判断」箇条書きの編集者です。出力はJSONのみ。",
+    "【重要】下に渡す箇条書きは、スロット値をつなぎ合わせて自動生成したものです。文のつながりや語感は元からかなりぎこちなく、読みにくいことがほとんどです。",
+    "だからこそ、あなたの仕事はその内容・事実を変えずに、ユーザーが一読で理解できるよう、自然で整った一文へ書き直すことです。",
+    "【文体】敬語（です・ます・ございます・でした・ました等）は使わない。常体・言い切りで短く（体言止め、〜だ、〜ある、〜の可能性 など）。",
+    "【禁止表現】「が出ている」は使わない（言い換え・省略で除去）。",
+    "【禁止表現】「悪化傾向」という語は使わない（「経過の変化」「痛みの推移の見立て」などに言い換え）。",
+    "【必須】次の事実を落とさないこと。数値（痛みの/10 等）・経過の日数・ユーザーが述べた症状・原因の可能性の内容は維持または言い換えのみ。",
+    "【必須】ユーザーの意図・主張を取り違えない。推測で足りない情報を補わない。言い換えは原文の意味を変えない範囲に限定する。",
+    "【必須】程度・確度を表す語（やや、少し、わずか、多少、ちょっと、かなり、相当、非常に、若干、まあまあ、軽く、だいぶ など）は、根拠テキストや元の行にあれば必ず残す。削除や弱い抽象語への置き換えで落とさない。",
+    "【禁止】新しい症状・病名の推定・受診判断・入力にない事実の追加。",
+    "【禁止・サボり対策】複数行を1行に寄せて曖昧な要約にする・行数を不当に減らすこと。根拠テキストのスロット別の事実は、可能な限り別行で区別して残す。",
+    "【必須】同じ質問への回答に複数の事実（例：読点や中黒で並んだ内容）があるときは、まとめずに別々の「・」行に分ける。",
+    "【禁止】「不調」「症状がある」「状態が気になる」など具体性を失う言い換えだけに置き換えること。元の箇条書きより情報量を落としてはいけない。",
+    "【重複禁止】3文字同連続に相当する**同趣旨**の行を複数出さない。近い言い回し（包含・重なり）があるときは**短い1行**に圧し、**冗長に長い行は捨てる**（事実の数は落とさないが、同じ事実の二重表現は出さない）。",
+    "【形式】各行は「・」で始まる1行。行数は入力と同程度（最大14行）。行の統合は上記の**同趣旨重複の除去**に限る。",
+    "【必須】主症状の言い換えだけの行は出さない（痛み・部位の繰り返しは省き、経過・付随・きっかけなどの情報だけを書く）。",
+    "【必須】各行の文末を途中で切らない（語の半端・「続いてい」で終わる等は禁止）。",
+    '厳密なJSON: {"bullets":["・...","・...",...]} のみ。説明文は禁止。',
+  ].join("\n");
+  const userContentBase = [
+    "次の箇条書きは自動生成のため、日本語としてかなりぎこちない。根拠テキストの事実は変えず、文体だけきれいに整えてください。行をまとめすぎず、スロットごとの内容は落とさないこと。やや・少しなど程度を表す語は根拠にあれば必ず残すこと。",
+    "",
+    `【根拠テキスト（スロット・自由記述）】\n${String(raw || "").slice(0, 6000)}`,
+    "",
+    `【現在の箇条書き（要改善）】\n${bulletText.slice(0, 8000)}`,
+  ].join("\n");
+  for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
+    state.stateAboutBulletsCache = preStash.slice();
+    try {
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userContentBase },
+        ],
+        temperature: 0.2 + attempt * 0.04,
+        max_tokens: 1200,
+      });
+      const text = completion?.choices?.[0]?.message?.content || "";
+      const parsed = parseJsonObjectFromText(text);
+      if (!parsed || !Array.isArray(parsed.bullets) || parsed.bullets.length === 0) continue;
+      const out = parsed.bullets
+        .map((s) => {
+          const t = String(s || "").trim();
+          if (!t) return null;
+          const inner = t.replace(/^・\s*/, "").trim();
+          return inner ? `・${inner}` : null;
+        })
+        .filter(Boolean)
+        .slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS);
+      if (out.length === 0) continue;
+      let merged = sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(out), state);
+      merged = mergeRawSlotInputsIntoBullets(state, merged);
+      merged = sanitizeBulletPoints(merged, state);
+      let cov = validateBulletCoverageFromRaw(state, merged);
+      if (!cov.ok && cov.missing?.length) {
+        merged = appendMissingRawValuesAsBullets(merged, cov.missing, state);
+        merged = sanitizeBulletPoints(merged, state);
+        cov = validateBulletCoverageFromRaw(state, merged);
+      }
+      if (cov.ok) {
+        state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
+          sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(merged), state).slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS),
+          state
+        );
+        state.bulletLlmPolishedSourceFingerprint = sourceFp;
+        return;
+      }
+      console.warn("[KAIRO] polishConfirmationBulletsWithLlm: coverage not ok, retrying", {
+        attempt,
+        conversationId: state.conversationId,
+        missingSample: (cov.missing || []).slice(0, 3),
+      });
+    } catch (e) {
+      console.warn("[KAIRO] polishConfirmationBulletsWithLlm attempt", attempt, e?.message || e);
+    }
+  }
+  state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
+    sanitizeBulletPoints(preStash, state),
+    state
+  );
+  state.bulletLlmPolishedSourceFingerprint = null;
+  throw new Error("KAIRO: polishConfirmationBulletsWithLlm failed after all retries (coverage or API).");
 }
 
 /**
  * コア網羅 →（任意）確認追加事実のマージ → 会話抜け追補 → 最終 LLM で文体整形（1回）。
- * @param {{ mergeExtraFacts?: boolean }} [opts] 確認応答後は mergeExtraFacts: true
+ * @param {{ mergeExtraFacts?: boolean, skipBulletLlm?: boolean, skipBulletLlmIfContentUnchanged?: boolean }} [opts] 確認応答後は mergeExtraFacts: true。先行確認で直前と同一内容なら `skipBulletLlmIfContentUnchanged: true` で LLM を省略。
  */
 async function enforceConfirmationBulletsCompleteness(state, opts = {}) {
   if (!state) return [];
@@ -10710,12 +10724,22 @@ async function enforceConfirmationBulletsCompleteness(state, opts = {}) {
     mergeConfirmationExtraFactsIntoStateBulletsCache(state);
   }
   await supplementStateBulletsFromUncoveredUserUtterances(state);
-  await polishConfirmationBulletsWithLlm(state);
+  const prePolishFp = computeBulletLlmPrePolishFingerprint(state);
+  if (opts?.skipBulletLlm) {
+    // 呼び出し側の明示的スキップ
+  } else if (
+    opts?.skipBulletLlmIfContentUnchanged !== false &&
+    state.bulletLlmPolishedSourceFingerprint === prePolishFp
+  ) {
+    // 同じ同期入力に対し既に箇条書き LLM 成功済み（重複呼び出しを避ける）
+  } else {
+    await polishConfirmationBulletsWithLlm(state);
+  }
   return (state.stateAboutBulletsCache || []).slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS);
 }
 
 /**
- * 確認文・まとめ用の箇条書きキャッシュを構築する（スロット＋網羅＋追補＋最終 LLM 整形1回）。
+ * 確認文・まとめ用の箇条書きキャッシュを構築する（スロット＋網羅＋追補＋箇条書き LLM 整形1回。`opts.skipBulletLlmIfContentUnchanged` で同一入力の重複 LLM を省く）。
  * 旧名は履歴互換のため残す。
  */
 async function buildStateFactsBulletsTwoStage(state, opts = {}) {
@@ -11369,6 +11393,69 @@ function applyGreenYellowComboUserWordGuards(state, picked) {
 }
 
 /**
+ * 🟢🟡 ① 三語目の退避：痛みスロットが使えるとき、lastPainScore または箇条書き先頭行から 647 フィルタで短語化（KAIRO_SPEC：A＋B＋C の不足を痛みの強さで補う）。
+ */
+function buildPainScoreShortLabelForGreenYellowCombo(state) {
+  if (!state || !comboSlotAllowsGreenYellowCombo(state, "pain_score")) return "";
+  if (Number.isFinite(state.lastPainScore)) {
+    const n = state.lastPainScore;
+    const rawLine = `痛みは ${n} / 10`;
+    return (
+      finalizeComboLabelForCombinationLine(shortenComboLabelFromBulletText(rawLine)) ||
+      finalizeComboLabelForCombinationLine(`${n}/10程度`) ||
+      ""
+    );
+  }
+  const raw = state.stateAboutBulletsCache;
+  if (Array.isArray(raw) && raw[0] && /^痛みは\s*\d+\s*\/\s*10/.test(stripBulletLead(String(raw[0] || "")))) {
+    const line = stripBulletLead(raw[0]);
+    const short = shortenComboLabelFromBulletText(line);
+    if (short) return finalizeComboLabelForCombinationLine(short) || short;
+  }
+  return "";
+}
+
+/**
+ * 🟢🟡 ① 組み合わせ短語を原則 3 語に揃える。不足分は 痛みの強さ → 経過短語 → 汎用の順（KAIRO_SPEC）。
+ * @param {string[]} src `applyGreenYellowComboUserWordGuards` 直後の短語配列
+ */
+function padGreenYellowComboPartStringsToThree(state, src) {
+  const out = [];
+  const push = (s) => {
+    const t = finalizeComboLabelForCombinationLine(String(s || "").trim()) || String(s || "").trim();
+    if (!t) return;
+    for (const u of out) {
+      if (comboLabelsAreDuplicateForCombo(u, t)) return;
+    }
+    out.push(t);
+  };
+  for (const s of src || []) {
+    if (out.length >= 3) break;
+    push(s);
+  }
+  if (out.length >= 3) return out.slice(0, 3);
+  const painL = buildPainScoreShortLabelForGreenYellowCombo(state);
+  if (painL) push(painL);
+  if (out.length < 3) {
+    const d = buildRedComboLabelFromDurationSlotAnswer(state);
+    if (d) push(d);
+  }
+  if (out.length < 3) push("つらさが強い");
+  if (out.length < 3) push("注意が必要な兆候");
+  if (out.length < 3) push("体調の波");
+  return out.slice(0, 3);
+}
+
+/**
+ * 2 語以上の組み合わせ候補を 3 語までパディングして返す。2 未満はパディングせず（呼び出し側で別ルートを試す）。
+ * @param {string[]} picked
+ */
+function finishGreenYellowComboPartStrings(state, picked) {
+  if (!Array.isArray(picked) || picked.length < 2) return picked;
+  return padGreenYellowComboPartStringsToThree(state, picked);
+}
+
+/**
  * まとめ箇条書きから 🟢🟡 組み合わせ用候補 {label, inv}。主症状行（通常は先頭 or 痛み行の次）は除外。
  */
 function gatherGreenYellowComboCandidatesFromBullets(state) {
@@ -11509,13 +11596,13 @@ function collectGreenYellowLowMediumCombinationParts(state) {
   ]) {
     pushC(c);
   }
-  const comboMaxParts = shouldBlockRedByDurationGuards(state) ? 2 : 3;
+  const comboMaxParts = 3;
   const applyRedGuardComboFilter = (arr) => filterComboCandidatesForRedGuardOnset(arr, state);
   const finish = (arr) => applyGreenYellowComboUserWordGuards(state, arr);
   let picked = finish(
     pickGreenYellowComboPartsReservingPainManner(applyRedGuardComboFilter(candidates), state, 2, comboMaxParts)
   );
-  if (picked.length >= 2) return picked;
+  if (picked.length >= 2) return finishGreenYellowComboPartStrings(state, picked);
   // 箇条書きから直出し（最終・重複除き）
   const raw = state?.stateAboutBulletsCache;
   if (Array.isArray(raw) && raw.length >= 1) {
@@ -11540,16 +11627,20 @@ function collectGreenYellowLowMediumCombinationParts(state) {
       )
     );
   }
-  if (picked.length >= 2) return picked;
-  return finish(
-    pickGreenYellowComboPartsReservingPainManner(
-      applyRedGuardComboFilter([
-        { label: "つらさが強い", inv: 50 },
-        { label: "注意が必要な兆候", inv: 49 },
-      ]),
-      state,
-      2,
-      comboMaxParts
+  if (picked.length >= 2) return finishGreenYellowComboPartStrings(state, picked);
+  return finishGreenYellowComboPartStrings(
+    state,
+    finish(
+      pickGreenYellowComboPartsReservingPainManner(
+        applyRedGuardComboFilter([
+          { label: "つらさが強い", inv: 50 },
+          { label: "注意が必要な兆候", inv: 49 },
+          { label: "体調の波", inv: 47 },
+        ]),
+        state,
+        2,
+        comboMaxParts
+      )
     )
   );
 }
@@ -11688,12 +11779,27 @@ function buildGreenYellowComboIntegratedParagraph(state, level, parts, causeShor
   return `${lead}\n${tail}`;
 }
 
-/** 🟢🟡③ 判断の確定：KAIRO_SPEC 完成例どおりパターンA固定（🟢／🟡で同一・👉2行） */
-function pickGreenYellowDecisionCoreLines() {
-  return [
-    "👉 現時点では、病院に行っても対応は自宅での休息と大きく変わりません。",
-    "👉 今は受診より、休んで回復を優先する方が正しいです。",
-  ];
+const GREEN_YELLOW_DECISION_CORE_PATTERN_A = [
+  "👉 現時点では、病院に行っても対応は自宅での休息と大きく変わりません。",
+  "👉 今は無理せず休んで体を回復させてください。",
+];
+const GREEN_YELLOW_DECISION_CORE_PATTERN_B = [
+  "👉 現時点では、受診を急ぐよりも、自宅で安静にして変化を見る方が適切な状態です。",
+  "👉 無理に動くとかえって負担になりやすいため、今は休むことが正しい対応です。",
+];
+
+/**
+ * 🟢🟡③ 判断の確定：A/B から**初回のみ**抽選し、`state.greenYellowDecisionCorePattern` に保持（同一会話内は固定・🟢／🟡で同一）
+ * @param {object} [state] 未指定時は従来どおり都度ランダム（呼び出し互換用）
+ */
+function pickGreenYellowDecisionCoreLines(state) {
+  if (state) {
+    if (state.greenYellowDecisionCorePattern !== "A" && state.greenYellowDecisionCorePattern !== "B") {
+      state.greenYellowDecisionCorePattern = Math.random() < 0.5 ? "A" : "B";
+    }
+    return (state.greenYellowDecisionCorePattern === "A" ? GREEN_YELLOW_DECISION_CORE_PATTERN_A : GREEN_YELLOW_DECISION_CORE_PATTERN_B).slice();
+  }
+  return (Math.random() < 0.5 ? GREEN_YELLOW_DECISION_CORE_PATTERN_A : GREEN_YELLOW_DECISION_CORE_PATTERN_B).slice();
 }
 
 /**
@@ -11709,7 +11815,7 @@ function buildGreenYellowStateAboutBlock(state, level) {
     parts = rawParts.map((p) => String(p || "").trim()).filter(Boolean);
   }
   const integrated = buildGreenYellowComboIntegratedParagraph(state, level, parts);
-  const core = pickGreenYellowDecisionCoreLines();
+  const core = pickGreenYellowDecisionCoreLines(state);
   return [integrated, ...core].join("\n");
 }
 
@@ -11727,7 +11833,7 @@ async function buildGreenYellowStateAboutBlockAsync(state, level) {
   }
   const causeShort = await buildCauseComboShortLabelAsync(state);
   const integrated = buildGreenYellowComboIntegratedParagraph(state, level, parts, causeShort);
-  const core = pickGreenYellowDecisionCoreLines();
+  const core = pickGreenYellowDecisionCoreLines(state);
   return [integrated, ...core].join("\n");
 }
 
@@ -12149,6 +12255,19 @@ function computeSummaryPrefetchFingerprint(state) {
   const extra = (state.confirmationExtraFacts || []).join("\x1e");
   const care = String(state.historyTextForCare || "").length;
   return `${state.summaryGenerationEpoch}|${slots}|${bullets}|${extra}|${care}`;
+}
+
+/**
+ * 箇条書き LLM 整形**直前**の同期状態用フィンガープリント（同じ内容なら2回目以降の LLM をスキップしてよい）
+ */
+function computeBulletLlmPrePolishFingerprint(state) {
+  if (!state) return "";
+  const bullets = Array.isArray(state.stateAboutBulletsCache)
+    ? state.stateAboutBulletsCache.join("\x1e")
+    : "";
+  const slots = state.slotFilled ? JSON.stringify(state.slotFilled) : "";
+  const extra = (state.confirmationExtraFacts || []).join("\x1e");
+  return `${slots}|${bullets}|${extra}`;
 }
 
 /** まとめ前確認文：①導入 ②箇条書き ③確認2行（共感・判断はまとめ側へ移動） */
@@ -16640,7 +16759,7 @@ function getOrInitConversationState(conversationId) {
   return conversationState[conversationId];
 }
 
-/** 確認文表示直後に先行してまとめを生成（HTTP は確認文のみ即返し済み）。本関数内で buildStateFactsBulletsTwoStage を含む本線パイプラインを完走する。失敗時は buildLocalSummaryFallback。 */
+/** 確認文表示と同時に先行してまとめを生成。箇条書きは確認文返却前に twoStage 済み想定（同一内容なら本関数内の twoStage で箇条書き LLM はスキップ）。失敗時は buildLocalSummaryFallback。 */
 async function generateSummaryForConfirmation(conversationId) {
   const state = conversationState[conversationId];
   const history = conversationHistory[conversationId];
@@ -16669,7 +16788,7 @@ async function generateSummaryForConfirmation(conversationId) {
   state.summaryPartialSections = [];
   try {
     // 確認応答で追加情報が入ったあとも、ここで merge なしだと confirmationExtraFacts が反映されない（キャッシュを組み直して上書きする）
-    await buildStateFactsBulletsTwoStage(state, { mergeExtraFacts: true });
+    await buildStateFactsBulletsTwoStage(state, { mergeExtraFacts: true, skipBulletLlmIfContentUnchanged: true });
     state.summaryPartialSections = buildSummaryPartialSectionsBeforeLlm(state);
   } catch (e) {
     console.error("[generateSummaryForConfirmation buildStateFactsBulletsTwoStage]", e?.message || e);
@@ -17226,9 +17345,13 @@ app.post("/api/chat", async (req, res) => {
             conversationState[conversationId].confirmationExtraFacts || []).push(msg);
         }
         conversationState[conversationId].stateAboutBulletsCache = null;
+        conversationState[conversationId].bulletLlmPolishedSourceFingerprint = null;
       }
       ensureUserUtterancesCapturedBeforeConfirmation(conversationId, conversationState[conversationId]);
-      await buildStateFactsBulletsTwoStage(conversationState[conversationId], { mergeExtraFacts: true });
+      await buildStateFactsBulletsTwoStage(conversationState[conversationId], {
+        mergeExtraFacts: true,
+        skipBulletLlmIfContentUnchanged: true,
+      });
       let summaryMsg = "";
       let followUpQ = null;
       let immediateActionsPatchedInTry = false;
@@ -17893,9 +18016,19 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    // 6スロット完了時: 確認文は最優先で即返す（twoStage LLM は待たない）。箇条書きは buildStateFactsBullets / enforceConfirmation による同期生成。まとめ本文は generateSummaryForConfirmation 内で twoStage してから本線で生成する。
+    // 6スロット完了時: 確認文の箇条書きは twoStage（網羅＋追補＋箇条書き LLM）を **返却前に await** する。まとめ本文は generateSummaryForConfirmation で先行生成（同一内容なら twoStage 内で箇条書き LLM はスキップ）。
     if (shouldJudgeNow && !conversationState[conversationId].confirmationShown && !conversationState[conversationId].summaryShown) {
       ensureUserUtterancesCapturedBeforeConfirmation(conversationId, conversationState[conversationId]);
+      try {
+        await buildStateFactsBulletsTwoStage(conversationState[conversationId], { mergeExtraFacts: false });
+      } catch (e) {
+        console.error("[KAIRO] buildStateFactsBulletsTwoStage before confirmation", e?.message || e);
+        try {
+          enforceConfirmationBulletsCompletenessCore(conversationState[conversationId]);
+        } catch (_) {
+          /* best effort */
+        }
+      }
       const confirmMsg = buildPreSummaryConfirmationMessage(conversationState[conversationId]);
       const stForPrefetch = conversationState[conversationId];
       const prefetchFp = computeSummaryPrefetchFingerprint(stForPrefetch);
