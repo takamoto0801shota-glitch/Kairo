@@ -683,9 +683,9 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 ⏳ 今後の見通し
 
 **型**：
-- **上段**（中黒箇条書き・1行）：いまの🟢/🟡の判断に合い、**大きな心配は要らなそう**な当たりを**幅広**に。今夜休む・悪化しない、等（断定しすぎない）。
+- **上段**（行頭に「・」を付けない**1行**）：いまの🟢/🟡の判断に合い、**大きな心配は要らなそう**な当たりを**幅広**に。**ユーザー端末のローカル時間帯（ユーザーから送られる clientMeta の tz）に即した**休養・様子見の言い換え。**時刻矛盾を避ける**。今夜休める・このあと〜、等（断定しすぎない）。
 - 次行：**逆に、**（この1行の見出しだけ）
-- **下段**（中黒箇条書き・**ちょうど3行**）：**受診を検討**すべき**明確**な目安。弱い心配事は**入れない**（急変・新症状・活動不能レベル等）。
+- **下段**（行頭に「・」を付けない**ちょうど3行**）：**様子見どまりにはできないほど強いとき**だけを並べる（例：**激しい震え**・冷や汗、**激しい嘔吐**／飲めないほどの嘔気、急な意識のもうろう・強い呼吸困難・いままでにない急変。**弱い不安だけの列にはしない**。病名**断定はしない）。
 - **最終行**：このような変化があれば、その時は**受診**を**考え**てください。ー**同趣旨**で**言い換え**可
 - 上段に**受診**を**混ぜない**／上段で**怖がらせない**／**救急**の断定はしない
 
@@ -717,7 +717,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 - **最後のまとめセクション（💬 最後に または 🌱 最後に）は必ず毎回表示すること**
 
 【今後の見通しのポイント】
-- **二段**：上は**幅広の安心（中黒1行）**、**逆に、**以降は**受診レベルの明確**な目安
+- **二段**：上は**幅広の安心（地の文1行・行頭に「・」を付けない）**、**逆に、**以降は**受診レベルの明確**な目安。**上段と締めはローカル時間帯に合わせる**（outlookLocalTimeAdviceHintForPrompt／静的は OUTLOOK_REASSURANCE_BY_BAND）
 - 上段で**ビビらせない**／下段に**弱い**心配事を**出さない**
 - 締めは**受診**を**考える**の**同趣旨**（表現は**焼き直し**可）
 - 病名**断定**・**救急**の断定は出さない（**下段＋締め**の**受診検討**は**出してよい**）
@@ -946,7 +946,7 @@ ${stateContext ? `\n${stateContext}\n` : ""}
 - 🤝 Kairoの判断は一般論の説明を禁止し、感覚の翻訳にする
   - 「今のあなたの状態なら、こう考えて大丈夫です」
   - 「だから今日はこれでいいですよ」
-- ⏳ 今後の見通しは**二段**（**上**＝心配しすぎない幅広の安心**・中黒1行**、**下**＝**逆に、**以降**受診を考える**はっきり目安。締めは**受診検討**）。**表現**は**都度**変えよ。buildOutlookBlockWithLlm ／ フォールバック buildOutlookBlock
+- ⏳ 今後の見通しは**二段**（**上**＝心配しすぎない幅広の安心**・地の文1行**（**ユーザーTZの時間帯に即す**）、**下**＝**逆に、**以降**受診を考える**はっきり目安。**行頭に「・」は付けない**。**締め**は**受診検討**。**表現**は**都度**変えよ。buildOutlookBlockWithLlm（outlookLocalTimeAdviceHintForPrompt）／ フォールバック buildOutlookBlock（getOutlookLocalHour＋バンド別 seed）
 
 🤝 Kairoの判断（LLM理解レイヤー）：
 - 情報整理は単なる言い換えではなく「症状の状態を説明する文章」として生成する。
@@ -3513,21 +3513,11 @@ function correctKanjiAndTypos(text) {
   return t;
 }
 
-/** 上段：幅広に「大きな心配は要らなそう」な当たり（ビビらせない） */
-const OUTLOOK_REASSURANCE_POOL = [
-  "今夜しっかり休んで、明日の朝に軽くなっていれば心配はいりません",
-  "強くならず、他の症状が増えなければ、そのまま回復に向かうことが多いです",
-  "いまの強さのまま、時間が経つにつれ和らいでいく流れを待てているなら、大きな心配をしなくてよいことが多いです",
-  "休息を挟めば、体調の見え方は今日のうちに持ち直しやすいです",
-  "起き上がる・歩くなど普段通りの動きはつらいが「どうにか」なら、今日は自宅で様子を見る流れで多くは足ります",
-  "急に生じた不調は、上がり下がりを繰り返しながら落ち着くことも多く、いまはそういう日ばかりではありません",
-];
-
-/** 下段：受診を検討するレベルの明確な目安（弱い心配事は出さない） */
+/** 下段：受診を本気で検討すべきほど強い変化のみ（震え・激しい嘔吐・呼吸困難等。弱めの様子とは混ぜない） */
 const OUTLOOK_ESCALATION_CORE = [
-  "痛みが急に強くなる",
-  "発熱や吐き気が新しく出てくる",
-  "普段どおり動くのがつらくなる",
+  "痛み・発熱がこれまでとは段違いに強くなる、または意識がはっきり保てないほどなる",
+  "激しい嘔吐が続く、激しい震えや冷や汗で寒気が止まらないなど、脱水や全身ぐらつきがある",
+  "息が苦しく短い言葉しか話せないほどになる、胸が強く締め付けられるような痛みがある、手足や口まわりのしびれが急に増すなど、これまでにない急変がある",
 ];
 
 const OUTLOOK_ESCALATION_INFECTION_EXTRA = [
@@ -3537,7 +3527,7 @@ const OUTLOOK_ESCALATION_INFECTION_EXTRA = [
 ];
 
 const OUTLOOK_ESCALATION_GI_EXTRA = [
-  "激しい嘔吐や下痢が続き、体が大きく弱ってきたように感じる",
+  "血が混じる便や真っ黒い便がある、または激しい腹痛がずっと引かず動けないとき",
 ];
 
 const OUTLOOK_ESCALATION_NEURO_EXTRA = [
@@ -3549,6 +3539,90 @@ const OUTLOOK_VISIT_CLOSING_VARIANTS = [
   "このような変化がみられたときは、受診を検討してください。",
 ];
 
+/**
+ * 「⏳ 今後の見通し」上段：clientMeta.tz に基づくローカル時刻バンドごとの安心リード（ニュートラル混入で偏り過ぎない）
+ */
+function getOutlookLocalHour(state) {
+  const tz = typeof state?.clientMeta?.tz === "string" ? state.clientMeta.tz.trim() : "";
+  if (tz) {
+    try {
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: tz,
+        hour: "2-digit",
+        hour12: false,
+      }).formatToParts(new Date());
+      const h = Number(parts.find((p) => p.type === "hour")?.value);
+      if (Number.isFinite(h)) return h % 24;
+    } catch (_) {
+      /* noop */
+    }
+  }
+  return new Date().getHours();
+}
+
+function outlookBandFromHour(hour) {
+  const h = ((hour % 24) + 24) % 24;
+  if (h >= 22 || h <= 4) return "late_night";
+  if (h >= 5 && h <= 10) return "morning";
+  if (h >= 11 && h <= 14) return "midday";
+  if (h >= 15 && h <= 18) return "afternoon";
+  return "night";
+}
+
+/** @param {unknown} state */
+function outlookBandLabelJa(state) {
+  const bands = {
+    late_night: "深夜〜早朝",
+    morning: "午前",
+    midday: "昼〜昼過ぎ",
+    afternoon: "夕方",
+    night: "夜",
+  };
+  return bands[outlookBandFromHour(getOutlookLocalHour(state))] ?? "日中";
+}
+
+/** LLM 用：いまのローカル時間帯に合わせて上段・締めを調整させる */
+function outlookLocalTimeAdviceHintForPrompt(state) {
+  const tz = String(state?.clientMeta?.tz || "").trim();
+  const h = getOutlookLocalHour(state);
+  const lbl = outlookBandLabelJa(state);
+  return `【ユーザー側ローカルの現在】おおよそ${h}時台（timezone: ${tz || "未送信時はサーバー時計のため誤差の可能性あり"}）。時間帯区分「${lbl}」。安心の上段と必要時の締めの言い換えは、この時間に即した休息・様子見のタイミングにする。**日中帯では「今夜」だけに寄せ過ぎない**。**深夜〜早朝は日中の様子だけに固定しない**。**生活リズムと矛盾しない文のみ**。`;
+}
+
+const OUTLOOK_REASSURANCE_NEUTRAL = [
+  "強くならず、他の症状が増えなければ、そのまま回復に向かうことが多いです",
+  "急に生じた不調は、上がり下がりを繰り返しながら落ち着くことも多く、いまはそういう日ばかりではありません",
+  "いまの強さのまま、時間が経つにつれ和らいでいく流れを待てているなら、大きな心配をしなくてよいことが多いです",
+];
+
+const OUTLOOK_REASSURANCE_BY_BAND = {
+  late_night: [
+    "今夜しっかり休んで、明日の朝に軽くなっていれば心配はいりません",
+    "このあと落ち着いて休めていれば、明け方〜午前までに強くならなければ大きな不安はいらなそうです",
+    "いまの強さのまま、睡眠を挟んで落ち着いていれば、大きな心配をしなくてよいことが多いです",
+  ],
+  morning: [
+    "午前中〜昼ごろまで大きく悪化しなければ、今日のうちに様子が持ち直しやすいです",
+    "この後の日中に強くならなければ、いまより悪くなければ大きな心配はいりません",
+    "起き上がる・歩くなど普段通りの動きはつらいが「どうにか」なら、午後まで様子を見る流れで多くは足ります",
+  ],
+  midday: [
+    "休息を挟めば、体調の見え方は今日のうちに持ち直しやすいです",
+    "午後〜夕方にかけて急に悪化しなければ、そのまま回復に向かうことが多いです",
+    "強くならず、他の症状が増えなければ今夜に向けて落ち着いていれば心配はいりません",
+  ],
+  afternoon: [
+    "夕方までに急に悪化しなければ、今夜の休息で持ち直しやすいです",
+    "今日の夕方〜夜にかけてこのまま落ち着けるなら、大きな心配はいりません",
+    "夕食前後まで大きく変わらなければ、今夜の休憩を挟んで様子を見てよいことが多いです",
+  ],
+  night: [
+    "今夜しっかり休んで、明日の朝の立ち上がりで楽になっていれば心配はいりません",
+    "就寝前〜睡眠を挟んだあとに急変しなければ、明日の朝まで見守れば足りることが多いです",
+    "寝る直前までいまの強さから大きく外れていなければ、まずは休養を優先してよいことが多いです",
+  ],
+};
+
 function pickOneRandomFromPool(pool) {
   const a = (pool || []).slice();
   if (a.length === 0) return [];
@@ -3556,8 +3630,11 @@ function pickOneRandomFromPool(pool) {
   return [a[j]];
 }
 
-function buildOutlookReassuranceBullets(_state) {
-  return pickOneRandomFromPool(OUTLOOK_REASSURANCE_POOL);
+function buildOutlookReassuranceBullets(state) {
+  const band = outlookBandFromHour(getOutlookLocalHour(state));
+  const keyed = OUTLOOK_REASSURANCE_BY_BAND[band] || [];
+  const pool = keyed.length ? keyed.concat(OUTLOOK_REASSURANCE_NEUTRAL) : OUTLOOK_REASSURANCE_NEUTRAL.slice();
+  return pickOneRandomFromPool(pool);
 }
 
 function buildOutlookEscalationBullets(state) {
@@ -3580,18 +3657,19 @@ function buildOutlookEscalationBullets(state) {
   return shuffled.slice(0, 3);
 }
 
-function bulletizeOutlookLine(s) {
-  return `・${String(s || "")
+/** 「⏳ 今後の見通し」本文の1行。**行頭に「・」は付けない**（読み込み時は混入した「・」のみ除去） */
+function normalizeOutlookParagraphLine(s) {
+  return String(s || "")
     .replace(/^[・\s]+/u, "")
-    .trim()}`;
+    .trim();
 }
 
 /**
- * まとめ用「⏳ 今後の見通し」本文組み立て：安心1行 → 逆に、 → 受診目安3行 → 締め
+ * まとめ用「⏳ 今後の見通し」本文組み立て：安心1行（・なし）→ 逆に、 → 受診目安3行 → 締め
  */
 function assembleOutlookBlockBody(reassuranceLines, escalationLines, closingLine) {
-  const r = (reassuranceLines || []).map(bulletizeOutlookLine);
-  const e = (escalationLines || []).map(bulletizeOutlookLine);
+  const r = (reassuranceLines || []).map(normalizeOutlookParagraphLine);
+  const e = (escalationLines || []).map(normalizeOutlookParagraphLine);
   const end = String(closingLine || OUTLOOK_VISIT_CLOSING_VARIANTS[0]).trim();
   if (r.length < 1 || e.length < 3 || !end) return null;
   return [
@@ -3617,7 +3695,10 @@ function outlookLlmBodyLooksValid(body) {
   if (t.length < 80) return false;
   if (!t.includes("逆に")) return false;
   if (!/受診/.test(t)) return false;
-  return (t.match(/^・/gm) || []).length === 4;
+  if ((t.match(/^・/gm) || []).length === 4) return true;
+  const rawLines = t.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+  const invIdx = rawLines.findIndex((l) => /^逆に[、,]?\s*$/.test(l));
+  return invIdx >= 1 && rawLines.length >= invIdx + 5;
 }
 
 /**
@@ -3638,15 +3719,16 @@ async function buildOutlookBlockWithLlm(state) {
       const systemPrompt = [
         "体調相談の「⏳ 今後の見通し」ブロック。見出し行「⏳ 今後の見通し」は**出さない**（呼び出し側が付与）。",
         "必須**型**（この順）:",
-        "1) `・`で始まる行を**ちょうど1行**：**大きな心配は要らなそう**な当たりを**幅広**に。今夜休む・朝までに軽くなる・悪化しない 等。断定しすぎない。**ビビらせない**（上段に**受診**や**心配**の強い表現を混ぜない）。",
+        "1) **行頭に「・」は付けない**地の文を**1行**：**大きな心配は要らなそう**な当たりを**幅広**に。**下の【ユーザー側ローカルの現在】に合わせ**て、休養・様子見の**タイミング**を言い換える（例：今夜／今日のうち／明日の朝。**いまの時間帯と矛盾させない**）。断定しすぎない。**ビビらせない**（上段に**受診**や**心配**の強い表現を混ぜない）。",
         "2) 次行は**逆に、** だけ（本文は他に書かない）。",
-        "3) `・`で始まる行を**ちょうど3行**：**受診を検討**すべき**明確**な目安。弱い心配事は**出さない**（急激な悪化・新症状・起き上がるのが困難 等、**本気で**行く価値があるライン）。",
+        "3) **行頭に「・」は付けない**地の文を**ちょうど3行**：**受診を本気で検討すべきレベルの急変のみ**。**弱めの心配だけ**並べない。例：**激しい震え**・強い冷汗、**ひどい嘔吐**/飲めないほどの嘔気、**意識がもうろう**/息苦しい急なしびれ 等。**病名断定はしない**（変化の描写のみ）。",
         "4) 最終行：このような変化があれば、その時は**受診**を**考え**てください。ー**同趣旨**で**言い換え**可",
-        "JSONのみ。最優先: {\"reassurance_bullets\":[\"1件・先頭に・を付けない短い行\"],\"escalation_bullets\":[\"3件・・なし\"],\"closing\":\"最終行1文（受診）\"}",
-        "互換: {\"body\":\"上記の型を**改行**だけでつないだ本文**のみ**（見出しなし）\"}。**body**は 中黒1行+空行+逆に、行+中黒3行+締め。",
+        "JSONのみ。最優先: {\"reassurance_bullets\":[\"1件の短文（・なし）\"],\"escalation_bullets\":[\"3件の短文（・なし）\"],\"closing\":\"最終行1文（受診）\"}",
+        "互換: {\"body\":\"上記の型を**改行**だけでつないだ本文**のみ**（見出しなし）\"}。**body**は 安心1行+逆に、行+受診目安3行+締め（いずれも行頭・なし）。",
         "病名**断定**・恐怖・**救急**の断定は禁止。上段に**Kairo**と書く必要は**ない**（**締め**は**受診**）。",
         `主症状: 「${main}」。カテゴリ: ${category}。緊急度: ${level}。`,
         painScore !== null ? `痛のスコア(参考): ${painScore}/10` : "",
+        outlookLocalTimeAdviceHintForPrompt(state),
         "痛み**以外**（熱・のど・胃腸等）の手がかりが【今の整理】にあるなら、下段に**偏りすぎない**よう反映。",
         `静的 seed（**コピー禁止・言い換え**） 安心: ${JSON.stringify(seedRe)} ／ 受診目安: ${JSON.stringify(seedEs)}`,
         `締め候補: ${JSON.stringify(visitClosings)}`,
@@ -11380,7 +11462,7 @@ function applyGreenYellowComboUserWordGuards(state, picked) {
   const deduped = [];
   for (const p of out) {
     const fp = finalizeComboLabelForCombinationLine(p) || String(p).trim();
-    if (!fp) continue;
+    if (!fp || comboGreenYellowShortLabelContainsForbiddenNai(fp)) continue;
     if (deduped.some((d) => comboLabelsAreDuplicateForCombo(d, fp))) continue;
     deduped.push(fp);
     if (deduped.length >= 3) break;
@@ -11421,7 +11503,7 @@ function padGreenYellowComboPartStringsToThree(state, src) {
   const out = [];
   const push = (s) => {
     const t = finalizeComboLabelForCombinationLine(String(s || "").trim()) || String(s || "").trim();
-    if (!t) return;
+    if (!t || comboGreenYellowShortLabelContainsForbiddenNai(t)) return;
     for (const u of out) {
       if (comboLabelsAreDuplicateForCombo(u, t)) return;
     }
@@ -11450,7 +11532,12 @@ function padGreenYellowComboPartStringsToThree(state, src) {
  */
 function finishGreenYellowComboPartStrings(state, picked) {
   if (!Array.isArray(picked) || picked.length < 2) return picked;
-  return padGreenYellowComboPartStringsToThree(state, picked);
+  let out = padGreenYellowComboPartStringsToThree(state, picked);
+  if (!Array.isArray(out)) return picked;
+  if (!out.some((p) => comboGreenYellowShortLabelContainsForbiddenNai(p))) return out;
+  const kept = out.filter((p) => !comboGreenYellowShortLabelContainsForbiddenNai(p));
+  const backfill = gatherGreenYellowSansNaiBackfillLabels(state, kept);
+  return padGreenYellowComboPartStringsToThree(state, [...kept, ...backfill]);
 }
 
 /**
@@ -11713,6 +11800,9 @@ function buildGreenYellowComboPlusClause(state, parts, causeShortOverride) {
     causeW = buildCauseComboShortLabelSync(state);
   }
   if (causeW) {
+    if (comboGreenYellowShortLabelContainsForbiddenNai(causeW)) {
+      causeW = "";
+    }
     labels = labels.filter((p) => inferComboBulletInverseKind(p) !== "cause");
   }
   labels = dedupeComboLabelsBySubsumption(labels);
@@ -11738,7 +11828,9 @@ function buildGreenYellowComboPlusClause(state, parts, causeShortOverride) {
   const chunks = [];
   if (causeW) chunks.push(causeW);
   for (const l of labels) {
-    if (l && !chunks.includes(l)) chunks.push(l);
+    if (!l || chunks.includes(l)) continue;
+    if (comboGreenYellowShortLabelContainsForbiddenNai(l)) continue;
+    chunks.push(l);
     if (chunks.length >= MAX_CHUNKS_IN_COMBO_CLAUSE) break;
   }
   if (chunks.length === 0) return "";
@@ -11791,32 +11883,39 @@ const GREEN_YELLOW_DECISION_CORE_PATTERN_B = [
  * 該当しなければ null。
  */
 function maybeBuildAttendanceRestJudgmentCoreLines(state) {
+  if (state?.conversationId) {
+    try {
+      syncHistoryTextForCareFromConversation(state);
+    } catch (_) {
+      /* ignore */
+    }
+  }
   const blob = aggregateUserTextsForGreenYellowAttendanceProbe(state);
   if (!blob) return null;
   const t = String(blob || "")
     .replace(/\s+/g, " ")
     .trim();
 
-  /** 就学・保育・通塾など／就業・バイト・出社など */
+  /** 就学・保育・通塾・高校大学など／就業・バイト・出社など */
   const schoolCue =
-    /(学校|授業|保育園|幼稚園|登校|欠席|休校|通学|塾|スクール|学級|テスト同日|オンライン授業)/.test(t);
+    /(学校|授業|保育園|幼稚園|登校|欠席|休校|通学|塾|スクール|学級|テスト同日|オンライン授業|高校|中学校|中学|大学|大学生|学部)/.test(t);
   const workCue =
-    /(仕事|会社|出勤|出社|勤務|職場|在宅勤務|バイト|アルバイト|シフト)/.test(t);
+    /(仕事|会社|出勤|出社|勤務|職場|在宅勤務|テレワーク|リモートワーク|バイト|アルバイト|シフト|会議|ミーティング)/.test(t);
   if (!schoolCue && !workCue) return null;
 
   const asksJudgmentExplicit =
     /[?？]/.test(t) ||
-    /大丈夫|いい(ですか|か)|どうですか|どうなの|どうなる|どう見る|行けるか|すべきですか|無理か|教えて|判断|決められ|理由/.test(t) ||
+    /大丈夫|いい(ですか|か)|どうですか|どうなの|どうなる|どう見る|行けるか|すべきですか|無理か|教えて|判断|決められ|理由|休むべき/.test(t) ||
     (workCue && /(休む|欠勤|休んだ|しんどい|つらい)/.test(t)) ||
     (schoolCue && /(休む|欠席|欠け|休ん|休み)/.test(t));
 
   /**
    * 可否や休む決断がハッキリしない語（質問でも宣言でも）。
-   * 広めに見るときは文末の「〜わからない」＋全文中に就学・就業の語があることで拾う。
+   * 「迷う」（迷わない）は従来取りこぼしだった。高校・大学等は「学校」を含まない。
    */
   const asksUncertaintyAboutAttendance =
-    /行けるかわからなく|行ける(?:か|$)(わからなく|わからない)|どうすべきかわからなく|どうすれば(?:いい|よい)かわからなく?|出勤(?:できる)?かわから|登校.*わからなく?|出勤.*(?:わからなく|わからない)/.test(t) ||
-    /迷っている|迷って(?:い|r)ます|決められない/.test(t) ||
+    /行ける\s*か\s*わからなく|行ける\s*か\s*わからない|行ける(?:か|$)(わからなく|わからない)|どうすべきかわからなく|どうすべき\s*か\s*わから|どうすれば(?:いい|よい)\s*か\s*わからなく?|出勤(?:できる)?\s*か\s*わから|登校\s*.*?わから|出勤\s*.*?(?:わからなく|わからない)|わかんなく|わかんない/.test(t) ||
+    /迷っている|迷って(?:い|r)ます|迷う|決められない|悩んで(?:います|いる)|悩んでる|自信がなく|どうしていい.{0,4}(わから|分から)|未確定/.test(t) ||
     (/わからなく|わからない(?:のか)?|わかりません|分からなく|分からない(?:のか)?|分かりません/.test(t) &&
       (schoolCue || workCue));
 
@@ -11830,8 +11929,31 @@ function maybeBuildAttendanceRestJudgmentCoreLines(state) {
   } else if (schoolCue && !workCue) {
     mode = "school";
   } else {
-    const iSchool = lastIndexOfAny(t, ["学校", "授業", "保育園", "幼稚園"]);
-    const iWork = lastIndexOfAny(t, ["仕事", "会社", "出勤", "出社", "勤務", "職場"]);
+    const iSchool = lastIndexOfAny(t, [
+      "学校",
+      "授業",
+      "保育園",
+      "幼稚園",
+      "登校",
+      "高校",
+      "中学校",
+      "中学",
+      "大学",
+      "通学",
+      "塾",
+    ]);
+    const iWork = lastIndexOfAny(t, [
+      "仕事",
+      "会社",
+      "出勤",
+      "出社",
+      "勤務",
+      "職場",
+      "バイト",
+      "アルバイト",
+      "シフト",
+      "テレワーク",
+    ]);
     mode = iWork > iSchool ? "work" : "school";
   }
 
@@ -11865,7 +11987,7 @@ function lastIndexOfAny(s, needles) {
 }
 
 /**
- * ③の超特例検出に使うユーザー発話の統合。会話配列があるときは**二重結合しない**（`conversationHistory` の user を優先し、なければ `historyTextForCare`）。
+ * ③の超特例検出に使うユーザー発話の統合。**user を優先**し、`historyTextForCare` との差があるときは末尾に結合して取りこぼしを減らす。
  */
 function aggregateUserTextsForGreenYellowAttendanceProbe(state) {
   if (!state) return "";
@@ -11883,10 +12005,17 @@ function aggregateUserTextsForGreenYellowAttendanceProbe(state) {
     if (Array.isArray(state.confirmationExtraFacts)) {
       state.confirmationExtraFacts.forEach((x) => parts.push(String(x || "")));
     }
-    return parts
+    let joined = parts
       .map((x) => String(x || "").trim())
       .filter(Boolean)
       .join("\n");
+    const htc = String(state.historyTextForCare || "").trim();
+    if (htc && joined && !joined.includes(htc)) {
+      joined = `${joined}\n${htc}`;
+    } else if (!joined && htc) {
+      joined = htc;
+    }
+    return joined;
   } catch (_) {
     return typeof state.historyTextForCare === "string" ? state.historyTextForCare : "";
   }
@@ -12017,6 +12146,38 @@ function redComboUserWordInclusiveMatch(canonicalLab, part) {
   if (!a || !b) return false;
   if (a === b) return true;
   return b.includes(a) || a.includes(b);
+}
+
+/** KAIRO_SPEC 🤝①②：組み合わせ短語に「ない」を含ませない（削除し別情報で代替） */
+function comboGreenYellowShortLabelContainsForbiddenNai(s) {
+  return /ない/.test(String(s || ""));
+}
+
+/**
+ * 削除した短語の穴を、箇条書きから再度拾う（「ない」を含む行は試すが採否は別フィルタで落とす）
+ */
+function gatherGreenYellowSansNaiBackfillLabels(state, keepList) {
+  const ex = new Set(
+    (keepList || []).map((x) => normalizeBulletKeyForDedupe(finalizeComboLabelForCombinationLine(String(x || "")) || String(x || "")))
+  );
+  const out = [];
+  const raw = state?.stateAboutBulletsCache;
+  if (!Array.isArray(raw)) return out;
+  for (let i = 0; i < raw.length; i++) {
+    const stripped = stripBulletLead(String(raw[i] || ""));
+    let cand =
+      shortenComboLabelFromBulletText(stripped) ||
+      finalizeComboLabelForCombinationLine(stripped) ||
+      String(stripped).trim();
+    cand = finalizeComboLabelForCombinationLine(String(cand || "").trim()) || String(cand || "").trim();
+    if (!cand || comboGreenYellowShortLabelContainsForbiddenNai(cand)) continue;
+    const key = normalizeBulletKeyForDedupe(cand);
+    if (!key || ex.has(key)) continue;
+    ex.add(key);
+    out.push(cand);
+    if (out.length >= 10) break;
+  }
+  return out;
 }
 
 /** 🟢🟡「〇〇＋〇〇」：短語同士が同一・3文字連続重複・包含か（重複列挙禁止・KAIRO_SPEC） */

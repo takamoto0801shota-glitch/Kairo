@@ -74,11 +74,30 @@ body {
     color: #4a9b8e;
 }
 
+.header-location-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+    width: 100%;
+    max-width: 100%;
+}
+
+/** はじめからの直上の区切り（右カラム幅いっぱい） */
+.header-reset-sep {
+    align-self: stretch;
+    height: 1px;
+    margin: 6px 0 0;
+    background: #e8e8e8;
+    border: none;
+    padding: 0;
+}
+
 .header-location-row {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-end;
     gap: 8px;
     width: 100%;
     flex-shrink: 0;
@@ -117,10 +136,12 @@ body {
 
 .header-main__right {
     grid-column: 3;
-    justify-self: end;
+    justify-self: stretch;
     display: flex;
-    align-items: center;
-    justify-content: flex-end;
+    flex-direction: column;
+    align-items: flex-end;
+    justify-content: flex-start;
+    gap: 8px;
     min-width: 0;
 }
 
@@ -169,6 +190,10 @@ body {
     font-weight: 400;
     min-width: var(--header-control-min-width);
     flex-shrink: 0;
+}
+
+.chat-header .header-reset {
+    align-self: flex-end;
 }
 
 .clear-button:hover {
