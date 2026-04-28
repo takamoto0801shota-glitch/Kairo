@@ -683,7 +683,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 ⏳ 今後の見通し
 
 **型**：
-- **上段**（中黒箇条書き・2行）：いまの🟢/🟡の判断に合い、**大きな心配は要らなそう**な当たりを**幅広**に。今夜休む・悪化しない、等（断定しすぎない）。
+- **上段**（中黒箇条書き・1行）：いまの🟢/🟡の判断に合い、**大きな心配は要らなそう**な当たりを**幅広**に。今夜休む・悪化しない、等（断定しすぎない）。
 - 次行：**逆に、**（この1行の見出しだけ）
 - **下段**（中黒箇条書き・**ちょうど3行**）：**受診を検討**すべき**明確**な目安。弱い心配事は**入れない**（急変・新症状・活動不能レベル等）。
 - **最終行**：このような変化があれば、その時は**受診**を**考え**てください。ー**同趣旨**で**言い換え**可
@@ -717,7 +717,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 - **最後のまとめセクション（💬 最後に または 🌱 最後に）は必ず毎回表示すること**
 
 【今後の見通しのポイント】
-- **二段**：上は**幅広の安心**、**逆に、**以降は**受診レベルの明確**な目安
+- **二段**：上は**幅広の安心（中黒1行）**、**逆に、**以降は**受診レベルの明確**な目安
 - 上段で**ビビらせない**／下段に**弱い**心配事を**出さない**
 - 締めは**受診**を**考える**の**同趣旨**（表現は**焼き直し**可）
 - 病名**断定**・**救急**の断定は出さない（**下段＋締め**の**受診検討**は**出してよい**）
@@ -946,7 +946,7 @@ ${stateContext ? `\n${stateContext}\n` : ""}
 - 🤝 Kairoの判断は一般論の説明を禁止し、感覚の翻訳にする
   - 「今のあなたの状態なら、こう考えて大丈夫です」
   - 「だから今日はこれでいいですよ」
-- ⏳ 今後の見通しは**二段**（**上**＝心配しすぎない幅広の安心、**下**＝**逆に、**以降**受診を考える**はっきり目安。締めは**受診検討**）。**表現**は**都度**変えよ。buildOutlookBlockWithLlm ／ フォールバック buildOutlookBlock
+- ⏳ 今後の見通しは**二段**（**上**＝心配しすぎない幅広の安心**・中黒1行**、**下**＝**逆に、**以降**受診を考える**はっきり目安。締めは**受診検討**）。**表現**は**都度**変えよ。buildOutlookBlockWithLlm ／ フォールバック buildOutlookBlock
 
 🤝 Kairoの判断（LLM理解レイヤー）：
 - 情報整理は単なる言い換えではなく「症状の状態を説明する文章」として生成する。
@@ -3549,17 +3549,15 @@ const OUTLOOK_VISIT_CLOSING_VARIANTS = [
   "このような変化がみられたときは、受診を検討してください。",
 ];
 
-function pickTwoDistinctFromPool(pool) {
-  const a = pool.slice();
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a.slice(0, 2);
+function pickOneRandomFromPool(pool) {
+  const a = (pool || []).slice();
+  if (a.length === 0) return [];
+  const j = Math.floor(Math.random() * a.length);
+  return [a[j]];
 }
 
 function buildOutlookReassuranceBullets(_state) {
-  return pickTwoDistinctFromPool(OUTLOOK_REASSURANCE_POOL);
+  return pickOneRandomFromPool(OUTLOOK_REASSURANCE_POOL);
 }
 
 function buildOutlookEscalationBullets(state) {
@@ -3589,16 +3587,16 @@ function bulletizeOutlookLine(s) {
 }
 
 /**
- * まとめ用「⏳ 今後の見通し」本文組み立て：安心2行 → 逆に、 → 受診目安3行 → 締め
+ * まとめ用「⏳ 今後の見通し」本文組み立て：安心1行 → 逆に、 → 受診目安3行 → 締め
  */
 function assembleOutlookBlockBody(reassuranceLines, escalationLines, closingLine) {
   const r = (reassuranceLines || []).map(bulletizeOutlookLine);
   const e = (escalationLines || []).map(bulletizeOutlookLine);
   const end = String(closingLine || OUTLOOK_VISIT_CLOSING_VARIANTS[0]).trim();
-  if (r.length < 2 || e.length < 3 || !end) return null;
+  if (r.length < 1 || e.length < 3 || !end) return null;
   return [
     "⏳ 今後の見通し",
-    ...r.slice(0, 2),
+    ...r.slice(0, 1),
     "逆に、",
     ...e.slice(0, 3),
     end,
@@ -3619,11 +3617,11 @@ function outlookLlmBodyLooksValid(body) {
   if (t.length < 80) return false;
   if (!t.includes("逆に")) return false;
   if (!/受診/.test(t)) return false;
-  return (t.match(/^・/gm) || []).length === 5;
+  return (t.match(/^・/gm) || []).length === 4;
 }
 
 /**
- * まとめの「⏳ 今後の見通し」：安心2行→逆に、→受診目安（LLM）／失敗時は buildOutlookBlock。
+ * まとめの「⏳ 今後の見通し」：安心1行→逆に、→受診目安（LLM）／失敗時は buildOutlookBlock。
  */
 async function buildOutlookBlockWithLlm(state) {
   if (!process.env.OPENAI_API_KEY) return null;
@@ -3640,12 +3638,12 @@ async function buildOutlookBlockWithLlm(state) {
       const systemPrompt = [
         "体調相談の「⏳ 今後の見通し」ブロック。見出し行「⏳ 今後の見通し」は**出さない**（呼び出し側が付与）。",
         "必須**型**（この順）:",
-        "1) `・`で始まる行を**ちょうど2行**：**大きな心配は要らなそう**な当たりを**幅広**に。今夜休む・朝までに軽くなる・悪化しない 等。断定しすぎない。**ビビらせない**（上段に**受診**や**心配**の強い表現を混ぜない）。",
+        "1) `・`で始まる行を**ちょうど1行**：**大きな心配は要らなそう**な当たりを**幅広**に。今夜休む・朝までに軽くなる・悪化しない 等。断定しすぎない。**ビビらせない**（上段に**受診**や**心配**の強い表現を混ぜない）。",
         "2) 次行は**逆に、** だけ（本文は他に書かない）。",
         "3) `・`で始まる行を**ちょうど3行**：**受診を検討**すべき**明確**な目安。弱い心配事は**出さない**（急激な悪化・新症状・起き上がるのが困難 等、**本気で**行く価値があるライン）。",
         "4) 最終行：このような変化があれば、その時は**受診**を**考え**てください。ー**同趣旨**で**言い換え**可",
-        "JSONのみ。最優先: {\"reassurance_bullets\":[\"2件・先頭に・を付けない短い行\",\"同\"],\"escalation_bullets\":[\"3件・・なし\"],\"closing\":\"最終行1文（受診）\"}",
-        "互換: {\"body\":\"上記の型を**改行**だけでつないだ本文**のみ**（見出しなし）\"}。**body**は 中黒2行+空行+逆に、行+中黒3行+締め。",
+        "JSONのみ。最優先: {\"reassurance_bullets\":[\"1件・先頭に・を付けない短い行\"],\"escalation_bullets\":[\"3件・・なし\"],\"closing\":\"最終行1文（受診）\"}",
+        "互換: {\"body\":\"上記の型を**改行**だけでつないだ本文**のみ**（見出しなし）\"}。**body**は 中黒1行+空行+逆に、行+中黒3行+締め。",
         "病名**断定**・恐怖・**救急**の断定は禁止。上段に**Kairo**と書く必要は**ない**（**締め**は**受診**）。",
         `主症状: 「${main}」。カテゴリ: ${category}。緊急度: ${level}。`,
         painScore !== null ? `痛のスコア(参考): ${painScore}/10` : "",
@@ -3683,8 +3681,8 @@ async function buildOutlookBlockWithLlm(state) {
             .trim()
         )
         .filter(Boolean);
-      if (rLines.length >= 2 && eLines.length >= 3) {
-        const block = assembleOutlookBlockBody(rLines.slice(0, 2), eLines.slice(0, 3), closing);
+      if (rLines.length >= 1 && eLines.length >= 3) {
+        const block = assembleOutlookBlockBody(rLines.slice(0, 1), eLines.slice(0, 3), closing);
         if (block && String(block).length > 50) return block;
       }
       const bodyFromLlm = String(parsed?.body || "")
@@ -11789,10 +11787,119 @@ const GREEN_YELLOW_DECISION_CORE_PATTERN_B = [
 ];
 
 /**
- * 🟢🟡③ 判断の確定：A/B から**初回のみ**抽選し、`state.greenYellowDecisionCorePattern` に保持（同一会話内は固定・🟢／🟡で同一）
+ * 「学校は休む？／仕事へ行ける？／行けるかわからない？」など**通学・就労側の可否で迷っている**とき③の👉2行をパターンB系に固定し語を差し替える（KAIRO_SPEC・超特例）。
+ * 該当しなければ null。
+ */
+function maybeBuildAttendanceRestJudgmentCoreLines(state) {
+  const blob = aggregateUserTextsForGreenYellowAttendanceProbe(state);
+  if (!blob) return null;
+  const t = String(blob || "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  /** 就学・保育・通塾など／就業・バイト・出社など */
+  const schoolCue =
+    /(学校|授業|保育園|幼稚園|登校|欠席|休校|通学|塾|スクール|学級|テスト同日|オンライン授業)/.test(t);
+  const workCue =
+    /(仕事|会社|出勤|出社|勤務|職場|在宅勤務|バイト|アルバイト|シフト)/.test(t);
+  if (!schoolCue && !workCue) return null;
+
+  const asksJudgmentExplicit =
+    /[?？]/.test(t) ||
+    /大丈夫|いい(ですか|か)|どうですか|どうなの|どうなる|どう見る|行けるか|すべきですか|無理か|教えて|判断|決められ|理由/.test(t) ||
+    (workCue && /(休む|欠勤|休んだ|しんどい|つらい)/.test(t)) ||
+    (schoolCue && /(休む|欠席|欠け|休ん|休み)/.test(t));
+
+  /**
+   * 可否や休む決断がハッキリしない語（質問でも宣言でも）。
+   * 広めに見るときは文末の「〜わからない」＋全文中に就学・就業の語があることで拾う。
+   */
+  const asksUncertaintyAboutAttendance =
+    /行けるかわからなく|行ける(?:か|$)(わからなく|わからない)|どうすべきかわからなく|どうすれば(?:いい|よい)かわからなく?|出勤(?:できる)?かわから|登校.*わからなく?|出勤.*(?:わからなく|わからない)/.test(t) ||
+    /迷っている|迷って(?:い|r)ます|決められない/.test(t) ||
+    (/わからなく|わからない(?:のか)?|わかりません|分からなく|分からない(?:のか)?|分かりません/.test(t) &&
+      (schoolCue || workCue));
+
+  const asksJudgment = asksJudgmentExplicit || asksUncertaintyAboutAttendance;
+
+  if (!asksJudgment) return null;
+
+  let mode = "school";
+  if (workCue && !schoolCue) {
+    mode = "work";
+  } else if (schoolCue && !workCue) {
+    mode = "school";
+  } else {
+    const iSchool = lastIndexOfAny(t, ["学校", "授業", "保育園", "幼稚園"]);
+    const iWork = lastIndexOfAny(t, ["仕事", "会社", "出勤", "出社", "勤務", "職場"]);
+    mode = iWork > iSchool ? "work" : "school";
+  }
+
+  if (mode === "school") {
+    const placeShort = /保育園/.test(t)
+      ? "保育園へ行く"
+      : /幼稚園/.test(t)
+        ? "幼稚園へ行く"
+        : "学校へ行く";
+    return [
+      `👉 現時点では、${placeShort}よりも、休んで様子を見る方が適切です。`,
+      GREEN_YELLOW_DECISION_CORE_PATTERN_B[1],
+    ];
+  }
+
+  const placeShortWork = /出社/.test(t) ? "出社する" : "仕事へ行く";
+  return [
+    `👉 現時点では、${placeShortWork}よりも、安静に様子を見る方が適切です。`,
+    GREEN_YELLOW_DECISION_CORE_PATTERN_B[1],
+  ];
+}
+
+/** @param {string} s */
+function lastIndexOfAny(s, needles) {
+  let best = -1;
+  for (const n of needles) {
+    const i = s.lastIndexOf(n);
+    if (i > best) best = i;
+  }
+  return best;
+}
+
+/**
+ * ③の超特例検出に使うユーザー発話の統合。会話配列があるときは**二重結合しない**（`conversationHistory` の user を優先し、なければ `historyTextForCare`）。
+ */
+function aggregateUserTextsForGreenYellowAttendanceProbe(state) {
+  if (!state) return "";
+  try {
+    const cid = state.conversationId;
+    /** @type {any} global from server */
+    const rh = typeof conversationHistory !== "undefined" ? conversationHistory[cid] : null;
+    const parts = [];
+    if (Array.isArray(rh) && rh.length) {
+      rh.filter((m) => m && m.role === "user").forEach((m) =>
+        parts.push(String(m.content ?? ""))
+      );
+    }
+    if (parts.length === 0 && typeof state.historyTextForCare === "string") parts.push(state.historyTextForCare);
+    if (Array.isArray(state.confirmationExtraFacts)) {
+      state.confirmationExtraFacts.forEach((x) => parts.push(String(x || "")));
+    }
+    return parts
+      .map((x) => String(x || "").trim())
+      .filter(Boolean)
+      .join("\n");
+  } catch (_) {
+    return typeof state.historyTextForCare === "string" ? state.historyTextForCare : "";
+  }
+}
+
+/**
+ * 🟢🟡③ 判断の確定：A/B から**初回のみ**抽選し、`state.greenYellowDecisionCorePattern` に保持（同一会話内は固定・🟢／🟡で同一）。
+ * **特例**：出席・出勤の可否を求める発話はランダムにせず、パターンB系の文面へ差し替え（上記）。
  * @param {object} [state] 未指定時は従来どおり都度ランダム（呼び出し互換用）
  */
 function pickGreenYellowDecisionCoreLines(state) {
+  const special = state ? maybeBuildAttendanceRestJudgmentCoreLines(state) : null;
+  if (special) return special.slice();
   if (state) {
     if (state.greenYellowDecisionCorePattern !== "A" && state.greenYellowDecisionCorePattern !== "B") {
       state.greenYellowDecisionCorePattern = Math.random() < 0.5 ? "A" : "B";
