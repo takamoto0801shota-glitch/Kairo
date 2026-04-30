@@ -524,8 +524,24 @@ function parseAIMessage(text) {
     return null;
   }
 
-  const trimmed = truncateBlocksAfterSecondSummaryIntro(blocks);
-  return dedupeParsedMessageBlocksByHeader(trimmed);
+  const trimmedIntro = truncateBlocksAfterSecondSummaryIntro(blocks);
+  const trimmedAfterLast = truncateBlocksAfterTerminalLastBlock(trimmedIntro);
+  return dedupeParsedMessageBlocksByHeader(trimmedAfterLast);
+}
+
+/**
+ * 「🌱 最後に」「💬 最後に」でまとめ列は終端。パース結果に続くブロックを捨てる（サーバ二重より先に効く）。
+ */
+function truncateBlocksAfterTerminalLastBlock(blocks) {
+  if (!Array.isArray(blocks) || blocks.length <= 1) return blocks;
+  for (let i = 0; i < blocks.length; i++) {
+    const ic = blocks[i]?.header?.icon ?? "";
+    const nm = String(blocks[i]?.header?.name ?? "");
+    if ((ic === "🌱" || ic === "💬") && /最後に/.test(nm)) {
+      return blocks.slice(0, i + 1);
+    }
+  }
+  return blocks;
 }
 
 /**
@@ -538,10 +554,13 @@ function dedupeParsedMessageBlocksByHeader(blocks) {
   const out = [];
   for (const b of blocks) {
     const icon = b?.header?.icon ?? "";
-    const name = String(b?.header?.name ?? "")
+    let name = String(b?.header?.name ?? "")
       .replace(/\s+/g, " ")
       .trim();
-    const key = `${icon}\0${name}`;
+    let key = `${icon}\0${name}`;
+    if (icon === "🤝" && /^(Kairoの判断|今の状態について)/.test(name)) {
+      key = "🤝\0_handshake_about";
+    }
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(b);

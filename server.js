@@ -1,6 +1,7 @@
 console.log("🚀 Kairo server version: 2026-01-27-A");
 const express = require("express");
 const cors = require("cors");
+const crypto = require("crypto");
 const OpenAI = require("openai");
 const path = require("path");
 // Railway は環境変数を直接注入するため dotenv は不要
@@ -683,9 +684,9 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 ⏳ 今後の見通し
 
 **型**：
-- **上段**（行頭に「・」を付けない**1行**）：いまの🟢/🟡の判断に合い、**大きな心配は要らなそう**な当たりを**幅広**に。**ユーザー端末のローカル時間帯（ユーザーから送られる clientMeta の tz）に即した**休養・様子見の言い換え。**時刻矛盾を避ける**。今夜休める・このあと〜、等（断定しすぎない）。
+- **上段**（行頭に「・」を付けない**1行**）：**経過の目安**（durationMeta に整合）と、**大きな心配は要らなそう**を**幅広**に。**ユーザー端末TZ**（clientMeta.tz）に即した休養・様子見。**時刻矛盾を避ける**。断定しすぎない。
 - 次行：**逆に、**（この1行の見出しだけ）
-- **下段**（行頭に「・」を付けない**ちょうど3行**）：**様子見どまりにはできないほど強いとき**だけを並べる（例：**激しい震え**・冷や汗、**激しい嘔吐**／飲めないほどの嘔気、急な意識のもうろう・強い呼吸困難・いままでにない急変。**弱い不安だけの列にはしない**。病名**断定はしない）。
+- **下段**：**「・」から始まる短文がちょうど3行**。**様子見どまりにはできないほど強いとき**だけ（例：**激しい震え**・冷や汗、**激しい嘔吐**／飲めないほどの嘔気、急な意識のもうろう・強い呼吸困難・いままでにない急変。**弱い不安だけの列にはしない**。病名**断定はしない**）。
 - **最終行**：このような変化があれば、その時は**受診**を**考え**てください。ー**同趣旨**で**言い換え**可
 - 上段に**受診**を**混ぜない**／上段で**怖がらせない**／**救急**の断定はしない
 
@@ -717,7 +718,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 - **最後のまとめセクション（💬 最後に または 🌱 最後に）は必ず毎回表示すること**
 
 【今後の見通しのポイント】
-- **二段**：上は**幅広の安心（地の文1行・行頭に「・」を付けない）**、**逆に、**以降は**受診レベルの明確**な目安。**上段と締めはローカル時間帯に合わせる**（outlookLocalTimeAdviceHintForPrompt／静的は OUTLOOK_REASSURANCE_BY_BAND）
+- **二段**：上は**経過の目安**＋**幅広の安心**（地の文1行・行頭に「・」なし・経過文＋時間帯）、**逆に、**以降は**「・」付き3行**で**受診レベルの急変**のみ。**上段と締めはローカル時間帯に合わせる**（outlookLocalTimeAdviceHintForPrompt／outlookDurationMetaHintForPrompt）
 - 上段で**ビビらせない**／下段に**弱い**心配事を**出さない**
 - 締めは**受診**を**考える**の**同趣旨**（表現は**焼き直し**可）
 - 病名**断定**・**救急**の断定は出さない（**下段＋締め**の**受診検討**は**出してよい**）
@@ -896,7 +897,74 @@ function initConversationState(input = {}) {
     bulletLlmPolishedSourceFingerprint: null,
     /** 🟢🟡③ `pickGreenYellowDecisionCoreLines` の A/B。初回のみランダム決定し会話中は固定 */
     greenYellowDecisionCorePattern: null,
+    /** モーダル API の成功レス。**同一入力**の再開はこれをそのまま返す（`/api/state-patterns` `/api/action-details` `/api/hospital-details`） */
+    modalResponseCache: null,
   };
+}
+
+/** 入力が変わると指紋も変わる（まとめ更新・.epoch 増加で自動無効） */
+function hashModalFingerprint(obj) {
+  return crypto.createHash("sha256").update(JSON.stringify(obj)).digest("hex");
+}
+
+function modalCacheGet(state, modalKey, fingerprint) {
+  const row = state?.modalResponseCache?.[modalKey];
+  if (!row || row.fp !== fingerprint) return null;
+  const p = row.payload;
+  if (p === null || typeof p !== "object") return null;
+  return p;
+}
+
+function modalCacheSet(state, modalKey, fingerprint, payload) {
+  if (!state) return;
+  if (!state.modalResponseCache || typeof state.modalResponseCache !== "object") {
+    state.modalResponseCache = {};
+  }
+  state.modalResponseCache[modalKey] = { fp: fingerprint, payload };
+}
+
+function fingerprintStatePatternsPayload(state, summaryFacts, summarySection) {
+  return hashModalFingerprint({
+    k: "statePatterns",
+    facts: Array.isArray(summaryFacts) ? summaryFacts : [],
+    section: String(summarySection || "").trim(),
+    summaryText: String(state?.summaryText || ""),
+    epoch: Number(state?.summaryGenerationEpoch || 0),
+    level: state ? finalizeRiskLevel(state) : "🟢",
+    ms: state ? getSyncedMainSymptomDisplayLabel(state) : "",
+  });
+}
+
+function fingerprintActionDetailsPayload(state, actionSection) {
+  const historyText =
+    conversationHistory[state?.conversationId] || [];
+  const ht = Array.isArray(historyText)
+    ? historyText.filter((m) => m && m.role === "user").map((m) => String(m.content || "")).join("\n")
+    : "";
+  return hashModalFingerprint({
+    k: "actionDetails",
+    actionSection: String(actionSection || "").trim(),
+    summaryText: String(state?.summaryText || ""),
+    epoch: Number(state?.summaryGenerationEpoch || 0),
+    decisionLevel: String(state?.decisionLevel || finalizeRiskLevel(state)),
+    ht,
+    triageCat: state?.triageCategory || null,
+  });
+}
+
+function fingerprintHospitalDetailsPayload(state) {
+  const ids = [...(state?.hospitalCandidates || []), ...(state?.clinicCandidates || [])]
+    .map((x) => x?.placeId || x?.name || "")
+    .slice(0, 12)
+    .join("|");
+  return hashModalFingerprint({
+    k: "hospitalDetails",
+    summaryText: String(state?.summaryText || ""),
+    epoch: Number(state?.summaryGenerationEpoch || 0),
+    decisionLevel: String(state?.decisionLevel || ""),
+    hospName: state?.hospitalRecommendation?.name || "",
+    placeIds: ids,
+  });
 }
 
 function buildStateAboutContextForSummary(state) {
@@ -946,7 +1014,7 @@ ${stateContext ? `\n${stateContext}\n` : ""}
 - 🤝 Kairoの判断は一般論の説明を禁止し、感覚の翻訳にする
   - 「今のあなたの状態なら、こう考えて大丈夫です」
   - 「だから今日はこれでいいですよ」
-- ⏳ 今後の見通しは**二段**（**上**＝心配しすぎない幅広の安心**・地の文1行**（**ユーザーTZの時間帯に即す**）、**下**＝**逆に、**以降**受診を考える**はっきり目安。**行頭に「・」は付けない**。**締め**は**受診検討**。**表現**は**都度**変えよ。buildOutlookBlockWithLlm（outlookLocalTimeAdviceHintForPrompt）／ フォールバック buildOutlookBlock（getOutlookLocalHour＋バンド別 seed）
+- ⏳ 今後の見通しは**二段**（**上**＝**経過の目安**＋安心を地の文1行・経過スロットと整合。**ユーザーTZ**で休養・様子見を言い換え。**下**＝**逆に、**のあと**「・」から始まる短文が3行**＝受診検討レベルの急変のみ）。**締め**は**受診検討**（サーバでは buildOutlookBlockWithLlm／buildOutlookBlock）
 
 🤝 Kairoの判断（LLM理解レイヤー）：
 - 情報整理は単なる言い換えではなく「症状の状態を説明する文章」として生成する。
@@ -1368,7 +1436,7 @@ function stripDuplicateSummaryBlockHeaders(text) {
     const trimmed = String(line || "").trimStart();
     const m = trimmed.match(headerLineRe);
     if (m) {
-      const key = `${m[1]}\0${String(m[2] || "").replace(/\s+/g, " ").trim()}`;
+      const key = normalizeSummaryBlockHeaderDedupKey(m[1], m[2]);
       if (seen.has(key)) {
         i += 1;
         while (i < lines.length) {
@@ -1418,12 +1486,63 @@ function stripWrongVariantStateAboutBlocks(text, level) {
   return t;
 }
 
+/**
+ * 「🌱／💬 最後に」でまとめは終端。それ以降に続く **2巡目の** 🤝・✅・⏳・先頭からの並びだけを削除（LLMが全文を二重出力したときの対策・KAIRO_SPEC）。
+ */
+function stripDuplicateSummaryTrailAfterLastBlock(text, level) {
+  const lines = String(text || "").split("\n");
+  const terminalLineRe =
+    level === "🔴"
+      ? /^(\s*)(?:💬\s*最後に|🌱\s*最後に)/
+      : /^(\s*)(?:🌱\s*最後に|💬\s*最後に)/;
+  let ti = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (terminalLineRe.test(lines[i])) {
+      ti = i;
+      break;
+    }
+  }
+  if (ti < 0) return text;
+  const out = lines.slice(0, ti + 1);
+  for (let i = ti + 1; i < lines.length; i++) {
+    const raw = lines[i];
+    const t = String(raw || "").trimStart();
+    if (
+      /^(🟢|🟡|🔴)[\s\u3000]*ここまでの情報を整理します/.test(t) ||
+      /^🤝\s/.test(t) ||
+      /^✅\s/.test(t) ||
+      /^⏳\s/.test(t) ||
+      /^📝\s/.test(t) ||
+      /^🏥\s/.test(t) ||
+      /^💊\s/.test(t) ||
+      /^⚠️\s/.test(t) ||
+      /^🚨\s/.test(t) ||
+      terminalLineRe.test(lines[i])
+    ) {
+      break;
+    }
+    out.push(raw);
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function normalizeSummaryBlockHeaderDedupKey(emoji, rest) {
+  const r = String(rest || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (emoji === "🤝" && /^(Kairoの判断|今の状態について)/.test(r)) {
+    return `${emoji}\0handshake_about`;
+  }
+  return `${emoji}\0${r}`;
+}
+
 function preprocessSummaryDuplicateGuards(text, level) {
   let t = normalizeHospitalMemoHeaderText(text);
   t = stripEmergencyBlock(t);
   t = stripAfterSecondSummaryIntroLine(t);
   t = stripDuplicateSummaryBlockHeaders(t);
   t = stripWrongVariantStateAboutBlocks(t, level);
+  t = stripDuplicateSummaryTrailAfterLastBlock(t, level);
   return t;
 }
 
@@ -3513,25 +3632,25 @@ function correctKanjiAndTypos(text) {
   return t;
 }
 
-/** 下段：受診を本気で検討すべきほど強い変化のみ（震え・激しい嘔吐・呼吸困難等。弱めの様子とは混ぜない） */
+/** 下段：受診を本気で検討すべきほど強い変化のみ（KAIRO_SPEC・「・」3行で出力） */
 const OUTLOOK_ESCALATION_CORE = [
-  "痛み・発熱がこれまでとは段違いに強くなる、または意識がはっきり保てないほどなる",
-  "激しい嘔吐が続く、激しい震えや冷や汗で寒気が止まらないなど、脱水や全身ぐらつきがある",
-  "息が苦しく短い言葉しか話せないほどになる、胸が強く締め付けられるような痛みがある、手足や口まわりのしびれが急に増すなど、これまでにない急変がある",
+  "激しい震えや強い冷汗が強く続く",
+  "ひどい嘔吐が続く、または水も飲めないほどのむかつき",
+  "意識のもうろう、または息苦しさ・胸の痛みが急に強くなる",
 ];
 
 const OUTLOOK_ESCALATION_INFECTION_EXTRA = [
   "息苦しさや胸の重さが新しく出る",
   "水をほとんど飲めない、または意識がはっきり保てない",
-  "同じ不調のまま体力的に急に底をついたように感じる",
+  "体力的に急に底をついたように感じる",
 ];
 
 const OUTLOOK_ESCALATION_GI_EXTRA = [
-  "血が混じる便や真っ黒い便がある、または激しい腹痛がずっと引かず動けないとき",
+  "血が混じる便や真っ黒い便、または激しい腹痛が引かない",
 ];
 
 const OUTLOOK_ESCALATION_NEURO_EXTRA = [
-  "手足の力が一気に入りにくい、意識がぼんやりする など、いままでにない変化が出る",
+  "手足の力が急に入りにくい、いままでにない変化が出る",
 ];
 
 const OUTLOOK_VISIT_CLOSING_VARIANTS = [
@@ -3589,52 +3708,60 @@ function outlookLocalTimeAdviceHintForPrompt(state) {
   return `【ユーザー側ローカルの現在】おおよそ${h}時台（timezone: ${tz || "未送信時はサーバー時計のため誤差の可能性あり"}）。時間帯区分「${lbl}」。安心の上段と必要時の締めの言い換えは、この時間に即した休息・様子見のタイミングにする。**日中帯では「今夜」だけに寄せ過ぎない**。**深夜〜早朝は日中の様子だけに固定しない**。**生活リズムと矛盾しない文のみ**。`;
 }
 
-const OUTLOOK_REASSURANCE_NEUTRAL = [
-  "強くならず、他の症状が増えなければ、そのまま回復に向かうことが多いです",
-  "急に生じた不調は、上がり下がりを繰り返しながら落ち着くことも多く、いまはそういう日ばかりではありません",
-  "いまの強さのまま、時間が経つにつれ和らいでいく流れを待てているなら、大きな心配をしなくてよいことが多いです",
-];
-
-const OUTLOOK_REASSURANCE_BY_BAND = {
-  late_night: [
-    "今夜しっかり休んで、明日の朝に軽くなっていれば心配はいりません",
-    "このあと落ち着いて休めていれば、明け方〜午前までに強くならなければ大きな不安はいらなそうです",
-    "いまの強さのまま、睡眠を挟んで落ち着いていれば、大きな心配をしなくてよいことが多いです",
-  ],
-  morning: [
-    "午前中〜昼ごろまで大きく悪化しなければ、今日のうちに様子が持ち直しやすいです",
-    "この後の日中に強くならなければ、いまより悪くなければ大きな心配はいりません",
-    "起き上がる・歩くなど普段通りの動きはつらいが「どうにか」なら、午後まで様子を見る流れで多くは足ります",
-  ],
-  midday: [
-    "休息を挟めば、体調の見え方は今日のうちに持ち直しやすいです",
-    "午後〜夕方にかけて急に悪化しなければ、そのまま回復に向かうことが多いです",
-    "強くならず、他の症状が増えなければ今夜に向けて落ち着いていれば心配はいりません",
-  ],
-  afternoon: [
-    "夕方までに急に悪化しなければ、今夜の休息で持ち直しやすいです",
-    "今日の夕方〜夜にかけてこのまま落ち着けるなら、大きな心配はいりません",
-    "夕食前後まで大きく変わらなければ、今夜の休憩を挟んで様子を見てよいことが多いです",
-  ],
-  night: [
-    "今夜しっかり休んで、明日の朝の立ち上がりで楽になっていれば心配はいりません",
-    "就寝前〜睡眠を挟んだあとに急変しなければ、明日の朝まで見守れば足りることが多いです",
-    "寝る直前までいまの強さから大きく外れていなければ、まずは休養を優先してよいことが多いです",
-  ],
-};
-
-function pickOneRandomFromPool(pool) {
-  const a = (pool || []).slice();
-  if (a.length === 0) return [];
-  const j = Math.floor(Math.random() * a.length);
-  return [a[j]];
+/** LLM 用：`durationMeta` と仕様特例A/B を上段経過文言に反映させる */
+function outlookDurationMetaHintForPrompt(state) {
+  const idx = state?.durationMeta?.selectedIndex;
+  if (idx === 1) {
+    return "【経過（durationMeta）】特例A：**数時間スケール**。上段に「数日かけて」は書かない。安静と時間目安はセット。";
+  }
+  if (idx === 2) {
+    return "【経過（durationMeta）】特例B：**数日スケール**で安心を優先。";
+  }
+  if (idx === 0) {
+    return "【経過（durationMeta）】ごく短い経過：**数時間〜1日程度**の見通しで。";
+  }
+  return "【経過】スロット未確定：箇条書き経過のみ根拠にし、ユーザー語を勝手に変換しない。";
 }
 
+/** 上段2文目：経過見通し（`buildExpectedCourse`）に続け、ローカル時間帯で安心の言い回しを変える（KAIRO_SPEC・⏳） */
+const OUTLOOK_WARM_TAIL_BY_BAND = {
+  late_night: [
+    "いまの強さから急に変わらなければ大きな心配はいりません。",
+    "休めていれば大丈夫なことが多いです。",
+  ],
+  morning: [
+    "午前〜昼ごろまで大きく悪化しなければ今日の見通しは良いです。",
+    "日中に急変しなければ心配は少なそうです。",
+  ],
+  midday: [
+    "今日のうちに持ち直しやすいです。",
+    "午後に急変しなければ大丈夫なことが多いです。",
+  ],
+  afternoon: [
+    "夕方まで急に悪化しなければ大丈夫なことが多いです。",
+    "今夜の休息で落ち着きやすいです。",
+  ],
+  night: [
+    "今夜しっかり休めば明日に向けて安心しやすいです。",
+    "就寝まで急変しなければ大丈夫なことが多いです。",
+  ],
+};
+const OUTLOOK_WARM_TAIL_NEUTRAL = [
+  "いまの文脈なら大きな心配は少なそうです。",
+  "急に強く変わらなければ大丈夫なことが多いです。",
+];
+
+/**
+ * 「⏳ 今後の見通し」上段1行：**予想経過**（durationMeta・`buildExpectedCourse`）＋時間帯の安心一言。
+ */
 function buildOutlookReassuranceBullets(state) {
+  const course = buildExpectedCourse({}, state || null);
   const band = outlookBandFromHour(getOutlookLocalHour(state));
-  const keyed = OUTLOOK_REASSURANCE_BY_BAND[band] || [];
-  const pool = keyed.length ? keyed.concat(OUTLOOK_REASSURANCE_NEUTRAL) : OUTLOOK_REASSURANCE_NEUTRAL.slice();
-  return pickOneRandomFromPool(pool);
+  const keyed = OUTLOOK_WARM_TAIL_BY_BAND[band];
+  const pool = keyed && keyed.length ? keyed.slice() : OUTLOOK_WARM_TAIL_NEUTRAL.slice();
+  const tail = pool[Math.floor(Math.random() * pool.length)];
+  const one = `${String(course || "").trim()}${tail}`.trim();
+  return one ? [one] : [];
 }
 
 function buildOutlookEscalationBullets(state) {
@@ -3664,12 +3791,19 @@ function normalizeOutlookParagraphLine(s) {
     .trim();
 }
 
+/** 下段：行頭に「・」を付与（既に付いていれば重ねない） */
+function formatOutlookEscalationLine(s) {
+  const t = normalizeOutlookParagraphLine(s);
+  if (!t) return "";
+  return t.startsWith("・") ? t : `・${t}`;
+}
+
 /**
- * まとめ用「⏳ 今後の見通し」本文組み立て：安心1行（・なし）→ 逆に、 → 受診目安3行 → 締め
+ * まとめ用「⏳ 今後の見通し」本文組み立て：上段1行（・なし）→ 逆に、 → 受診目安3行（・付き）→ 締め
  */
 function assembleOutlookBlockBody(reassuranceLines, escalationLines, closingLine) {
   const r = (reassuranceLines || []).map(normalizeOutlookParagraphLine);
-  const e = (escalationLines || []).map(normalizeOutlookParagraphLine);
+  const e = (escalationLines || []).map(formatOutlookEscalationLine).filter(Boolean);
   const end = String(closingLine || OUTLOOK_VISIT_CLOSING_VARIANTS[0]).trim();
   if (r.length < 1 || e.length < 3 || !end) return null;
   return [
@@ -3695,10 +3829,16 @@ function outlookLlmBodyLooksValid(body) {
   if (t.length < 80) return false;
   if (!t.includes("逆に")) return false;
   if (!/受診/.test(t)) return false;
-  if ((t.match(/^・/gm) || []).length === 4) return true;
+  const dotCount = (t.match(/^・/gm) || []).length;
+  if (dotCount >= 3) return true;
   const rawLines = t.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
   const invIdx = rawLines.findIndex((l) => /^逆に[、,]?\s*$/.test(l));
-  return invIdx >= 1 && rawLines.length >= invIdx + 5;
+  const closingIdx = rawLines.findIndex((l) => /^このような変化|^こうした/.test(l));
+  if (invIdx < 0) return false;
+  const sliceEnd = closingIdx >= 0 ? closingIdx : rawLines.length;
+  const mid = rawLines.slice(invIdx + 1, sliceEnd).filter(Boolean);
+  if (mid.length < 3) return false;
+  return mid.slice(0, 3).every((l) => l.length > 15);
 }
 
 /**
@@ -3719,18 +3859,19 @@ async function buildOutlookBlockWithLlm(state) {
       const systemPrompt = [
         "体調相談の「⏳ 今後の見通し」ブロック。見出し行「⏳ 今後の見通し」は**出さない**（呼び出し側が付与）。",
         "必須**型**（この順）:",
-        "1) **行頭に「・」は付けない**地の文を**1行**：**大きな心配は要らなそう**な当たりを**幅広**に。**下の【ユーザー側ローカルの現在】に合わせ**て、休養・様子見の**タイミング**を言い換える（例：今夜／今日のうち／明日の朝。**いまの時間帯と矛盾させない**）。断定しすぎない。**ビビらせない**（上段に**受診**や**心配**の強い表現を混ぜない）。",
+        "1) **行頭に「・」は付けない**地の文を**1行（短文に寄せる）**：**経過の目安**（多くの場合の落ち着き方）を含めつつ**大きな心配はいりません**級の安心を幅広に。【経過】【ローカルの現在】と**矛盾させない**。断定しすぎない。**敬体（です・ます）**のみ。**過剰な敬語は禁止**。上段に**受診**や**強い不安**は混ぜない。",
         "2) 次行は**逆に、** だけ（本文は他に書かない）。",
-        "3) **行頭に「・」は付けない**地の文を**ちょうど3行**：**受診を本気で検討すべきレベルの急変のみ**。**弱めの心配だけ**並べない。例：**激しい震え**・強い冷汗、**ひどい嘔吐**/飲めないほどの嘔気、**意識がもうろう**/息苦しい急なしびれ 等。**病名断定はしない**（変化の描写のみ）。",
-        "4) 最終行：このような変化があれば、その時は**受診**を**考え**てください。ー**同趣旨**で**言い換え**可",
-        "JSONのみ。最優先: {\"reassurance_bullets\":[\"1件の短文（・なし）\"],\"escalation_bullets\":[\"3件の短文（・なし）\"],\"closing\":\"最終行1文（受診）\"}",
-        "互換: {\"body\":\"上記の型を**改行**だけでつないだ本文**のみ**（見出しなし）\"}。**body**は 安心1行+逆に、行+受診目安3行+締め（いずれも行頭・なし）。",
+        "3) **行頭に「・」**を付けて**ちょうど3行**。**受診を本気で検討すべき急変のみ**。**短め**。弱い心配のみで埋めない。**病名断定はしない**（変化の描写のみ）。",
+        "4) 最終行：このような変化があれば、その時は**受診**を**考える／検討**。**同趣旨**で言い換え可。",
+        "JSONのみ。最優先: {\"reassurance_bullets\":[\"上段1行（・なし・経過＋安心）\"],\"escalation_bullets\":[\"・で始める3行\"],\"closing\":\"締め1文（受診）\"}",
+        "互換: {\"body\":\"上記を**改行**だけつないだ本文（見出しなし）。下段は必ず各行「・」先頭**。\"}",
         "病名**断定**・恐怖・**救急**の断定は禁止。上段に**Kairo**と書く必要は**ない**（**締め**は**受診**）。",
         `主症状: 「${main}」。カテゴリ: ${category}。緊急度: ${level}。`,
         painScore !== null ? `痛のスコア(参考): ${painScore}/10` : "",
         outlookLocalTimeAdviceHintForPrompt(state),
+        outlookDurationMetaHintForPrompt(state),
         "痛み**以外**（熱・のど・胃腸等）の手がかりが【今の整理】にあるなら、下段に**偏りすぎない**よう反映。",
-        `静的 seed（**コピー禁止・言い換え**） 安心: ${JSON.stringify(seedRe)} ／ 受診目安: ${JSON.stringify(seedEs)}`,
+        `静的 seed（**コピー禁止・言い換え**） 安心上段イメージ: ${JSON.stringify(seedRe)} ／ 受診目安(seed): ${JSON.stringify(seedEs)}`,
         `締め候補: ${JSON.stringify(visitClosings)}`,
         bulletHints ? `【今の整理（参考）】\n${bulletHints}` : "",
       ]
@@ -4772,7 +4913,7 @@ function pickActionsForBlock(plan, maxCount = 2) {
 }
 
 /**
- * ② 予想経過・特例B：日単位以上（KAIRO_SPEC 10.1 ②）。`durationMeta.selectedIndex === 2` または文脈が「昨日」「数日」等。
+ * 経過が**日単位以上**と解釈されるとき（`durationMeta.selectedIndex === 2` 等）。`buildExpectedCourse`／⏳ 上段。
  */
 function isExpectedCourseDaysScaleVariant(state) {
   if (!state) return false;
@@ -4788,8 +4929,7 @@ function isExpectedCourseDaysScaleVariant(state) {
 }
 
 /**
- * ② 予想経過・特例A：数時間スケール（数時間前・一時間前・半日など）。`selectedIndex === 1`。
- * 「数日かけて」は使わず「数時間ほどで」系にする。
+ * 経過が**数時間スケール**と解釈されるとき（`selectedIndex === 1` 等）。「数日かけて」は禁止。`buildExpectedCourse`／⏳ 上段。
  */
 function isExpectedCourseHoursScaleVariant(state) {
   if (!state) return false;
@@ -4807,7 +4947,9 @@ function isExpectedCourseHoursScaleVariant(state) {
   return /(数時間|１時間|1時間|一時間|時間前|半日)/.test(durationRaw);
 }
 
-/** ② 予想経過（安心設計） */
+/**
+ * 予想経過（安心設計・`durationMeta`）。**本文の主な利用先**は `⏳ 今後の見通し` 上段（`buildOutlookReassuranceBullets`）。旧・✅ブロック内の単独行は廃止（KAIRO_SPEC）。
+ */
 function buildExpectedCourse(context = {}, state = null) {
   if (state && isExpectedCourseDaysScaleVariant(state)) {
     const templates = [
@@ -5210,7 +5352,7 @@ function buildDoActionsFromPlan(plan, state, level, options = {}) {
   return ensured.slice(0, maxCount);
 }
 
-/** ③ 締めの一文（心理的アンカー） */
+/** §10.1 の② 締めの一文（任意） */
 function buildClosingLine() {
   const templates = [
     "今は体を回復モードに入れることが最優先です。",
@@ -5341,8 +5483,6 @@ async function buildImmediateActionsBlock(level, state, historyText = "", resear
     lines.push(`→ ${String(item.reason || "").trim()}`);
     if (idx < doActions.length - 1) lines.push("");
   });
-  lines.push("");
-  lines.push(buildExpectedCourse(context, state));
   lines.push("");
   lines.push(buildClosingLine());
   return lines.join("\n");
@@ -11869,11 +12009,21 @@ function buildGreenYellowComboIntegratedParagraph(state, level, parts, causeShor
   return `${lead}\n${tail}`;
 }
 
-const GREEN_YELLOW_DECISION_CORE_PATTERN_A = [
+/** 🟢 ③判断の確定（A／B・`pickGreenYellowDecisionCoreLines`） */
+const GREEN_YELLOW_DECISION_CORE_PATTERN_GREEN_A = [
+  "👉 現時点では、命に関わるような緊急性は低く、まず落ち着いて様子を見て大丈夫です。",
+  "👉 無理に動かず休息を優先することが、今いちばん正しい対応です。",
+];
+const GREEN_YELLOW_DECISION_CORE_PATTERN_GREEN_B = [
+  "👉 今の症状からは、緊急性の高いサインは見られないため、ゆっくり休んでください。",
+  "👉 一般的に数時間ほどで落ち着いてくる可能性が高いです。",
+];
+/** 🟡 同上（変更時は③完成例・超特例2行目の参照も整合） */
+const GREEN_YELLOW_DECISION_CORE_PATTERN_YELLOW_A = [
   "👉 現時点では、病院に行っても対応は自宅での休息と大きく変わりません。",
   "👉 今は無理せず休んで体を回復させてください。",
 ];
-const GREEN_YELLOW_DECISION_CORE_PATTERN_B = [
+const GREEN_YELLOW_DECISION_CORE_PATTERN_YELLOW_B = [
   "👉 現時点では、受診を急ぐよりも、自宅で安静にして変化を見る方が適切な状態です。",
   "👉 無理に動くとかえって負担になりやすいため、今は休むことが正しい対応です。",
 ];
@@ -11957,6 +12107,11 @@ function maybeBuildAttendanceRestJudgmentCoreLines(state) {
     mode = iWork > iSchool ? "work" : "school";
   }
 
+  const line2B =
+    finalizeRiskLevel(state) === "🟢"
+      ? GREEN_YELLOW_DECISION_CORE_PATTERN_GREEN_B[1]
+      : GREEN_YELLOW_DECISION_CORE_PATTERN_YELLOW_B[1];
+
   if (mode === "school") {
     const placeShort = /保育園/.test(t)
       ? "保育園へ行く"
@@ -11965,14 +12120,14 @@ function maybeBuildAttendanceRestJudgmentCoreLines(state) {
         : "学校へ行く";
     return [
       `👉 現時点では、${placeShort}よりも、休んで様子を見る方が適切です。`,
-      GREEN_YELLOW_DECISION_CORE_PATTERN_B[1],
+      line2B,
     ];
   }
 
   const placeShortWork = /出社/.test(t) ? "出社する" : "仕事へ行く";
   return [
     `👉 現時点では、${placeShortWork}よりも、安静に様子を見る方が適切です。`,
-    GREEN_YELLOW_DECISION_CORE_PATTERN_B[1],
+    line2B,
   ];
 }
 
@@ -12022,20 +12177,28 @@ function aggregateUserTextsForGreenYellowAttendanceProbe(state) {
 }
 
 /**
- * 🟢🟡③ 判断の確定：A/B から**初回のみ**抽選し、`state.greenYellowDecisionCorePattern` に保持（同一会話内は固定・🟢／🟡で同一）。
+ * 🟢🟡③ 判断の確定：A/B から**初回のみ**抽選し、`state.greenYellowDecisionCorePattern` に保持（同一会話内は固定）。**文面は** `finalizeRiskLevel(state)` が **🟢**／**🟡** で別配列（下定数）。
  * **特例**：出席・出勤の可否を求める発話はランダムにせず、パターンB系の文面へ差し替え（上記）。
  * @param {object} [state] 未指定時は従来どおり都度ランダム（呼び出し互換用）
  */
 function pickGreenYellowDecisionCoreLines(state) {
   const special = state ? maybeBuildAttendanceRestJudgmentCoreLines(state) : null;
   if (special) return special.slice();
+  const patA =
+    state && finalizeRiskLevel(state) === "🟢"
+      ? GREEN_YELLOW_DECISION_CORE_PATTERN_GREEN_A
+      : GREEN_YELLOW_DECISION_CORE_PATTERN_YELLOW_A;
+  const patB =
+    state && finalizeRiskLevel(state) === "🟢"
+      ? GREEN_YELLOW_DECISION_CORE_PATTERN_GREEN_B
+      : GREEN_YELLOW_DECISION_CORE_PATTERN_YELLOW_B;
   if (state) {
     if (state.greenYellowDecisionCorePattern !== "A" && state.greenYellowDecisionCorePattern !== "B") {
       state.greenYellowDecisionCorePattern = Math.random() < 0.5 ? "A" : "B";
     }
-    return (state.greenYellowDecisionCorePattern === "A" ? GREEN_YELLOW_DECISION_CORE_PATTERN_A : GREEN_YELLOW_DECISION_CORE_PATTERN_B).slice();
+    return (state.greenYellowDecisionCorePattern === "A" ? patA : patB).slice();
   }
-  return (Math.random() < 0.5 ? GREEN_YELLOW_DECISION_CORE_PATTERN_A : GREEN_YELLOW_DECISION_CORE_PATTERN_B).slice();
+  return (Math.random() < 0.5 ? patA : patB).slice();
 }
 
 /**
@@ -19151,6 +19314,15 @@ app.post("/api/state-patterns", async (req, res) => {
   try {
     const { conversationId, summaryFacts, summarySection } = req.body || {};
     const state = conversationId ? getOrInitConversationState(conversationId) : initConversationState();
+    const fpSp = fingerprintStatePatternsPayload(
+      state,
+      Array.isArray(summaryFacts) ? summaryFacts : [],
+      summarySection || ""
+    );
+    const cachedSp = modalCacheGet(state, "statePatterns", fpSp);
+    if (cachedSp) {
+      return res.status(200).json(cachedSp);
+    }
     const {
       message,
       structured,
@@ -19182,16 +19354,11 @@ app.post("/api/state-patterns", async (req, res) => {
         "大手医療情報サイト",
       ],
     };
-    if (IS_DEBUG) {
-      return res.status(200).json({
-        ...basePayload,
-        query,
-        queryJP,
-        queryEN,
-        sourceNames,
-      });
-    }
-    return res.status(200).json(basePayload);
+    const jsonSp = IS_DEBUG
+      ? { ...basePayload, query, queryJP, queryEN, sourceNames }
+      : basePayload;
+    modalCacheSet(state, "statePatterns", fpSp, jsonSp);
+    return res.status(200).json(jsonSp);
   } catch (error) {
     console.error("state-patterns error:", error);
     const cid = (req.body && req.body.conversationId) || null;
@@ -19238,6 +19405,11 @@ app.post("/api/action-details", async (req, res) => {
   try {
     const { conversationId, actionSection } = req.body || {};
     const state = conversationId ? getOrInitConversationState(conversationId) : initConversationState();
+    const fpAd = fingerprintActionDetailsPayload(state, actionSection || "");
+    const cachedAd = modalCacheGet(state, "actionDetails", fpAd);
+    if (cachedAd) {
+      return res.status(200).json(cachedAd);
+    }
     const historyText = (conversationHistory[conversationId] || [])
       .filter((m) => m.role === "user")
       .map((m) => m.content)
@@ -19254,7 +19426,7 @@ app.post("/api/action-details", async (req, res) => {
         console.error("[RedModal research]", e?.message || e);
       }
       const message = buildRedModalContent(state, historyText, research);
-      return res.status(200).json({
+      const redPayload = {
         message,
         sourcePolicy: [
           "公的機関",
@@ -19262,7 +19434,9 @@ app.post("/api/action-details", async (req, res) => {
           "国際医療機関",
           "大手医療情報サイト",
         ],
-      });
+      };
+      modalCacheSet(state, "actionDetails", fpAd, redPayload);
+      return res.status(200).json(redPayload);
     }
     const { message, query, sourceNames } = await buildConcreteImmediateActionsDetails(
       state,
@@ -19277,14 +19451,9 @@ app.post("/api/action-details", async (req, res) => {
         "大手医療情報サイト",
       ],
     };
-    if (IS_DEBUG) {
-      return res.status(200).json({
-        ...basePayload,
-        query,
-        sourceNames,
-      });
-    }
-    return res.status(200).json(basePayload);
+    const jsonAd = IS_DEBUG ? { ...basePayload, query, sourceNames } : basePayload;
+    modalCacheSet(state, "actionDetails", fpAd, jsonAd);
+    return res.status(200).json(jsonAd);
   } catch (error) {
     console.error("action-details error:", error);
     const cid = (req.body && req.body.conversationId) || null;
@@ -19366,8 +19535,15 @@ app.post("/api/hospital-details", async (req, res) => {
   try {
     const { conversationId } = req.body || {};
     const state = conversationId ? getOrInitConversationState(conversationId) : initConversationState();
+    const fpH = fingerprintHospitalDetailsPayload(state);
+    const cachedH = modalCacheGet(state, "hospitalDetails", fpH);
+    if (cachedH) {
+      return res.status(200).json(cachedH);
+    }
     const message = await buildHospitalDetailsModalContent(state);
-    return res.status(200).json({ message });
+    const hospitalPayload = { message };
+    modalCacheSet(state, "hospitalDetails", fpH, hospitalPayload);
+    return res.status(200).json(hospitalPayload);
   } catch (error) {
     console.error("hospital-details error:", error);
     const cid = (req.body && req.body.conversationId) || null;
