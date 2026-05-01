@@ -686,8 +686,8 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 **型**：
 - **上段**（行頭に「・」を付けない**1行**）：**経過の目安**（durationMeta に整合）と、**大きな心配は要らなそう**を**幅広**に。**ユーザー端末TZ**（clientMeta.tz）に即した休養・様子見。**時刻矛盾を避ける**。断定しすぎない。
 - 次行：**逆に、**（この1行の見出しだけ）
-- **下段**：**「・」から始まる短文がちょうど3行**。**様子見どまりにはできないほど強いとき**だけ（例：**激しい震え**・冷や汗、**激しい嘔吐**／飲めないほどの嘔気、急な意識のもうろう・強い呼吸困難・いままでにない急変。**弱い不安だけの列にはしない**。病名**断定はしない**）。
-- **最終行**：このような変化があれば、その時は**受診**を**考え**てください。ー**同趣旨**で**言い換え**可
+- **下段**：**「・」から始まる短文がちょうど3行**。各行は**症状・身体の変化の描写のみ**で終える（**各行に「受診」「検討」「考えてください」は書かない**。**「〜場合は受診」の形も禁止**）。**様子見どまりにはできないほど強いとき**だけ（例：**激しい震え**・冷や汗、**激しい嘔吐**／飲めないほどの嘔気、急な意識のもうろう・強い呼吸困難・いままでにない急変。**弱い不安だけの列にはしない**。病名**断定はしない**）。
+- **最終行のみ**に受診の勧め：このような変化があれば、その時は**受診**を**考えてください**。ー**同趣旨**で**言い換え**可（**本文中の「・」行には載せない**）
 - 上段に**受診**を**混ぜない**／上段で**怖がらせない**／**救急**の断定はしない
 
 
@@ -1014,7 +1014,7 @@ ${stateContext ? `\n${stateContext}\n` : ""}
 - 🤝 Kairoの判断は一般論の説明を禁止し、感覚の翻訳にする
   - 「今のあなたの状態なら、こう考えて大丈夫です」
   - 「だから今日はこれでいいですよ」
-- ⏳ 今後の見通しは**二段**（**上**＝**経過の目安**＋安心を地の文1行・経過スロットと整合。**ユーザーTZ**で休養・様子見を言い換え。**下**＝**逆に、**のあと**「・」から始まる短文が3行**＝受診検討レベルの急変のみ）。**締め**は**受診検討**（サーバでは buildOutlookBlockWithLlm／buildOutlookBlock）
+- ⏳ 今後の見通しは**二段**（**上**＝**経過の目安**＋安心を地の文1行・経過スロットと整合。**ユーザーTZ**で休養・様子見を言い換え。**下**＝**逆に、**のあと「・」から始める短文が**連続3行**＝急変の**描写のみ**。**各行に受診の語は入れず**、**締め1行のみ**に**受診を考える／検討**。サーバ組み立ては buildOutlookBlockWithLlm／buildOutlookBlock と cleanupOutlookEscalationBulletsInBlock）
 
 🤝 Kairoの判断（LLM理解レイヤー）：
 - 情報整理は単なる言い換えではなく「症状の状態を説明する文章」として生成する。
@@ -3635,7 +3635,7 @@ function correctKanjiAndTypos(text) {
 /** 下段：受診を本気で検討すべきほど強い変化のみ（KAIRO_SPEC・「・」3行で出力） */
 const OUTLOOK_ESCALATION_CORE = [
   "激しい震えや強い冷汗が強く続く",
-  "ひどい嘔吐が続く、または水も飲めないほどのむかつき",
+  "ひどい嘔吐が続く、または水も飲めないほどのむかつきがある",
   "意識のもうろう、または息苦しさ・胸の痛みが急に強くなる",
 ];
 
@@ -3791,11 +3791,69 @@ function normalizeOutlookParagraphLine(s) {
     .trim();
 }
 
+/** 急変「・」行の末尾に付いた受診勧めを剥がす（受診は締め1文にのみ／仕様どおり短文で終える） */
+function stripTrailingVisitAdviceFromOutlookEscalationLine(inner) {
+  let t = String(inner || "").replace(/^[・\s]+/u, "").trim();
+  if (!t) return "";
+  let prev;
+  let guard = 0;
+  do {
+    prev = t;
+    t = t
+      .replace(/(の)?場合は[、,]?\s*受診[^。!?？!\n]*[。!?？!]?\s*$/u, "")
+      .replace(/ときは[、,]?\s*受診[^。!?？!\n]*[。!?？!]?\s*$/u, "")
+      .replace(/\s+[、,]?\s*(?:その時は|そのときは)受診[^。!?？!\n]*[。!?？!]?\s*$/u, "")
+      .replace(/\s*[、,]?\s*受診を(?:検討してください|考えてください)[。!?？!]?\s*$/u, "")
+      .replace(/\s*は受診を(?:検討してください|考えてください)[。!?？!]?\s*$/u, "")
+      .trim();
+    guard += 1;
+  } while (t !== prev && guard < 10);
+  if (/^(受診|救急|病院へ)/u.test(t)) return "";
+  return t;
+}
+
 /** 下段：行頭に「・」を付与（既に付いていれば重ねない） */
 function formatOutlookEscalationLine(s) {
   const t = normalizeOutlookParagraphLine(s);
   if (!t) return "";
-  return t.startsWith("・") ? t : `・${t}`;
+  const stripped = stripTrailingVisitAdviceFromOutlookEscalationLine(t.startsWith("・") ? t.replace(/^・\s*/, "") : t);
+  if (!stripped) return "";
+  return stripped.startsWith("・") ? stripped : `・${stripped}`;
+}
+
+/** ⏳ ブロック組み立て後：「逆に、」〜締め前の各行「・」から行末の受診語を除去 */
+function cleanupOutlookEscalationBulletsInBlock(block) {
+  const lines = String(block || "").replace(/\r\n/g, "\n").split("\n");
+  const hdr = lines.findIndex((l) => /^\s*⏳\s*今後の見通し\s*$/.test(String(l || "").trim()));
+  const startSlice = hdr >= 0 ? lines.slice(hdr + 1) : lines;
+  const invRel = startSlice.findIndex((l) => /^逆に[、,]?\s*$/.test(String(l || "").trim()));
+  if (invRel < 0) return block;
+  const invAbs = (hdr >= 0 ? hdr + 1 : 0) + invRel;
+  let endExclusive = lines.length;
+  for (let j = invAbs + 1; j < lines.length; j++) {
+    const row = String(lines[j] || "").trim();
+    if (
+      /^(このような変化が|こうした変化が|このような状態が|このようなときは)/.test(row) ||
+      /^(このような).*受診/.test(row)
+    ) {
+      endExclusive = j;
+      break;
+    }
+  }
+  const out = lines.slice();
+  for (let i = invAbs + 1; i < endExclusive; i++) {
+    const raw = String(out[i] || "");
+    const trimmed = raw.trim();
+    if (!/^・/.test(trimmed)) continue;
+    const inner = trimmed.replace(/^・\s*/, "");
+    const c = stripTrailingVisitAdviceFromOutlookEscalationLine(inner);
+    if (c) {
+      const m = /^(\s*)/.exec(raw);
+      const indent = m ? m[1] : "";
+      out[i] = `${indent}・${c}`;
+    }
+  }
+  return out.join("\n");
 }
 
 /**
@@ -3806,13 +3864,9 @@ function assembleOutlookBlockBody(reassuranceLines, escalationLines, closingLine
   const e = (escalationLines || []).map(formatOutlookEscalationLine).filter(Boolean);
   const end = String(closingLine || OUTLOOK_VISIT_CLOSING_VARIANTS[0]).trim();
   if (r.length < 1 || e.length < 3 || !end) return null;
-  return [
-    "⏳ 今後の見通し",
-    ...r.slice(0, 1),
-    "逆に、",
-    ...e.slice(0, 3),
-    end,
-  ].join("\n");
+  return cleanupOutlookEscalationBulletsInBlock(
+    ["⏳ 今後の見通し", ...r.slice(0, 1), "逆に、", ...e.slice(0, 3), end].join("\n")
+  );
 }
 
 function buildOutlookBlock(state) {
@@ -3861,10 +3915,10 @@ async function buildOutlookBlockWithLlm(state) {
         "必須**型**（この順）:",
         "1) **行頭に「・」は付けない**地の文を**1行（短文に寄せる）**：**経過の目安**（多くの場合の落ち着き方）を含めつつ**大きな心配はいりません**級の安心を幅広に。【経過】【ローカルの現在】と**矛盾させない**。断定しすぎない。**敬体（です・ます）**のみ。**過剰な敬語は禁止**。上段に**受診**や**強い不安**は混ぜない。",
         "2) 次行は**逆に、** だけ（本文は他に書かない）。",
-        "3) **行頭に「・」**を付けて**ちょうど3行**。**受診を本気で検討すべき急変のみ**。**短め**。弱い心配のみで埋めない。**病名断定はしない**（変化の描写のみ）。",
-        "4) 最終行：このような変化があれば、その時は**受診**を**考える／検討**。**同趣旨**で言い換え可。",
-        "JSONのみ。最優先: {\"reassurance_bullets\":[\"上段1行（・なし・経過＋安心）\"],\"escalation_bullets\":[\"・で始める3行\"],\"closing\":\"締め1文（受診）\"}",
-        "互換: {\"body\":\"上記を**改行**だけつないだ本文（見出しなし）。下段は必ず各行「・」先頭**。\"}",
+        "3) **行頭に「・」**を付けて**ちょうど3行**。各行は**症状・身体の変化の描写だけ**で終える（名詞句／～が続く／～がある 等）。**各行に「受診」「検討」「考えてください」「してください」は入れない**。**「〜場合は受診」「〜ときは受診」も禁止**（受診の勧めは手順4の closing 1文のみ）。**受診を本気で検討すべき急変のみ**。**短め**。弱い心配のみで埋めない。**病名断定はしない**。",
+        "4) 最終行のみ：このような変化があれば、その時は**受診**を**考える／検討する**（です・ますで1文）。**ここだけ**に「受診」を書く。**同趣旨**で言い換え可。",
+        "JSONのみ。最優先: {\"reassurance_bullets\":[\"上段1行（・なし・経過＋安心）\"],\"escalation_bullets\":[\"下段3行・本文は症状のみ・受診語なし\"],\"closing\":\"締め1文（受診・本文唯一）\"}",
+        "互換: {\"body\":\"上記を**改行**だけつないだ本文（見出しなし）。下段は各行「・」先頭・**症状のみ**で終え、**行末に受診の語を付けない**。受診は**最終行1文だけ**。\"}",
         "病名**断定**・恐怖・**救急**の断定は禁止。上段に**Kairo**と書く必要は**ない**（**締め**は**受診**）。",
         `主症状: 「${main}」。カテゴリ: ${category}。緊急度: ${level}。`,
         painScore !== null ? `痛のスコア(参考): ${painScore}/10` : "",
@@ -3912,7 +3966,7 @@ async function buildOutlookBlockWithLlm(state) {
         .replace(/\r\n/g, "\n")
         .trim();
       if (bodyFromLlm && outlookLlmBodyLooksValid(bodyFromLlm)) {
-        return ["⏳ 今後の見通し", bodyFromLlm].join("\n");
+        return cleanupOutlookEscalationBulletsInBlock(["⏳ 今後の見通し", bodyFromLlm].join("\n"));
       }
     } catch (_) {
       /* retry */
@@ -4563,6 +4617,7 @@ function replaceSummaryBlock(text, header, block) {
 /** 追加情報・違う等のとき、「Kairoの判断」ブロックのみ差し替え（他ブロックはそのまま） */
 async function replaceStateAboutBlockOnly(summaryText, state, historyText = "") {
   if (!summaryText || !state) return summaryText;
+  finalizeStateAboutBulletsCacheForSummary(state);
   const hasRedStateBlock = textIncludesMemoAboutHeader(summaryText);
   if (hasRedStateBlock) {
     ensureKairoJudgmentHasMinimumFactBullets(state, MIN_KAIRO_JUDGMENT_FACT_BULLETS);
@@ -4593,8 +4648,11 @@ async function ensureHandshakeStateBlockFull(text, state, historyTextForCare = "
   if (!text || !state) return text;
   const level = finalizeRiskLevel(state);
   if (level !== "🟢" && level !== "🟡") return text;
-  if (!handshakeStateBlockNeedsEmpathy(text)) return text;
-  return replaceStateAboutBlockOnly(text, state, historyTextForCare);
+  finalizeStateAboutBulletsCacheForSummary(state);
+  if (handshakeStateBlockNeedsEmpathy(text) || !summaryJudgmentBulletsCoverFilledSlots(text, state)) {
+    return replaceStateAboutBlockOnly(text, state, historyTextForCare);
+  }
+  return text;
 }
 
 /** 先行まとめが揃っているとき、確認で追加情報があった場合に「✅ あなたの今すぐやること」だけ差し替える（他ブロックは維持） */
@@ -4651,6 +4709,7 @@ async function ensureOutlookBlockAsync(text, state) {
   if (!block || !String(block).trim()) {
     block = buildOutlookBlock(state);
   }
+  block = cleanupOutlookEscalationBulletsInBlock(block);
   return replaceSummaryBlock(text, "⏳ 今後の見通し", block);
 }
 
@@ -10762,6 +10821,64 @@ function appendMissingRawValuesAsBullets(bullets, missingValues, state) {
 }
 
 /**
+ * まとめ返却・🤝/📝 差し替え直前：既存キャッシュを起点に、埋まっているスロット raw がすべて「・」行に載るまで追記する。
+ * LLM 整形は行わない（内容は増やすのみ）。末尾で PRE_SUMMARY_CONFIRMATION_MAX_BULLETS に丸める。
+ */
+function finalizeStateAboutBulletsCacheForSummary(state) {
+  if (!state) return;
+  syncHistoryTextForCareFromConversation(state);
+  let base =
+    Array.isArray(state.stateAboutBulletsCache) && state.stateAboutBulletsCache.length > 0
+      ? state.stateAboutBulletsCache.slice()
+      : buildStateFactsBulletsLegacy(state, { forSummary: true });
+  if (!Array.isArray(base)) base = [];
+  base = sanitizeBulletPoints(base, state);
+  const cat = state.triageCategory || resolveQuestionCategoryFromState(state) || "PAIN";
+  const internalMax = Math.max(PRE_SUMMARY_CONFIRMATION_MAX_BULLETS, 18);
+  base = injectMissingSlotBulletsFromState(base, state, cat, { maxOut: internalMax }) || base;
+  base = mergeRawSlotInputsIntoBullets(state, base);
+  base = sanitizeBulletPoints(base, state);
+  let check = validateBulletCoverageFromRaw(state, base);
+  let iter = 0;
+  while (!check.ok && iter < 6) {
+    base = appendMissingRawValuesAsBullets(base, check.missing, state);
+    base = mergeRawSlotInputsIntoBullets(state, base);
+    base = injectMissingSlotBulletsFromState(base, state, cat, { maxOut: internalMax }) || base;
+    base = sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(base), state);
+    check = validateBulletCoverageFromRaw(state, base);
+    iter += 1;
+  }
+  base = sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(base), state);
+  state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
+    base.slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS),
+    state
+  );
+}
+
+/** まとめ本文中の 🤝 / 📝 ブロックから「・」行だけを取り出す（網羅検証用） */
+function extractJudgmentBulletLinesFromSummaryText(text) {
+  const lines = String(text || "").split("\n");
+  const start = lines.findIndex(
+    (l) => isHandshakeStateAboutHeaderLine(l) || isMemoStateAboutHeaderLine(l)
+  );
+  if (start < 0) return [];
+  const end = lines.findIndex(
+    (l, i) => i > start && /^\s*(✅|⏳|🚨|💊|🌱|🏥|💬)\s/.test(l)
+  );
+  const body = lines.slice(start + 1, end < 0 ? lines.length : end);
+  return body.map((l) => String(l || "").trim()).filter((t) => /^・/.test(t));
+}
+
+/** まとめに埋め込まれた箇条書きが、filled スロット raw を欠かないか */
+function summaryJudgmentBulletsCoverFilledSlots(summaryText, state) {
+  if (!state) return true;
+  const bullets = extractJudgmentBulletLinesFromSummaryText(summaryText);
+  if (bullets.length < MIN_KAIRO_JUDGMENT_FACT_BULLETS) return false;
+  const check = validateBulletCoverageFromRaw(state, bullets);
+  return check.ok;
+}
+
+/**
  * まとめ前確認文用：レガシー生成後に raw 網羅を必ず満たす（validate → 不足追記を繰り返す）。
  * state.stateAboutBulletsCache を上書きする（LLM 整形は含まない）。
  */
@@ -10806,24 +10923,13 @@ function enforceConfirmationBulletsCompletenessCore(state) {
     sanitizeBulletPoints(base, state).slice(0, 18),
     state
   );
-  let finalCheck = validateBulletCoverageFromRaw(state, state.stateAboutBulletsCache);
-  if (!finalCheck.ok) {
-    console.warn("[KAIRO] confirmation bullets coverage incomplete after enforce; appending", {
+  finalizeStateAboutBulletsCacheForSummary(state);
+  const cov = validateBulletCoverageFromRaw(state, state.stateAboutBulletsCache);
+  if (!cov.ok) {
+    console.warn("[KAIRO] confirmation bullets coverage still incomplete after finalize pass", {
       conversationId: state.conversationId,
-      missingCount: finalCheck.missing.length,
+      missingSample: (cov.missing || []).slice(0, 8),
     });
-    const patched = appendMissingRawValuesAsBullets(state.stateAboutBulletsCache.slice(), finalCheck.missing, state);
-    state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
-      sanitizeBulletPoints(patched, state).slice(0, 18),
-      state
-    );
-    finalCheck = validateBulletCoverageFromRaw(state, state.stateAboutBulletsCache);
-    if (!finalCheck.ok) {
-      console.warn("[KAIRO] confirmation bullets coverage still incomplete after append", {
-        conversationId: state.conversationId,
-        missing: finalCheck.missing.slice(0, 10),
-      });
-    }
   }
   state.stateAboutBulletsCache = sanitizeBulletPoints(
     finalizeStateAboutBulletLinesForSpec(state.stateAboutBulletsCache),
@@ -10955,6 +11061,7 @@ async function enforceConfirmationBulletsCompleteness(state, opts = {}) {
   } else {
     await polishConfirmationBulletsWithLlm(state);
   }
+  finalizeStateAboutBulletsCacheForSummary(state);
   return (state.stateAboutBulletsCache || []).slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS);
 }
 
@@ -16238,6 +16345,7 @@ async function normalizeStateBlockForGreenYellowAsync(text, state) {
   const sliceEnd = end >= 0 ? end : lines.length;
   const level = finalizeRiskLevel(state);
   if (level !== "🟢" && level !== "🟡") return text;
+  finalizeStateAboutBulletsCacheForSummary(state);
   let aboutLine = await buildStateAboutLineAsync(state, level);
   if (!String(aboutLine || "").trim()) {
     aboutLine = buildGreenYellowStateAboutBlock(state, level);
@@ -17389,6 +17497,9 @@ async function generateSummaryForConfirmation(conversationId) {
   aiResponse = stripMcForRed(aiResponse, level);
   aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
   aiResponse = dedupeSummaryBlocksByCanonicalOrder(aiResponse, level);
+  if (level === "🔴" && !summaryJudgmentBulletsCoverFilledSlots(aiResponse, state)) {
+    aiResponse = await replaceStateAboutBlockOnly(aiResponse, state, historyTextForOtc);
+  }
   const decisionType = level === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING";
   // まとめ「返却済み」は確認応答で HTTP レスを返すときのみ立てる（markSummaryDeliveredAndFollowUpPhase）。
   // ここで立てると summaryShown が先に true になり、確認応答分岐（!summaryShown）に入らずまとめが出ない。
