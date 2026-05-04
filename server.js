@@ -625,8 +625,8 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 🟢 ここまでの情報を整理します
 
 [前文：次のいずれか1文をランダム → 改行 → 後文固定]
-（例：必要な情報はそろいました。／ここまでで判断に必要な情報は確認できました。／ここまでで、今の状態はかなり整理できました。）
-（後文固定）今の症状なら、まずどう動くべきかをはっきりお伝えします。
+（例：必要な情報はそろいました／ここまでで判断に必要な情報は確認できました／ここまでで、今の状態はかなり整理できました）
+（後文固定）今の症状なら、まずどう動くべきかをはっきりお伝えします
 
 
 ⸻
@@ -1001,7 +1001,7 @@ ${stateContext ? `\n${stateContext}\n` : ""}
 - ❗見出しは必ず以下を全て含める（順番厳守）：
   - 🟢 ここまでの情報を整理します / 🤝 Kairoの判断 / ✅ あなたの今すぐやること / ⏳ 今後の見通し / 🌱 最後に
   - または 📝 Kairoの判断 / ✅ あなたの今すぐやること / 🏥 受診先の候補 / 💬 最後に
-- ❗🟢/🟡/🔴 ここまでの情報を整理します の本文は固定のみ。前文は「必要な情報はそろいました。」「ここまでで判断に必要な情報は確認できました。」「ここまでで、今の状態はかなり整理できました。」のいずれか1文をランダム。改行のあと「今の症状なら、まずどう動くべきかをはっきりお伝えします。」を必ず続ける。自由生成禁止。
+- ❗🟢/🟡/🔴 ここまでの情報を整理します の本文は固定のみ。前文は「必要な情報はそろいました」「ここまでで判断に必要な情報は確認できました」「ここまでで、今の状態はかなり整理できました」のいずれか1文をランダム。改行のあと「今の症状なら、まずどう動くべきかをはっきりお伝えします」を必ず続ける。自由生成禁止。
 - 📝 Kairoの判断 は事実のみ・具体的に書く
   - 「ない」「不明」「特になし」だけの記述は禁止
   - 症状・経過・生活影響など具体語を含める
@@ -6055,11 +6055,11 @@ function ensureRestMcDecisionBlock(text, level, state) {
 
 function buildSummaryIntroTemplate() {
   const prefixes = [
-    "必要な情報はそろいました。",
-    "ここまでで判断に必要な情報は確認できました。",
-    "ここまでで、今の状態はかなり整理できました。",
+    "必要な情報はそろいました",
+    "ここまでで判断に必要な情報は確認できました",
+    "ここまでで、今の状態はかなり整理できました",
   ];
-  const fixed = "今の症状なら、まずどう動くべきかをはっきりお伝えします。";
+  const fixed = "今の症状なら、まずどう動くべきかをはっきりお伝えします";
   const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
   return `${prefix}\n${fixed}`;
 }
@@ -9337,6 +9337,70 @@ function isRawValueMainSymptomOnlyEcho(state, value) {
   return isMainSymptomOnlyBulletLine(state, `・${v}`);
 }
 
+/** 頭痛／痛みスコアがほかに行にあるとき、頭部局所の違和感だけを足した行は繰り返しになりやすい */
+function isRedundantLocalizedHeadSensationBulletInner(inner) {
+  const s = String(inner || "")
+    .trim()
+    .replace(/[。．]+$/u, "")
+    .trim();
+  if (s.length < 8 || s.length > 96) return false;
+  if (!/(目の奥|こめかみ|側頭|後頭|頭頂)/u.test(s)) return false;
+  if (!/(重い|重く|つらい|痛い|ズキ|ジンジン|締め付け|だるい|張る|違和感)/u.test(s)) return false;
+  if (/吐き気|嘔吐|発熱|咳|鼻|咽|のど|めまい|しびれ|腹痛|下痢|腰痛|胸痛/u.test(s)) return false;
+  return true;
+}
+
+function dedupeRedundantLocalizedHeadSensationWhenHeadacheStated(bullets) {
+  if (!Array.isArray(bullets) || bullets.length < 2) return bullets || [];
+  const inners = bullets.map((b) => String(b || "").replace(/^・\s*/, "").trim()).filter(Boolean);
+  const headacheCtx = inners.some(
+    (s) =>
+      /頭痛|頭が痛い|頭が痛む|頭の痛み|こめかみが痛/u.test(s) ||
+      /ずつう|片頭痛|偏頭痛|ズキズキ|キリキリ|ドクドク/u.test(s) ||
+      /\d{1,2}\s*\/\s*10/u.test(s) ||
+      /^痛みは\s*\d|^痛みは.*\/10/u.test(s)
+  );
+  if (!headacheCtx) return bullets;
+  return bullets.filter((b) => {
+    const inner = String(b || "").replace(/^・\s*/, "").trim();
+    return !isRedundantLocalizedHeadSensationBulletInner(inner);
+  });
+}
+
+/** 「○○が伴っている」だけで、ほかの行に ○○ の具体描写がすでにあるとき冗長 */
+function isBareSymptomCompanionOnlyInner(inner) {
+  const s = String(inner || "")
+    .trim()
+    .replace(/[。．]+$/u, "")
+    .trim();
+  return /^(吐き気|嘔吐|発熱|咳|微熱|だるさ|寒気|倦怠感)(が伴っている|を伴っている|がある)$/u.test(s);
+}
+
+function dedupeBareSymptomCompanionIfElsewhereDetailed(bullets) {
+  if (!Array.isArray(bullets) || bullets.length < 2) return bullets || [];
+  const inners = bullets.map((b) => String(b || "").replace(/^・\s*/, "").trim());
+  return bullets.filter((_, idx) => {
+    const inner = inners[idx];
+    if (!isBareSymptomCompanionOnlyInner(inner)) return true;
+    const stripped = inner
+      .trim()
+      .replace(/[。．]+$/u, "")
+      .replace(/が伴っている$/u, "")
+      .replace(/を伴っている$/u, "")
+      .replace(/がある$/u, "")
+      .trim();
+    const sk = normalizeBulletLineForAggressiveDedupe(stripped);
+    if (sk.length < 3) return true;
+    return !inners.some((o, j) => {
+      if (j === idx || isBareSymptomCompanionOnlyInner(o)) return false;
+      const no = normalizeBulletLineForAggressiveDedupe(o);
+      if (!no.includes(sk)) return false;
+      /** 単に名前が部分一致しただけでは落とさない（例:「痛み」のみ）／付随より長い説明があるときだけ */
+      return no.length >= sk.length + 4 || /ある|ている|続い|出て|ひどい|少し|やや/u.test(o);
+    });
+  });
+}
+
 /** 箇条書きフィルタ：誤りや日本語として不自然な箇条を検出し、修正する（テンプレへの丸ごと置換はしない）。第2引数 state があるとき主症状の重言行を除去。 */
 function sanitizeBulletPoints(bullets, state) {
   if (!Array.isArray(bullets)) return [];
@@ -9397,7 +9461,9 @@ function sanitizeBulletPoints(bullets, state) {
       const byRunOverlap3 = dedupeBulletsByThreeCharRunOverlapRespectingPolarity(bySoftIncl);
       const deduped = dedupeBulletsSequentialSimilarity(byRunOverlap3);
   const dedupedAgg = dedupeBulletLinesByAggressiveNormalizedEquality(deduped);
-  return state ? stripMainSymptomOnlyBullets(state, dedupedAgg) : dedupedAgg;
+  const noLocHeadEcho = dedupeRedundantLocalizedHeadSensationWhenHeadacheStated(dedupedAgg);
+  const noCompanionEcho = dedupeBareSymptomCompanionIfElsewhereDetailed(noLocHeadEcho);
+  return state ? stripMainSymptomOnlyBullets(state, noCompanionEcho) : noCompanionEcho;
 }
 
 /**
@@ -10968,13 +11034,14 @@ async function polishConfirmationBulletsWithLlm(state) {
     "【必須】同じ質問への回答に複数の事実（例：読点や中黒で並んだ内容）があるときは、まとめずに別々の「・」行に分ける。",
     "【禁止】「不調」「症状がある」「状態が気になる」など具体性を失う言い換えだけに置き換えること。元の箇条書きより情報量を落としてはいけない。",
     "【重複禁止】3文字同連続に相当する**同趣旨**の行を複数出さない。近い言い回し（包含・重なり）があるときは**短い1行**に圧し、**冗長に長い行は捨てる**（事実の数は落とさないが、同じ事実の二重表現は出さない）。",
+    "【禁止・繰り返し】ほかの行ですでに述べている事実・同じ症状軸を、言い換えや局所だけの別行で足さない。例：**頭痛**の強さ・経過を書いたあとに、**目の奥の重さ**だけの行を増やさない。**吐き気**を具体的に書いたあとに「**吐き気が伴っている**」だけの行を増やさない。ユーザーが頭部・目を別項目で語っていれば維持。",
     "【形式】各行は「・」で始まる1行。行数は入力と同程度（最大14行）。行の統合は上記の**同趣旨重複の除去**に限る。",
     "【必須】主症状の言い換えだけの行は出さない（痛み・部位の繰り返しは省き、経過・付随・きっかけなどの情報だけを書く）。",
     "【必須】各行の文末を途中で切らない（語の半端・「続いてい」で終わる等は禁止）。",
     '厳密なJSON: {"bullets":["・...","・...",...]} のみ。説明文は禁止。',
   ].join("\n");
   const userContentBase = [
-    "次の箇条書きは自動生成のため、日本語としてかなりぎこちない。根拠テキストの事実は変えず、文体だけきれいに整えてください。行をまとめすぎず、スロットごとの内容は落とさないこと。やや・少しなど程度を表す語は根拠にあれば必ず残すこと。",
+    "次の箇条書きは自動生成のため、日本語としてかなりぎこちない。根拠テキストの事実は変えず、文体だけきれいに整えてください。行をまとめすぎず、スロットごとの内容は落とさないこと。やや・少しなど程度を表す語は根拠にあれば必ず残すこと。**ほかの行ですでにある内容の言い返しだけの行**（例：頭痛行のあとに目の奥だけ、吐き気を書いたあとに「吐き気が伴っている」だけ）は出さず、入力を整理して排除してください。",
     "",
     `【根拠テキスト（スロット・自由記述）】\n${String(raw || "").slice(0, 6000)}`,
     "",
@@ -12118,7 +12185,7 @@ function buildGreenYellowComboIntegratedParagraph(state, level, parts, causeShor
 
 /** 🟢 ③判断の確定（A／B・`pickGreenYellowDecisionCoreLines`） */
 const GREEN_YELLOW_DECISION_CORE_PATTERN_GREEN_A = [
-  "👉 現時点では、命に関わるような緊急性は低く、まず落ち着いて様子を見て大丈夫です。",
+  "👉 現時点では、命に関わるような緊急性は低く、まずは落ち着いて様子を見てください。",
   "👉 無理に動かず休息を優先することが、今いちばん正しい対応です。",
 ];
 const GREEN_YELLOW_DECISION_CORE_PATTERN_GREEN_B = [
@@ -12131,7 +12198,7 @@ const GREEN_YELLOW_DECISION_CORE_PATTERN_YELLOW_A = [
   "👉 今は無理せず休んで体を回復させてください。",
 ];
 const GREEN_YELLOW_DECISION_CORE_PATTERN_YELLOW_B = [
-  "👉 現時点では、受診を急ぐよりも、自宅で安静にして変化を見る方が適切な状態です。",
+  "👉 現時点では、受診を急ぐよりも、自宅で安静にしてください。",
   "👉 無理に動くとかえって負担になりやすいため、今は休むことが正しい対応です。",
 ];
 
