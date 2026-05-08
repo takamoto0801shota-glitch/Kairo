@@ -2476,9 +2476,8 @@ async function fetchCarePlacesWithFallbacks(location, plan, state) {
     console.warn("[Places] 位置情報がないため検索をスキップ", { location });
     return [];
   }
-  const country = String(state?.locationContext?.country || "").trim();
-  // シンガポールは API キー無しでもコード内キュレート（日系クリニック）を返す。上で API を弾くと未設定時に常に空だった
-  if (country === "Singapore") {
+  // シンガポールは API キー無しでもコード内キュレート（日系クリニック）を返す。country 欠落でも座標から isSingaporeForCare で拾う。
+  if (isSingaporeForCare(state)) {
     return fetchCarePlacesForSingapore(location, state);
   }
   if (!getPlacesApiKey()) {
@@ -2798,7 +2797,7 @@ function getMainFacilityRoleReasons(category, isSingapore, isJapanese) {
 /** モーダル用：メイン1件のいいところ3つ（症状との相性・役割・安心材料） */
 function buildMainFacilityReasons(candidate, plan, state = null) {
   const category = state ? (state.triageCategory || resolveQuestionCategoryFromState(state)) : "PAIN";
-  const isSingapore = String(state?.locationContext?.country || "").trim() === "Singapore";
+  const isSingapore = isSingaporeForCare(state);
   const isJapanese = isJapaneseClinicOrSupport(candidate);
   const reasons = [];
   const rolePool = getMainFacilityRoleReasons(category, isSingapore, isJapanese);
@@ -2816,7 +2815,7 @@ function buildMainFacilityReasons(candidate, plan, state = null) {
 /** モーダル用：補助候補のシンプルな理由1つ */
 function buildAuxiliaryReason(candidate, plan, state = null, indexInAux = 0) {
   if (isJapaneseClinicOrSupport(candidate)) return "・日本語で症状をそのまま伝えられる";
-  const isSingapore = String(state?.locationContext?.country || "").trim() === "Singapore";
+  const isSingapore = isSingaporeForCare(state);
   if (isSingapore) {
     const gpReasons = ["・一般的な体調不良の相談に対応している", "・近くで受診しやすい"];
     return gpReasons[Math.min(indexInAux, gpReasons.length - 1)];
@@ -2913,6 +2912,26 @@ async function reverseGeocodeWithRetry(location, retries = 2) {
   return null;
 }
 
+/** SG 本島おおよその矩形（国名欠落時のフォールバック用） */
+function isLikelySingaporeCoordinates(lat, lng) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+  return lat >= 1.13 && lat <= 1.48 && lng >= 103.62 && lng <= 104.06;
+}
+
+/**
+ * シンガポール向け「受診先＋日系並び」の分岐用。
+ * `locationContext.country` の表記ゆれ、または座標が SG 域内なら true（国名未設定バグのフォールバック）。
+ */
+function isSingaporeForCare(state) {
+  const raw = String(state?.locationContext?.country || "").trim();
+  const lower = raw.toLowerCase();
+  if (lower === "singapore" || lower === "sg") return true;
+  if (/シンガポール/.test(raw)) return true;
+  const snap = state?.locationSnapshot;
+  if (snap && isLikelySingaporeCoordinates(Number(snap.lat), Number(snap.lng))) return true;
+  return false;
+}
+
 const FALLBACK_COORDINATES = {
   country: {
     Singapore: { lat: 1.3521, lng: 103.8198 },
@@ -2982,26 +3001,34 @@ async function geocodeAddress(address) {
 
 async function resolveLocationContext(state, clientMeta) {
   if (!state) return;
-  if (state?.locationSnapshot && state.locationContext) {
-    return;
-  }
-  if (state?.locationSnapshot?.lat && state?.locationSnapshot?.lng) {
-    const geo = await reverseGeocodeWithRetry(state.locationSnapshot, 2);
-    const city = geo?.city || "unknown";
-    const country = geo?.country || clientMeta?.country || "JP";
-    state.location = {
-      lat: state.locationSnapshot.lat,
-      lng: state.locationSnapshot.lng,
-      city,
-      country,
-      confidence: "fallback",
-    };
+  const snap = state.locationSnapshot;
+  const hasCoords = snap && Number.isFinite(snap.lat) && Number.isFinite(snap.lng);
+
+  if (hasCoords) {
+    const geo = await reverseGeocodeWithRetry(snap, 2);
+    const prev = state.locationContext && typeof state.locationContext === "object" ? { ...state.locationContext } : {};
+    const country = (geo && geo.country) || prev.country || clientMeta?.country || "";
     state.locationContext = {
-      source: "gps",
+      ...prev,
       ...(geo || {}),
+      source: prev.source || "gps",
+      country,
+      city: (geo && geo.city) || prev.city || "",
+      area: (geo && geo.area) || prev.area || "",
+    };
+    if (!state.locationContext.country && clientMeta?.country) {
+      state.locationContext.country = clientMeta.country;
+    }
+    state.location = {
+      lat: snap.lat,
+      lng: snap.lng,
+      city: state.locationContext.city || "unknown",
+      country: state.locationContext.country || "JP",
+      confidence: geo?.country ? "gps" : "fallback",
     };
     return;
   }
+
   try {
     const res = await fetch("https://ipapi.co/json/");
     if (res.ok) {
@@ -3096,7 +3123,7 @@ async function resolveHospitalCandidates(state) {
   }
   if (!location?.lat || !location?.lng) return [];
   const country = String(state?.locationContext?.country || "").trim();
-  if (country === "Singapore") return [];
+  if (isSingaporeForCare(state)) return [];
   const isJapan = /japan|jp|日本/i.test(country || "");
   const results = [];
   const keywords = isJapan
@@ -3213,8 +3240,7 @@ function buildHospitalRecommendationDetail(state, locationContext, clinicCandida
   const destination = detectCareDestinationFromHistory(historyText);
   const mainSymptomText = detectCareMainSymptomText(state, historyText);
   const plan = buildCareSearchQueries(mainSymptomText, destination);
-  const country = String(state?.locationContext?.country || "").trim();
-  const isSingapore = country === "Singapore";
+  const isSingapore = isSingaporeForCare(state);
   const merged = mergePlaces(
     Array.isArray(clinicCandidates) ? clinicCandidates : [],
     Array.isArray(hospitalCandidates) ? hospitalCandidates : []
@@ -4052,9 +4078,13 @@ async function resolveCareCandidates(state, destination) {
   if (!country && location?.lat && location?.lng) {
     const geo = await reverseGeocodeLocation(location);
     country = geo?.country || "";
-    if (geo && state.locationContext) state.locationContext.country = country;
+    state.locationContext = {
+      ...(state.locationContext && typeof state.locationContext === "object" ? state.locationContext : {}),
+      ...(geo || {}),
+      country,
+    };
   }
-  const isSingapore = country === "Singapore";
+  const isSingapore = isSingaporeForCare(state);
   const historyText = state?.historyTextForCare || "";
   const mainSymptomText = detectCareMainSymptomText(state, historyText);
   const plan = buildCareSearchQueries(mainSymptomText, isSingapore ? null : destination);
@@ -4093,7 +4123,7 @@ function buildHospitalBlock(state, historyText, hospitalRec) {
   const rawCandidates = Array.isArray(hospitalRec?.candidates) ? hospitalRec.candidates : [];
   const mainSymptomText = detectCareMainSymptomText(state, historyText || "");
   const plan = buildCareSearchQueries(mainSymptomText, destination);
-  const isSingapore = String(state?.locationContext?.country || "").trim() === "Singapore";
+  const isSingapore = isSingaporeForCare(state);
   const maxDisplay = 3;
   const candidates = rawCandidates
     .filter((c) => String(c?.name || "").trim().length > 0)
@@ -4200,8 +4230,7 @@ function normalizeHospitalModalText(text) {
 
 /** 🏥受診先モーダル用：SGは最大4件。他国は最大3件 */
 async function buildHospitalDetailsModalContent(state) {
-  const country = String(state?.locationContext?.country || "").trim();
-  const isSingapore = country === "Singapore";
+  const isSingapore = isSingaporeForCare(state);
   const clinicCandidates = state?.clinicCandidates || [];
   const hospitalCandidates = state?.hospitalCandidates || [];
   const mainTextCandidates = state?.hospitalRecommendation?.candidates || [];
@@ -6400,7 +6429,7 @@ function formatSeverityForScript(severity) {
   return s;
 }
 
-/** 🔴英語伝え方（①安心 ②ハードル下げ ③日本語 ④English ⑤スマホ ⑥誘導） */
+/** 🔴英語伝え方（LLM失敗時の定型フォールバック） */
 function buildCommunicationScript(state) {
   const snapshot = state?.judgmentSnapshot || {};
   const symptom = snapshot.main_symptom || "症状";
@@ -6585,7 +6614,10 @@ function mustUseFollowUpPhase(state, history, clientMeta, userMessageCountBefore
   return serverSaysPostSummary || clientReportedSummaryShown;
 }
 
-/** B_MC 肯定時の完全固定ブロック（LLM生成禁止） */
+/**
+ * B_MC 肯定時の完全固定ブロック（LLM で差し替えない）。
+ * オンライン診療のおすすめ先・保険注記などの実体はここに保持する。
+ */
 const B_MC_ONLINE_CLINICS_BLOCK = [
   "シンガポールでは、会社や学校に所属している場合、",
   "保険が適用されて診療費が割安、または無料になるケースもあります。",
@@ -6620,11 +6652,187 @@ const B_MC_ONLINE_CLINICS_BLOCK = [
   "保険：多くの企業保険に対応 ◯",
 ].join("\n");
 
-/** B_MC 否定時の固定メッセージ */
-const B_MC_DECLINE_MESSAGE = "無理に使う必要はありません。\nまた必要になったら、いつでも確認してください。";
-
 /** フォロー応答で出してはいけない誤生成パターン（一致時は空レス）。通常は一致しない。 */
 const FORBIDDEN_FOLLOW_UP = /\b\B/;
+
+/** まとめ後・指定分岐外のユーザー発話用（短いモデル応答）。 */
+const POST_SUMMARY_OFF_BRANCH_LLM_MAX_TOKENS = 720;
+
+/** 🔴「英語で伝える」ブロック（LLM 本体。失敗時のみテンプレにフォールバック） */
+const HOSPITAL_ENGLISH_SCRIPT_MAX_TOKENS = 900;
+
+async function generatePostSummaryOffBranchLlmReply(state, userInput, options = {}, scenarioHint = "") {
+  let trimmed = String(userInput || "").trim();
+  if (!trimmed && scenarioHint) trimmed = "（ユーザー発話なしまたは極めて短い）";
+  if (!trimmed || !process.env.OPENAI_API_KEY) return null;
+
+  const history = Array.isArray(options.history) ? options.history : [];
+  const summaryExcerpt = String(state?.summaryText || "").trim().slice(0, 8000);
+  const risk = state?.decisionLevel || "?";
+  const decisionType = String(state?.decisionType || "").trim();
+  const mainSx = String(
+    (state && getSyncedMainSymptomDisplayLabel(state)) || state?.primarySymptom || ""
+  ).trim();
+  const recentDialog = history
+    .slice(-16)
+    .map((m) => {
+      const label = m.role === "user" ? "ユーザー" : "アシスタント";
+      return `${label}: ${String(m.content || "").slice(0, 2200)}`;
+    })
+    .join("\n");
+
+  const systemPrompt = [
+    "あなたは医療相談アプリ「Kairo」のチャット応答です。",
+    "**すでに**ユーザーには、この会話での正式なまとめ（判定・ガイドライン）が**一度**提示されたあとのターンです。",
+    "**まとめブロックそのものや判断結果の一覧を繰り返してはいけません**（再要請があっても「以前お伝えしたとおり」程度に留める）。",
+    scenarioHint
+      ? "**【対応指令】があるときは、その状況に最優先で整合した応答**を返してください（ユーザー発話だけから推測が難しくても、指令どおり）。"
+      : "ユーザーはフォローの途中で質問や発話をしている可能性があります。",
+    "**これまでの会話とまとめの内容の少なくとも一部を踏まえて**、自然で誠実な日本語で返してください。",
+    "診断定・治療方針の断定・具体的な薬の用量指示・新たな重大診断の示唆は禁止。恐怖を煽らない。",
+    "もともとの緊急度（🟢🟡🔴の趣旨）と矛盾するような「大丈夫ですから受診不要」などの断言はしない。🔴だった流れでは受診の重要性を軽視しない。",
+    "適度な長さ（短文〜数段落）。可能ならユーザーの話に応える一文以上を含める。",
+    "出力はプレーンな本文のみ（見出し用の `#` は使わない）。",
+  ].join("\n");
+
+  const userPrompt = [
+    `【緊急度表示】${risk}`,
+    decisionType ? `【決定タイプ参考】${decisionType}` : "",
+    mainSx ? `【主症状ラベル（参考）】${mainSx}` : "",
+    scenarioHint ? `【対応指令】\n${scenarioHint}` : "",
+    "",
+    `【この会話の直近ログ（末尾）】\n${recentDialog || "（ログなし）"}`,
+    "",
+    `【まとめ文本の一部（参照用・ユーザーに繰り返し掲載しない）】\n${summaryExcerpt || "（テキストなし）"}`,
+    "",
+    `【今回ユーザーが送った一文】\n${trimmed}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt.slice(0, 12000) },
+      ],
+      temperature: scenarioHint ? 0.52 : 0.55,
+      max_tokens: POST_SUMMARY_OFF_BRANCH_LLM_MAX_TOKENS,
+    });
+    const text = String(completion?.choices?.[0]?.message?.content || "").trim();
+    if (!text) return null;
+    if (FORBIDDEN_FOLLOW_UP.test(text)) return null;
+    return text;
+  } catch (e) {
+    console.warn("[KAIRO] generatePostSummaryOffBranchLlmReply", e?.message || e);
+    return null;
+  }
+}
+
+async function emitFollowLlm(state, userText, options, hint) {
+  let text = await generatePostSummaryOffBranchLlmReply(state, userText, options, hint);
+  if (!text && hint) {
+    text = await generatePostSummaryOffBranchLlmReply(
+      state,
+      userText || "続きについて",
+      options,
+      `${hint}\n（再試行：**必ず1文以上の本文を返す**。簡潔でよい。）`
+    );
+  }
+  return text || null;
+}
+
+/**
+ * 🔴フォロー「英語での伝え方」本文（ほぼ LLM）。見出し【日本語】【English】必須。
+ * @param {"standalone"|"after_prepare"} placement after_prepare は診察前リスト直後のみ（リストの繰り返し禁止）
+ */
+async function generateHospitalEnglishScriptLlm(state, options = {}, placement = "standalone") {
+  if (!process.env.OPENAI_API_KEY) return null;
+  const history = Array.isArray(options.history) ? options.history : [];
+  const snapshot = state?.judgmentSnapshot || {};
+  const mainJa =
+    String(snapshot.main_symptom || "").trim() ||
+    String((state && getSyncedMainSymptomDisplayLabel(state)) || state?.primarySymptom || "").trim() ||
+    "症状";
+  const duration = String(snapshot.duration || "").trim();
+  const severity = String(snapshot.severity || "").trim();
+  const reds = Array.isArray(snapshot.red_flags) ? snapshot.red_flags.filter(Boolean).slice(0, 4).join("、") : "";
+  const summaryExcerpt = String(state?.summaryText || "").trim().slice(0, 5000);
+  const recentDialog = history
+    .slice(-12)
+    .map((m) => {
+      const label = m.role === "user" ? "ユーザー" : "アシスタント";
+      return `${label}: ${String(m.content || "").slice(0, 2000)}`;
+    })
+    .join("\n");
+
+  const placementExtra =
+    placement === "after_prepare"
+      ? "\n【配置】ユーザーは**直前のメッセージ**で診察前の準備チェックリストを**既に読んでいる**。そのリスト本文・箇条書きは繰り返さない。この返答はその直後に続く「英語で伝える」ブロックのみ。"
+      : "";
+
+  const systemPrompt = [
+    "あなたは医療相談アプリ「Kairo」のチャット応答です。",
+    "ユーザーには正式なまとめ（判定）は**すでに表示済み**です。このターンでは、医療機関の受付や医師に**短く伝える／英語でも伝える**ことに焦点を当ててください（海外生活のイメージ）。",
+    "**新しい診断名の提示・重症度を変える表現・薬の具体用量・受診不要の断言は禁止**。恐怖を煽らない。🔴の流れでは受診の重要性を軽視しない。",
+    "**オンライン診療のサービス一覧やおすすめ先の詳細リストは出力しない**（MC用のオンライン診療案内は別フローの固定ブロックで案内済みになり得る。ここでの主題は**対面受診時の伝え方**）。",
+    "",
+    "次の順序・表記どおり出力すること：",
+    "・冒頭に、英語が不安でも短く伝えればよい旨の共感を1〜2文。空行。",
+    "・「この画面やメモを見せてもよい」程度の短文を1文（空行）。",
+    "・単独行で「【日本語】」（この表記のまま）。その次の段落から、ユーザーの状態に沿った受診希望を**自然な日本語で1〜2文**（症状と経過の要約として）。",
+    "・空行のあと単独行で「【English】」。その次の段落から、直前の日本語と**内容が対応する**自然な英語短文（カタコトの逐語訳になりすぎない）。",
+    "・空行のあと、受付やスマホで見せる・補足を足すなど次の一手を1〜2文。",
+    "",
+    "**プレーン本文のみ**。行頭 `#` のマークダウン見出しは使わない。",
+    placementExtra,
+  ].join("\n");
+
+  const userPrompt = [
+    `【緊急度表示】${state?.decisionLevel || "🔴"}`,
+    `【主症状（参考）】${mainJa}`,
+    duration ? `【経過の参考】${duration}` : "",
+    severity ? `【つらさの目安の参考】${severity}` : "",
+    reds ? `【念のため共有したいサイン（参考）】${reds}` : "",
+    "",
+    `【会話ログ末尾】\n${recentDialog || "（なし）"}`,
+    "",
+    `【まとめ文本の一部（ユーザーに繰り返し掲載しない。参照のみ）】\n${summaryExcerpt || "（なし）"}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const runOnce = async (retrySuffix) => {
+    try {
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: retrySuffix ? `${systemPrompt}\n\n${retrySuffix}` : systemPrompt,
+          },
+          { role: "user", content: userPrompt.slice(0, 12000) },
+        ],
+        temperature: 0.42,
+        max_tokens: HOSPITAL_ENGLISH_SCRIPT_MAX_TOKENS,
+      });
+      return String(completion?.choices?.[0]?.message?.content || "").trim();
+    } catch (e) {
+      console.warn("[KAIRO] generateHospitalEnglishScriptLlm", e?.message || e);
+      return "";
+    }
+  };
+
+  let text = await runOnce("");
+  if (!text || !/【日本語】/.test(text) || !/【English】/.test(text)) {
+    text = await runOnce(
+      "【再試行】必ず単独行で「【日本語】」と「【English】」（この角括弧表記のまま）を含める。各見出しの直下に本文を書く。"
+    );
+  }
+  if (!text || !/【日本語】/.test(text) || !/【English】/.test(text)) return null;
+  return text;
+}
 
 function shouldShowBMcFollowUp(state) {
   if (state?.decisionLevel !== "🟡") return false;
@@ -6679,16 +6887,6 @@ function getPrepareSeedsByCategory(category) {
   return seeds[category] || seeds.PAIN;
 }
 
-/** クロージング（拒否時） */
-function buildFollowClosingMessage() {
-  return "大丈夫です、その判断でも問題ありません。\nまた不安になったら、いつでもここで確認してください。";
-}
-
-/** 🟢分岐①「休む」の応答 */
-function buildWatchfulRestResponse() {
-  return "今はそのまま休むのが一番良さそうです。\nまた不安になったら、いつでもここで確認してください。";
-}
-
 /** 🟢分岐②「詳しく確認」→ ☐3つ（カテゴリ別） */
 function buildWatchfulCheckboxQuestion(state) {
   const snapshot = state?.judgmentSnapshot || {};
@@ -6703,11 +6901,6 @@ function buildWatchfulCheckboxQuestion(state) {
   return ["念のため確認しますね。", "", ...items.map((t) => `☐ ${t}`), "", "この3つ、できそうですか？"].join("\n");
 }
 
-/** 🟢分岐③「はい」の応答 */
-function buildWatchfulAffirmation() {
-  return "いいですね、そのまま無理せず過ごしてください。";
-}
-
 /** 🟢分岐④「いいえ」→ 難しさ選択 */
 function buildWatchfulDifficultyOptions(state) {
   const items = state?.followUpCheckboxItems || [];
@@ -6720,22 +6913,6 @@ function buildWatchfulDifficultyOptions(state) {
     return `・${item.replace(/を心がける|をとる|する$/, "")}のが難しい`;
   });
   return ["どれが難しそうですか？", "", ...options].join("\n");
-}
-
-/** 🟢分岐④→個別対応 */
-function buildWatchfulIndividualResponse(choice, state) {
-  const t = (choice || "").trim();
-  const items = state?.followUpCheckboxItems || [];
-  if (/水分|補給|とる|つらい/.test(t) || items.some((i) => /水分|補給/.test(i))) {
-    return "一気に飲まなくて大丈夫です。ひと口ずつでも十分です。";
-  }
-  if (/休む|休める|回復|難しい|刺激/.test(t) || items.some((i) => /刺激|安静/.test(i))) {
-    return "無理に休もうとしなくて大丈夫です。できる範囲で、体を楽にする姿勢をとるだけでも十分です。";
-  }
-  if (/変化|気づく|不安/.test(t) || items.some((i) => /強くなったら気づける/.test(i))) {
-    return "いまは気にしなくて大丈夫です。「何かおかしい」と感じたときだけ、ここに戻ってきてください。";
-  }
-  return buildWatchfulAffirmation();
 }
 
 function buildFollowUpJudgeMeta(state) {
@@ -6761,7 +6938,7 @@ function buildFollowUpJudgeMeta(state) {
  * phase=FOLLOW_UP または summaryGenerated のときのみここに入る。
  * @param {{ skipUserPush?: boolean }} [options] — true のときは user を履歴に追加しない（既に /api/chat 本体で push 済みのとき）
  */
-function handleFollowUpPhase(res, conversationId, message, state, locationPromptMessage, locationRePromptMessage, options = {}) {
+async function handleFollowUpPhase(res, conversationId, message, state, locationPromptMessage, locationRePromptMessage, options = {}) {
   if (!state?.summaryDeliveredForFollowUp) {
     console.error("[KAIRO] handleFollowUpPhase blocked: summaryDeliveredForFollowUp is false");
     return res.status(200).json({
@@ -6803,13 +6980,25 @@ function handleFollowUpPhase(res, conversationId, message, state, locationPrompt
     state.followUpPhase = "questioning";
     state.followUpStep = 1;
   }
-  const followUpResult = generateFollowResponse(state, message, {
+  const followUpResult = await generateFollowResponse(state, message, {
     history: conversationHistory[conversationId] || [],
   });
-  const outMessage = followUpResult?.message ?? (userAskedSummary(message)
-    ? "既にまとめをお伝えしています。ほかに気になることはありますか？"
-    : (getInitialFollowUpQuestionBySpec(state) || buildFollowClosingMessage()));
-  if (followUpResult && FORBIDDEN_FOLLOW_UP.test(String(followUpResult.message || ""))) {
+  const histFu = conversationHistory[conversationId] || [];
+  let outMessage =
+    typeof followUpResult?.message === "string" ? followUpResult.message.trim() : String(followUpResult?.message || "").trim();
+
+  const userSummaryReq = userAskedSummary(message) || /まとめ|要約/.test(String(message || ""));
+  if (!outMessage) {
+    const hintFu = userSummaryReq
+      ? "ユーザーはまとめや要約の再掲に近い要望。**まとめ全文の複製禁止**。要点の扱いを短く。"
+      : "まとめ提示後フォローのこのターンへの応答。会話ログと緊急度に沿う。**軽い受け答えのテンプレ1行のみ**は禁止。";
+    const fill = await emitFollowLlm(state, message, { history: histFu }, hintFu);
+    outMessage = (fill && fill.trim()) || "";
+  }
+  if (!outMessage.trim()) {
+    outMessage = getInitialFollowUpQuestionBySpec(state) || "";
+  }
+  if (FORBIDDEN_FOLLOW_UP.test(String(outMessage))) {
     const judgeMeta = buildFollowUpJudgeMeta(state);
     return res.json({
       message: "",
@@ -6850,7 +7039,7 @@ function handleFollowUpPhase(res, conversationId, message, state, locationPrompt
  * フォロー質問フェーズ専用。まとめ生成ロジックと完全分離。
  * summaryGenerated/summaryShown のときのみ呼ぶ。まとめを再生成しない。
  */
-function generateFollowResponse(state, userInput, options = {}) {
+async function generateFollowResponse(state, userInput, options = {}) {
   if (!state?.summaryDeliveredForFollowUp) return null;
   if (!state?.hasSummaryBlockGenerated && !state?.summaryShown && !state?.summaryGenerated) return null;
   // 確認直後でまだまとめがサーバに無い場合のみブロック（まとめ済みなのに null にならないよう緩和）
@@ -6865,7 +7054,17 @@ function generateFollowResponse(state, userInput, options = {}) {
     const history = options.history || [];
     state.judgmentSnapshot = buildJudgmentSnapshot(state, history, jt);
   }
-  const snapshot = state.judgmentSnapshot || {};
+
+  if (userAskedSummary(trimmed)) {
+    const llmRew = await emitFollowLlm(
+      state,
+      trimmed,
+      options,
+      "ユーザーはまとめ・要約の**再掲**が欲しい。**まとめブロック体裁の複製は禁止**。方針と不足情報の確認を短く。"
+    );
+    if (llmRew) return { message: llmRew };
+    return null;
+  }
 
   if (jt === "C_WATCHFUL_WAITING") {
     // 🟡 B_MC（PAIN系・INFECTION系で🟡のときのみ）: 強制表示。標準の休む/詳しく確認フローより優先。
@@ -6875,19 +7074,39 @@ function generateFollowResponse(state, userInput, options = {}) {
         state.followUpPhase = "closed";
         return { message: B_MC_ONLINE_CLINICS_BLOCK };
       }
-      // 否定・無反応のみ固定クロージング（肯定以外は再質問）
-      if (isMcDecline(trimmed) || trimmed === "") {
+      if (isMcDecline(trimmed)) {
         state.bMcBlockShown = true;
         state.followUpPhase = "closed";
-        return { message: B_MC_DECLINE_MESSAGE };
+        const bm = await emitFollowLlm(
+          state,
+          trimmed || "不要",
+          options,
+          "ユーザーはオンライン診療（MC紹介）を見ない・今は必要ないと選んだ。**押し売りせず**、尊重と再相談の余地を伝えるだけ。"
+        );
+        if (bm) return { message: bm };
+        return null;
       }
+      const mcLlm = await emitFollowLlm(
+        state,
+        trimmed,
+        options,
+        "まだオンライン診療紹介（B_MC質問）に明確な肯定・否定がついていない。丁寧に一文、判断を急がない。"
+      );
+      if (mcLlm) return { message: mcLlm };
       return { message: B_MC_FOLLOW_UP_QUESTION };
     }
 
     if (state.followUpStep <= 1) {
       if (isRestChoice(trimmed)) {
         state.followUpPhase = "closed";
-        return { message: buildWatchfulRestResponse() };
+        const m = await emitFollowLlm(
+          state,
+          trimmed,
+          options,
+          "ユーザーは**休む／安静を優先する**側を選んだ。その判断を肯定し、まとめの趣旨と矛盾しない範囲で短く励ましと再相談先を伝える。"
+        );
+        if (m) return { message: m };
+        return null;
       }
       if (isDetailChoice(trimmed)) {
         state.followUpStep = 2;
@@ -6895,43 +7114,100 @@ function generateFollowResponse(state, userInput, options = {}) {
       }
       if (isDecline(trimmed)) {
         state.followUpPhase = "closed";
-        return { message: buildFollowClosingMessage() };
+        const m = await emitFollowLlm(
+          state,
+          trimmed,
+          options,
+          "ユーザーはこのあとのフォローの詳細（チェックリスト等）へ進みたくない・ここまでにしたい様子。**締めと再相談**を伝える（軽い社交辞令だけにしない）。"
+        );
+        if (m) return { message: m };
+        return null;
       }
+      const w1 = await emitFollowLlm(
+        state,
+        trimmed,
+        options,
+        "見守りフォローの最初。**休む／詳しく／終了**などの明示的選択がまだ読み取れない。ユーザー発話に寄りそい、必要なら簡単に確認をひとつ。"
+      );
+      if (w1) return { message: w1 };
       state.followUpPhase = "closed";
-      return { message: buildFollowClosingMessage() };
+      const w1b = await emitFollowLlm(state, trimmed, options, "引き続きフォローを丁寧に締める、または確認の質問のみ。");
+      if (w1b) return { message: w1b };
+      return null;
     }
     if (state.followUpStep === 2) {
       if (isAffirmative(trimmed)) {
         state.followUpPhase = "closed";
-        return { message: buildWatchfulAffirmation() };
+        const ck = Array.isArray(state.followUpCheckboxItems) ? state.followUpCheckboxItems.join("、") : "";
+        const m = await emitFollowLlm(
+          state,
+          trimmed,
+          options,
+          `ユーザーは提示したセルフケア項目（${ck}）を**できそう**と答えた。応援と、過度な義務感を煽らない短い応答。`
+        );
+        if (m) return { message: m };
+        return null;
       }
       if (isDeclineToClose(trimmed)) {
         state.followUpPhase = "closed";
-        return { message: buildFollowClosingMessage() };
+        const m = await emitFollowLlm(
+          state,
+          trimmed,
+          options,
+          "ユーザーはチェックリスト確認を続けずに終えたい。尊重と再相談の一案内。"
+        );
+        if (m) return { message: m };
+        return null;
       }
       if (isCheckboxCantDo(trimmed)) {
         state.followUpStep = 3;
         return { message: buildWatchfulDifficultyOptions(state) };
       }
+      const w2 = await emitFollowLlm(
+        state,
+        trimmed,
+        options,
+        "チェックリスト（できそうか）に対して、まだはい／いいえがはっきりしない。一覧を単に繰り返さず応答。"
+      );
+      if (w2) return { message: w2 };
       return { message: buildWatchfulCheckboxQuestion(state) };
     }
     if (state.followUpStep === 3) {
       state.followUpPhase = "closed";
-      return { message: buildWatchfulIndividualResponse(trimmed, state) };
+      const items = Array.isArray(state.followUpCheckboxItems) ? state.followUpCheckboxItems.join(" / ") : "";
+      const ind = await emitFollowLlm(
+        state,
+        trimmed,
+        options,
+        `チェックリスト候補: ${items || "不明"}。ユーザーが「難しい」と答えた内容（参考）:「${trimmed}」。実行可能な粒度の助言。断定・新診断は避ける。`
+      );
+      if (ind) return { message: ind };
+      return null;
     }
     state.followUpPhase = "closed";
-    return { message: buildFollowClosingMessage() };
+    const wf = await emitFollowLlm(state, trimmed, options, "見守りフォローの想定外の段階。丁寧に締める。");
+    if (wf) return { message: wf };
+    return null;
   }
 
   if (jt === "A_HOSPITAL") {
     if (isDecline(trimmed)) {
       state.followUpPhase = "closed";
-      return { message: buildFollowClosingMessage() };
+      const m = await emitFollowLlm(
+        state,
+        trimmed,
+        options,
+        "ユーザーは🔴での診察前整理・英語案内の選択を辞退した。**受診の必要性を軽視せず**、尊重と最短のフォローを返す。"
+      );
+      if (m) return { message: m };
+      return null;
     }
     if (isRedChoiceBoth(trimmed)) {
       state.followUpPhase = "closed";
       const actions = buildRedPrepareBlock(state);
-      const englishPart = buildCommunicationScriptEnglishPart(state);
+      const englishPart =
+        (await generateHospitalEnglishScriptLlm(state, options, "after_prepare")) ||
+        buildCommunicationScriptEnglishPart(state);
       return { message: `${actions}\n\n${englishPart}` };
     }
     if (isRedChoicePrepare(trimmed)) {
@@ -6940,13 +7216,24 @@ function generateFollowResponse(state, userInput, options = {}) {
     }
     if (isRedChoiceEnglish(trimmed)) {
       state.followUpPhase = "closed";
-      return { message: buildCommunicationScript(state) };
+      const script =
+        (await generateHospitalEnglishScriptLlm(state, options, "standalone")) || buildCommunicationScript(state);
+      return { message: script };
     }
-    return { message: "どちらにしますか？「整理」か「英語」か、どちらか教えてください。" };
+    const redLlm = await emitFollowLlm(
+      state,
+      trimmed,
+      options,
+      "🔴ユーザーに「診察前に整理」「英語の伝え方」から選んでもらう段階で、回答がまだ曖昧。整理・外国語への不安に触れ、迷いをひと言で受け止めたうえで選びやすくする。**テンプレ一文だけにはしない**。"
+    );
+    if (redLlm) return { message: redLlm };
+    return null;
   }
 
   state.followUpPhase = "closed";
-  return { message: buildFollowClosingMessage() };
+  const tailLlm = await emitFollowLlm(state, trimmed, options, "まとめ後フォローで想定外のパス。コンテキストに沿った短文。");
+  if (tailLlm) return { message: tailLlm };
+  return null;
 }
 
 function extractOptionsFromAssistant(text) {
@@ -7369,6 +7656,26 @@ function extractDurationFromText(text) {
   const rawText = String(text || "");
   const normalized = normalizeUserText(rawText);
 
+  const minsExplicit = normalized.match(/(\d{1,4})\s*分(?:間)?(?:前|後|くらい|ほど|位)?/);
+  if (minsExplicit) {
+    const mins = Number(minsExplicit[1]);
+    if (Number.isFinite(mins) && mins >= 1 && mins <= 10080) {
+      const raw =
+        (rawText.match(/\d{1,4}\s*分(?:間)?(?:前|後|くらい|ほど|位)?/) || [])[0] || `${mins}分前`;
+      let selectedIndex = 0;
+      if (mins > 180) selectedIndex = 1;
+      if (mins >= 24 * 60) selectedIndex = 2;
+      return {
+        raw_text: raw,
+        normalized: mins < 24 * 60 ? `${mins}m_ago` : "day_or_more",
+        selectedIndex,
+      };
+    }
+  }
+  if (/(半時間)(?:前)?/.test(normalized)) {
+    const raw = (rawText.match(/半時間(?:前)?/) || [])[0] || "半時間前";
+    return { raw_text: raw, normalized: "30m_ago", selectedIndex: 0 };
+  }
   // (1) 極短
   const shortRaw =
     (rawText.match(/(さっき|今さっき|数分|数十分)/) || [])[0] ||
@@ -7630,6 +7937,9 @@ function isDurationSlotNumericNoise(raw) {
   if (isDurationDayNumericNoise(s)) return true;
   if (/\d{1,3}時間(?:前)?/.test(s)) return true;
   if (/[一二三四五六七八九十百〇]+時間/.test(s)) return true;
+  // 「30分前」等：数字は経過の分であり 1/2/3 番選択ではない（30→3番の誤認防止）
+  if (/\d{1,4}分(?:間)?(?:前|後|くらい|ほど|位)?/.test(s)) return true;
+  if (/[一二三四五六七八九十百]+分(?:間)?(?:前)?/.test(s)) return true;
   return false;
 }
 
@@ -7687,6 +7997,17 @@ function parseDurationDayTierFromText(text) {
   if (!raw) return null;
   const normalized = normalizeUserText(raw).replace(/\s+/g, "");
   if (/(今日から|本日から|きょうから)/.test(normalized)) return 0;
+  // N分（「30分前」は 30→3番と誤認されうるためテキスト優先で tier 0 / 1 に落とす）
+  const minHm = normalized.match(/(\d{1,4})\s*分(?:間)?(?:前|後|くらい|ほど|位)?/);
+  if (minHm) {
+    const mins = Number(minHm[1]);
+    if (Number.isFinite(mins) && mins >= 1) {
+      if (mins <= 180) return 0;
+      if (mins < 24 * 60) return 1;
+      return 2;
+    }
+  }
+  if (/(半時間|30分|３０分)(?:前)?/.test(normalized)) return 0;
   if (/(数日前|ここ数日|この数日)/.test(normalized)) return 1;
   if (/(一週間以上前|１週間以上前|1週間以上前)/.test(normalized)) return 2;
   if (/(さっき|今さっき|たった今|数分|数十分)/.test(normalized)) return 0;
@@ -8017,6 +8338,7 @@ function applySpontaneousSlotFill(state, message, opts = {}) {
     state.durationMeta = {
       raw_text: duration.raw_text,
       normalized: duration.normalized,
+      selectedIndex: duration.selectedIndex,
     };
     added += 1;
   }
@@ -9110,6 +9432,9 @@ function stripStateAboutIntroOutro(text) {
         return line;
       }
       if (introOutroPattern.test(line.trim())) return null;
+      /** LLM が「具体的に」を誤認して単独行にしたメタ文（📝 用指示の漏れ） */
+      if (/^(具体的に|事実のみ)\s*$/u.test(line.trim())) return null;
+      if (/^\s*・/u.test(line)) return rewriteCasualEvalCauseBulletLine(line);
     }
     return line;
   });
@@ -9401,6 +9726,49 @@ function dedupeBareSymptomCompanionIfElsewhereDetailed(bullets) {
   });
 }
 
+/**
+ * LLM が短いきっかけ名詞に口語の感想を誤結合した箇条書きを補正（例：「疲れ　なんかよくないです」→「疲れ」）。
+ */
+function stripCasualEvalAppendedAfterShortBulletChunk(text) {
+  const s = String(text || "").trim();
+  if (!s) return s;
+  const m = s.match(
+    /^(.+?)[\s　]+\s*(なんかよくないです|なんか良くないです|よくないです|よくないんです)\s*$/u
+  );
+  if (!m) return s;
+  const head = String(m[1] || "").trim();
+  if (head.length > 28) return s;
+  return head;
+}
+
+/** 除去後にきっかけ定型へ載せ替えしてよい短い核（症状の長文は載せ替えない） */
+function shouldPolishAsCauseAfterEvalStrip(head) {
+  const h = String(head || "").replace(/\s+/g, "").trim();
+  if (!h || h.length > 14) return false;
+  return /^(疲れ|ストレス|寝不足|過労|睡眠不足|だるさ|眼の疲れ|眼精疲労)$/u.test(h);
+}
+
+/** まとめ本文中の箇条書き1行だけを上記ルールで補正（LLM が誤結合した行向け） */
+function rewriteCasualEvalCauseBulletLine(line) {
+  const t = String(line || "").trim();
+  if (!/^・/u.test(t)) return line;
+  const inner = t.replace(/^・\s*/, "").trim();
+  const after = stripCasualEvalAppendedAfterShortBulletChunk(inner);
+  if (after === inner) return line;
+  let out = after;
+  if (shouldPolishAsCauseAfterEvalStrip(after)) {
+    const pol = polishCausePhraseToWrittenJapanese(
+      `${after.replace(/\s+/g, "")}かも`
+    );
+    if (pol) out = pol;
+  }
+  let plain = applyBulletPlainAssertiveStyle(out);
+  if (!plain) return line;
+  plain = plain.replace(/悪化傾向/g, "経過の変化");
+  if (/[がはをに]$/u.test(plain)) return line;
+  return `・${plain}`;
+}
+
 /** 箇条書きフィルタ：誤りや日本語として不自然な箇条を検出し、修正する（テンプレへの丸ごと置換はしない）。第2引数 state があるとき主症状の重言行を除去。 */
 function sanitizeBulletPoints(bullets, state) {
   if (!Array.isArray(bullets)) return [];
@@ -9413,8 +9781,19 @@ function sanitizeBulletPoints(bullets, state) {
       const inner = s.replace(/^・\s*/, "").trim();
       if (/頭が痛いが出ている/.test(inner)) return null;
       if (isBrokenCauseGrammarOnly(inner)) return null;
-      const cleaned = lightBulletCleanupForUserWords(inner);
-      if (!cleaned) return null;
+      let cleanedRaw = lightBulletCleanupForUserWords(inner);
+      if (!cleanedRaw) return null;
+      const afterStrip = stripCasualEvalAppendedAfterShortBulletChunk(cleanedRaw);
+      let cleaned = afterStrip;
+      if (
+        afterStrip !== cleanedRaw &&
+        shouldPolishAsCauseAfterEvalStrip(afterStrip)
+      ) {
+        const pol = polishCausePhraseToWrittenJapanese(
+          `${afterStrip.replace(/\s+/g, "")}かも`
+        );
+        if (pol) cleaned = pol;
+      }
       s = `・${cleaned}`;
       // 重複助詞の修正
       s = s.replace(/([はがをにでの])\1+/g, "$1");
@@ -10384,7 +10763,7 @@ function getCauseRawSlotsAnswer(state) {
 
 /**
  * きっかけ（`polishCausePhraseToWrittenJapanese` 後など）を組み合わせ「〇〇」用に短縮する。
- * 「〜の可能性」「がきっかけ」等の定型末尾を落とし、ユーザーが述べた要因の核を 3〜7 文字目安（上限8）に収める。
+ * 「〜の可能性」「がきっかけ」等の定型末尾を落とし、ユーザーが述べた要因の核を 3〜7 文字目安（上限7・「…」禁止）に収める。
  */
 function squeezeCausePhraseToComboShortLabel(polishedOrRaw) {
   let s = String(polishedOrRaw || "")
@@ -10400,10 +10779,7 @@ function squeezeCausePhraseToComboShortLabel(polishedOrRaw) {
     .trim();
   s = s.replace(/です$|ます$|でした$/g, "").trim();
   if (!s) return "";
-  if (s.length > KAIRO_COMBO_SHORT_LABEL_MAX_CHARS) {
-    s = `${s.slice(0, KAIRO_COMBO_SHORT_LABEL_MAX_CHARS - 1)}…`;
-  }
-  return s.trim();
+  return hardCapComboLabelCharsNoEllipsis(s).trim();
 }
 
 /** 箇条書き1行（きっかけ系）から組み合わせ短語へ（polish → squeeze → 647） */
@@ -11389,11 +11765,42 @@ function stripBulletLead(line) {
   return String(line || "").replace(/^・\s*/, "").trim();
 }
 
-/** 組み合わせ「〇〇」1つあたりの最大文字数（超過時は末尾を「…」で省略し、表示は最大この長さに収める） */
-const KAIRO_COMBO_SHORT_LABEL_MAX_CHARS = 8;
+/** 組み合わせ「〇〇」1つあたりの最大文字数。「…」での切り捨て省略はせず、`hardCapComboLabelCharsNoEllipsis` で言い換え／圧縮で収める */
+const KAIRO_COMBO_SHORT_LABEL_MAX_CHARS = 7;
 /** LLM 短縮の目安（KAIRO_SPEC：各短語 3〜7 文字）。最終行は `applyKairoSpec647ComboShortLabelFilter` で上限 MAX まで整える */
 const KAIRO_COMBO_SHORT_LABEL_TARGET_MIN_CHARS = 3;
 const KAIRO_COMBO_SHORT_LABEL_TARGET_MAX_CHARS = 7;
+
+/** 省略記号（LLM が付けやすい）を組み合わせ短語から除去する（表示用の省略は禁止・KAIRO_SPEC） */
+function stripComboLabelEllipsisCharacters(s) {
+  return String(s || "")
+    .replace(/[\u2026\u22EF⋯…]/g, "")
+    .replace(/\.{2,}/g, "")
+    .trim();
+}
+
+/**
+ * 組み合わせ短語の超過対策：**「…」は使わず**ヒューリスティックで短くしてから、`MAX` 文字に収める。
+ * 末尾手段として `slice(0, MAX)` は使うが、省略記号は付けない。
+ */
+function hardCapComboLabelCharsNoEllipsis(raw) {
+  let s = String(raw || "").replace(/\s+/g, " ").trim();
+  if (!s) return "";
+  s = stripComboLabelEllipsisCharacters(s);
+  // 「重くて」 +（ズキ等）は「頭痛」の言い換えと二重になりやすいので接頭を剥がす（例：重くてズキズキ → ズキズキ）
+  if (/^重くて/.test(s) && /(ズキ|キリ|ジン|チク)/.test(s)) {
+    s = s.replace(/^重くて/, "").trim();
+  }
+  s = s.replace(/する$/g, "").replace(/となる$/g, "").trim();
+  s = stripComboLabelEllipsisCharacters(s);
+  if (!s) return "";
+  if (s.length <= KAIRO_COMBO_SHORT_LABEL_MAX_CHARS) return s;
+  s = s.replace(/[（(][^）)]*[）)]/g, "").trim();
+  if (s.length <= KAIRO_COMBO_SHORT_LABEL_MAX_CHARS) return s;
+  s = s.replace(/のような/g, "").replace(/ような/g, "").trim();
+  if (s.length <= KAIRO_COMBO_SHORT_LABEL_MAX_CHARS) return s;
+  return s.slice(0, KAIRO_COMBO_SHORT_LABEL_MAX_CHARS);
+}
 
 /**
  * ①組み合わせ行：経過は「痛みの経過は〜」ではなく **時間軸**（◯日前から 等）に落とす（KAIRO_SPEC 604 付近）。
@@ -11445,10 +11852,12 @@ function buildComboLabelLlmRawUserContext(state) {
 /**
  * KAIRO_SPEC.md 「短い語への要約」（§7.1.1・組み合わせ行・647 行付近）。
  * 箇条書き1行相当の文字列を、組み合わせ「〇〇」用に短くする（痛み方の語を落とす等）。
+ * 超過分は `hardCapComboLabelCharsNoEllipsis` で **`KAIRO_COMBO_SHORT_LABEL_MAX_CHARS` 字以内**。省略記号「…」「...」は使わず、言い換え・トリムまたは無記号での切り詰めに留める。
  * 組み合わせ行を出力する直前に必ず通す（🟢🟡①・🔴「同時に出ている」・RED 抑制ガードの経過ラベル等、例外なし）。
  */
 function applyKairoSpec647ComboShortLabelFilter(raw) {
   let s = stripBulletLead(String(raw || "")).replace(/\s+/g, " ").trim();
+  s = stripComboLabelEllipsisCharacters(s);
   if (!s) return "";
   s = s
     .replace(/が出ている$|がある$|を伴っている$|見られている$|である$/g, "")
@@ -11482,9 +11891,7 @@ function applyKairoSpec647ComboShortLabelFilter(raw) {
     new RegExp(`^(${ono})(?:する)?(頭痛|腹痛|歯痛|腰痛|のど|喉|咽頭|痛み)$`),
     "$1"
   );
-  if (s.length > KAIRO_COMBO_SHORT_LABEL_MAX_CHARS) {
-    s = `${s.slice(0, KAIRO_COMBO_SHORT_LABEL_MAX_CHARS - 1)}…`;
-  }
+  s = hardCapComboLabelCharsNoEllipsis(s);
   if (/^奥に/.test(s) && !/目の奥/.test(s)) return "";
   if (s === "にある" || /^にある…?$/.test(s)) return "";
   return s.trim();
@@ -11506,7 +11913,7 @@ function finalizeComboLabelForCombinationLine(label) {
 }
 
 /**
- * 組み合わせ「〇〇」候補を LLM で削ぎ落とす（KAIRO_SPEC：各短語**目安 3〜7 文字**・上限は `KAIRO_COMBO_SHORT_LABEL_MAX_CHARS`）。1回の API で複数ラベルをまとめて処理。
+ * 組み合わせ「〇〇」候補を LLM で削ぎ落とす（KAIRO_SPEC：各短語**目安 3〜7 文字**・厳守上限は `KAIRO_COMBO_SHORT_LABEL_MAX_CHARS`。**「…」「...」での省略・切り捨て禁止**）。1回の API で複数ラベルをまとめて処理。
  * 失敗時は null（呼び出し側でヒューリスティック finalize にフォールバック）。
  */
 async function shortenComboLabelsForCombinationLineWithLlm(state, rawParts) {
@@ -11524,9 +11931,9 @@ async function shortenComboLabelsForCombinationLineWithLlm(state, rawParts) {
       "【経過・時間】「痛みの経過」「経過は」などの**ラベル語は短語に使わない**。**ユーザーが言った時間軸**だけを抜く（例：2日前から／昨日から／さっきから／数時間前）。",
       "【推移・波】「悪化傾向」「経過の変化」などの**枠の名前は使わず**、内容だけ（例：波が一定しない／読み取りにくい→**波の推移** など）。",
       "【きっかけ】「〜の可能性」「がきっかけの可能性」などの**定型語尾は短語に含めない**。**ユーザーが述べた負荷・要因の語だけ**を3〜7文字程度の名詞句にする（例：寝不足がきっかけの可能性→寝不足、画面を長時間見た→画面見過ぎ）。新語の捏造は禁止。",
-      `【文字数】各ラベルは**目安 ${KAIRO_COMBO_SHORT_LABEL_TARGET_MIN_CHARS}〜${KAIRO_COMBO_SHORT_LABEL_TARGET_MAX_CHARS}文字**（意味が通る最短の名詞句）。1〜2文字だけの出力は避ける。絶対上限は ${KAIRO_COMBO_SHORT_LABEL_MAX_CHARS} 文字まで（超過禁止）。`,
+      `【文字数】各ラベルは**目安 ${KAIRO_COMBO_SHORT_LABEL_TARGET_MIN_CHARS}〜${KAIRO_COMBO_SHORT_LABEL_TARGET_MAX_CHARS}文字**（意味が通る最短の名詞句）。1〜2文字だけの出力は避ける。**絶対上限 ${KAIRO_COMBO_SHORT_LABEL_MAX_CHARS} 文字**まで（超過禁止）。オーバーは**言い換え・単語削除**で守る。**「…」「...」「⋯」や句点での省略・切り捨て禁止**。（機械側でも省略記号は除去されます）`,
       "【禁止】新しい症状・病名推測・入力にない事実の追加。",
-      "【重複禁止】まとめ箇条書きに**すでに書いた事実**を、組み合わせ行で**言い換えて繰り返さない**。**labels 内で3文字以上の同一部分列に相当する同趣旨が複数ある場合は1つにまとめ、**より短く区別可能な1語**を残し、冗長に長い表現は捨てる**（候補同士が同じ事実を指すなら重複を1語に。新事実の推測はしない）。",
+      "【重複禁止】まとめ箇条書きに**すでに書いた事実**を、組み合わせ行で**言い換えて繰り返さない**。**頭痛／ズキズキ／重さ・「重くてズキ」のような質**を**別々のラベルに並べず**（同じ痛みの出方・言い換えは**1つの短語**にまとめる。きっかけ・時間軸・スコア短縮とは別次元）。**labels 内で**3文字以上の同一部分列に相当する同趣旨がある場合も**1語**に。**冗長で長い方を捨てる**（新事実の推測はしない）。",
       `【形式】厳密なJSON: {"labels":["..."]} のみ。labels の要素数は必ず ${items.length} 個（上の候補と同じ順序）。`,
     ].join("\n");
     const userContent = [
@@ -11782,7 +12189,11 @@ function applyGreenYellowComboUserWordGuards(state, picked) {
     if (deduped.length >= 3) break;
   }
   out = deduped.length > 3 ? deduped.slice(0, 3) : deduped;
+  const collapsed = collapseComboLabelsOverlappingHeadacheAxis(out);
+  if (collapsed.length >= 2) out = collapsed;
+  else if (collapsed.length === 1) out = collapsed;
   if (out.length >= 2) return out;
+  if (out.length === 1) return out;
   return picked;
 }
 
@@ -12137,6 +12548,7 @@ function buildGreenYellowComboPlusClause(state, parts, causeShortOverride) {
     }
     labels = pair;
   }
+  // 短語列の頭痛軸二重は `applyGreenYellowComboUserWordGuards` 側で潰済み。ここでは chunk 数（最大3）の制約優先のため再潰ししない。
   // ブロック1「ここまでの情報を整理します」に事実箇条書きがあり、🤝は①②一体段落のみのため、
   // ここで箇条書きと重なる短語を落とすと combo が空になり「今の状態の組み合わせから」に偏る（KAIRO_SPEC 620・完成例と不整合）。
   const chunks = [];
@@ -12195,11 +12607,11 @@ const GREEN_YELLOW_DECISION_CORE_PATTERN_GREEN_B = [
 /** 🟡 同上（変更時は③完成例・超特例2行目の参照も整合） */
 const GREEN_YELLOW_DECISION_CORE_PATTERN_YELLOW_A = [
   "👉 現時点では、病院に行っても対応は自宅での休息と大きく変わりません。",
-  "👉 今は無理せず休んで体を回復させてください。",
+  "👉 今日は無理せず休んで体を回復させてください。",
 ];
 const GREEN_YELLOW_DECISION_CORE_PATTERN_YELLOW_B = [
   "👉 現時点では、受診を急ぐよりも、自宅で安静にしてください。",
-  "👉 無理に動くとかえって負担になりやすいため、今は休むことが正しい対応です。",
+  "👉 無理に動くとかえって負担になりやすいため、今日は休むことが正しい対応です。",
 ];
 
 /**
@@ -12528,6 +12940,63 @@ function comboLabelsAreDuplicateForCombo(a, b) {
   return false;
 }
 
+/** 頭痛・ズキ・「重さ」など頭部痛の出方が、言い換えで二重に並ぶとき1語に潰す（例：重くてズキズキ と 重い頭痛） */
+function isHeadachePhenotypeNarrowComboLabel(s) {
+  const x = String(s || "").trim();
+  if (!x) return false;
+  if (/痛みは\s*\d|\/10|10）|10\)/.test(x)) return false;
+  if (/やや強い痛み$|^強い痛み$|^痛みの強さ|^中程度の痛み$|^軽い痛み$/.test(x)) return false;
+  if (/日差し|紫外線|日向|寝不足|画面|パソコン|食|冷え|湿気|乾燥|ストレス|飲酒/.test(x)) return false;
+  if (/\d+\s*日前|昨日から|一昨日|さっきから|時間前から|時間続|日中|昨夜/.test(x)) return false;
+  if (/胃痛|腹痛|腰痛|歯痛|関節|胸|背中/.test(x)) return false;
+
+  if (/頭痛/.test(x)) return true;
+  if (/ズキズキ|キリキリ|ジンジン|ドクドク|ガンガン|グングン|チクチク/.test(x)) return true;
+  if (/重くて/.test(x) && /(ズキ|キリ|ジン|チク)/.test(x)) return true;
+  if (/重い頭痛|頭が重/.test(x)) return true;
+  if (/鈍い|締め付け|張りつくような|つりそうにな/.test(x)) return true;
+  return false;
+}
+
+function roughHeadPainDescriptorSignature(s) {
+  const x = String(s || "");
+  return {
+    pulse: /ズキ|キリ|ジン|ドク|ガン|グン|チク/.test(x),
+    heaviness: /重|鈍|締め付け|張りつく|つりそう/.test(x),
+    zutsu: /頭痛/.test(x),
+  };
+}
+
+function redundantHeadPainDescriptorPair(a, b) {
+  if (!isHeadachePhenotypeNarrowComboLabel(a) || !isHeadachePhenotypeNarrowComboLabel(b)) return false;
+  const sa = roughHeadPainDescriptorSignature(a);
+  const sb = roughHeadPainDescriptorSignature(b);
+  if (sa.pulse && sb.pulse) return true;
+  if (sa.heaviness && sb.heaviness) return true;
+  return false;
+}
+
+/** @param {string[]} labels */
+function collapseComboLabelsOverlappingHeadacheAxis(labels) {
+  if (!Array.isArray(labels) || labels.length < 2) return labels ? labels.slice() : [];
+  const trimmed = labels.map((l) => String(l || "").trim()).filter(Boolean);
+  const toDrop = new Set();
+  for (let i = 0; i < trimmed.length; i++) {
+    for (let j = i + 1; j < trimmed.length; j++) {
+      if (toDrop.has(i) || toDrop.has(j)) continue;
+      if (!redundantHeadPainDescriptorPair(trimmed[i], trimmed[j])) continue;
+      const a = trimmed[i];
+      const b = trimmed[j];
+      let dropIdx = j;
+      if (!/頭痛/.test(a) && /頭痛/.test(b)) dropIdx = i;
+      else if (/頭痛/.test(a) && !/頭痛/.test(b)) dropIdx = j;
+      else if (a.length !== b.length) dropIdx = a.length <= b.length ? j : i;
+      toDrop.add(dropIdx);
+    }
+  }
+  return trimmed.filter((_, idx) => !toDrop.has(idx));
+}
+
 /**
  * 🟢🟡：痛み方②（worsening）を回答がある限り必ず含め、重複なく min〜max 件を選ぶ（逆優先度は痛み方以外に適用）。
  */
@@ -12612,12 +13081,18 @@ function applyRedComboUserWordGuards(state, picked) {
       return p;
     });
   }
+  out = out
+    .map((p) => finalizeComboLabelForCombinationLine(p) || String(p).trim())
+    .filter(Boolean);
+  const collapsedHc = collapseComboLabelsOverlappingHeadacheAxis(out);
+  if (collapsedHc.length >= 1) out = collapsedHc;
   out = dedupeLinesKeepShorterOnOverlap(
-    out.map((p) => finalizeComboLabelForCombinationLine(p) || String(p).trim()).filter(Boolean),
+    out,
     (s) => normalizeBulletKeyForDedupe(String(s || ""))
   );
   if (out.length > 3) out = out.slice(0, 3);
   if (out.length >= 2) return out;
+  if (out.length === 1) return out;
   return picked;
 }
 
@@ -13164,6 +13639,56 @@ function finalizeWhyOkayBullet(line) {
   return ensureWhyOkayBulletHasArrow(sanitizeModalWhyOkayBulletLine(line));
 }
 
+/** `ensureWhyOkayBulletHasArrow` が付与する定型の右文（これが出たら「なぜ大丈夫か」LLM をやり直し・最大回数まで） */
+const WHY_OKAY_ENSURE_ARROW_FALLBACK_MAX_ATTEMPTS = 5;
+
+const WHY_OKAY_ENSURE_ARROW_FALLBACK_FULL_LINES = new Set([
+  "・事実の整理 → 手がかりに沿って受け止めやすい",
+  "・手がかりが得られている範囲 → 受け止め方を立てやすい",
+]);
+
+const WHY_OKAY_ENSURE_ARROW_FALLBACK_RIGHT_EXACT = new Set([
+  "今の事実の置き方で受け止めやすい",
+  "手がかりに沿って受け止めやすい",
+]);
+
+function whyOkayLineUsesEnsureArrowFallback(line) {
+  const t = String(line || "").trim();
+  if (!t) return true;
+  if (WHY_OKAY_ENSURE_ARROW_FALLBACK_FULL_LINES.has(t)) return true;
+  const idx = t.indexOf(" → ");
+  if (idx === -1) return true;
+  const right = t.slice(idx + 3).trim();
+  if (WHY_OKAY_ENSURE_ARROW_FALLBACK_RIGHT_EXACT.has(right)) return true;
+  if (right === "受け止め方を立てやすい") return true;
+  return false;
+}
+
+function whyOkayBulletsListUsesEnsureArrowFallback(bullets) {
+  return (bullets || []).some(whyOkayLineUsesEnsureArrowFallback);
+}
+
+/** `buildDiseaseSafetyFilteredMessage` の LLM JSON から「なぜ大丈夫か」3件を本番と同じ経路で合成（再試行判定用） */
+function mergeWhyOkayFromModalLlMParsed(parsed, state, level, userSummary, mainSymptomDisplay, mainSymptom) {
+  if (level !== "🟢" && level !== "🟡") return [];
+  const fromJson =
+    parsed?.why_okay_bullets ??
+    parsed?.whyOkayBullets ??
+    (level === "🟡" ? parsed?.caution_why_bullets ?? parsed?.cautionWhyBullets : null);
+  const arr = Array.isArray(fromJson) ? fromJson : [];
+  const sanitized = arr
+    .map((x) => {
+      let s = modalCauseLineFromUnknown(x);
+      if (!s) s = valueToDisplayString(x);
+      return String(s || "").trim();
+    })
+    .filter((t) => t && /^・/.test(t))
+    .slice(0, 3)
+    .map(finalizeWhyOkayBullet);
+  const fb = buildWhyOkayBulletsFallback(state, level, userSummary, mainSymptomDisplay, mainSymptom);
+  return mergeUniqueWhyOkayToThree(sanitized, fb);
+}
+
 /** 緊急度スロット「低」に相当する要因を、先に出しやすい「なぜ大丈夫か」1行化（中→低の見立てに寄せる） */
 function buildLowRiskReassuringSlotBullets(state) {
   if (!state) return [];
@@ -13517,43 +14042,59 @@ async function generateWhyOkayBulletsFromSummary(mainSymptomDisplay, userSummary
       ? resolveYellowCautionUserContentForPrompt(state, userSummary)
       : String(userSummary || "").trim() || (state ? buildMinimalModalUserSummaryFallback(state) : "");
   if (!String(material || "").trim()) return fb();
-  try {
-    const prompt = [
-      "あなたは医療情報を要約するアシスタントです。",
-      "厳守：",
-      "- 出力は必ずJSONのみ：{\"bullets\":[\"・...\",\"・...\",\"・...\"]}",
-      "- bullets は**必ず3件**。**各要素は1行**で、**必ず**「**・事実や観察 → 短い含み（一文）**」。**` → `（半角の矢印、前後に空白）を各要素に必ず含めること。**",
-      "- **簡潔**に。Kairoの判断（入力）の事実に沿う。",
-      "- 先頭から、体温・経過・痛みの度合い・付随など、安心の置き方が立てやすい点を。",
-      "- **3件は同じ型・同じ観点の言い換えにしない**（例：会話要約の繰り返し3つは避ける）。材料が少ない・似てしまいそうなときは、**観点を分ける**（例：今がピーク付近の可能性・安静・睡眠で持ち直しやすいこと・会話上の1事実＋短い含み など）。**軽く現実的な含み**を入れてよい。",
-      "- 痛みの程度は**（6/10）**でよい。診断の断定、恐怖表現、空の括弧（）は禁止。",
-      "- 緊急度🟡で重い要因があっても、断定せず短く。",
-      "- 毎回同じ3行のコピーは禁止。",
-    ].join("\n");
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: prompt },
-        {
-          role: "user",
-          content: `主症状（表示）: ${mainSymptomDisplay}\n緊急度: ${level}\n\n【判断の材料】\n${material}`,
-        },
-      ],
-      temperature: 0.2,
-      max_tokens: 700,
-    });
-    const raw = completion?.choices?.[0]?.message?.content || "";
-    const parsed = parseJsonObjectFromText(raw);
-    const arr = Array.isArray(parsed?.bullets) ? parsed.bullets : [];
-    const sanitized = arr
-      .map((x) => String(x || "").trim())
-      .filter((t) => t && /^・/.test(t))
-      .slice(0, 3)
-      .map(finalizeWhyOkayBullet);
-    return mergeUniqueWhyOkayToThree(sanitized, fb());
-  } catch (_) {
-    return fb();
+
+  const basePromptLines = [
+    "あなたは医療情報を要約するアシスタントです。",
+    "厳守：",
+    "- 出力は必ずJSONのみ：{\"bullets\":[\"・...\",\"・...\",\"・...\"]}",
+    "- bullets は**必ず3件**。**各要素は1行**で、**必ず**「**・事実や観察 → 短い含み（一文）**」。**` → `（半角の矢印、前後に空白）を各要素に必ず含めること。**",
+    "- **各要素の ` → ` 右は、事実に即した短い含みを必ず自分で書く**（右を空にしたり、「受け止めやすい」だけの受け皿一文にしたりしない。サーバ側の定型補完を誘発しない）。",
+    "- **簡潔**に。Kairoの判断（入力）の事実に沿う。",
+    "- 先頭から、体温・経過・痛みの度合い・付随など、安心の置き方が立てやすい点を。",
+    "- **3件は同じ型・同じ観点の言い換えにしない**（例：会話要約の繰り返し3つは避ける）。材料が少ない・似てしまいそうなときは、**観点を分ける**（例：今がピーク付近の可能性・安静・睡眠で持ち直しやすいこと・会話上の1事実＋短い含み など）。**軽く現実的な含み**を入れてよい。",
+    "- 痛みの程度は**（6/10）**でよい。診断の断定、恐怖表現、空の括弧（）は禁止。",
+    "- 緊急度🟡で重い要因があっても、断定せず短く。",
+    "- 毎回同じ3行のコピーは禁止。",
+  ];
+
+  let lastMerged = null;
+  for (let attempt = 0; attempt < WHY_OKAY_ENSURE_ARROW_FALLBACK_MAX_ATTEMPTS; attempt++) {
+    const retryExtra =
+      attempt > 0
+        ? [
+            "- **再試行**：前回、箭印の右が欠けたか定型文言に寄りました。**3件すべて**で **` → ` の右を必ず具体内容で埋めること**（汎用の「受け止めやすい」系だけにしない）。",
+          ]
+        : [];
+    const prompt = [...basePromptLines, ...retryExtra].join("\n");
+    try {
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: prompt },
+          {
+            role: "user",
+            content: `主症状（表示）: ${mainSymptomDisplay}\n緊急度: ${level}\n\n【判断の材料】\n${material}`,
+          },
+        ],
+        temperature: 0.2 + attempt * 0.05,
+        max_tokens: 700,
+      });
+      const raw = completion?.choices?.[0]?.message?.content || "";
+      const parsed = parseJsonObjectFromText(raw);
+      const arr = Array.isArray(parsed?.bullets) ? parsed.bullets : [];
+      const sanitized = arr
+        .map((x) => String(x || "").trim())
+        .filter((t) => t && /^・/.test(t))
+        .slice(0, 3)
+        .map(finalizeWhyOkayBullet);
+      const merged = mergeUniqueWhyOkayToThree(sanitized, fb());
+      lastMerged = merged;
+      if (!whyOkayBulletsListUsesEnsureArrowFallback(merged)) return merged;
+    } catch (_) {
+      /* 次の試行へ */
+    }
   }
+  return lastMerged && lastMerged.length ? lastMerged : fb();
 }
 
 /** 本文・モーダル外：数値 /10 を出さず痛みの程度を短く言い換え（原因モーダル LLM の禁止とは別） */
@@ -14598,7 +15139,7 @@ async function buildDiseaseSafetyFilteredMessage(
   const fallbackPair = getDiseaseFallbackPair(mainSymptom);
   const category = state ? (state.triageCategory || resolveQuestionCategoryFromState(state)) : "PAIN";
 
-  const tryExtract = async () => {
+  const tryExtract = async (temperature = 0.2, whyRetryAttempt = 0) => {
     const prompt = [
       "検索結果と主症状カテゴリを参照し、**考えられる原因・機序・きっかけ**を頻度順に3カテゴリに分類し、**同じ1回の応答**でモーダル用の納得文・**「なぜ大丈夫か」箇条書き（3件）**も出力してください（追加入力は不要）。",
       `【最重要・必ず守る】主症状（ユーザー向け表示ラベル・まとめ・UIと同一）: 「${mainSymptomDisplay}」。主症状（鑑別・検索キーワード）: 「${mainSymptom}」。`,
@@ -14608,6 +15149,7 @@ async function buildDiseaseSafetyFilteredMessage(
       `- common・conditional・rare_emergency の各要素は**必ず文字列**（1行＝「・原因 → 理由」形式の文字列）。オブジェクト・入れ子は禁止。`,
       `- 緊急度レベルはユーザーメッセージの「緊急度レベル」に従う。🔴のとき acceptance_conviction は ""、why_okay_bullets は []。🟢または🟡のとき why_okay_bullets は**必ず3件**（中間「なぜ大丈夫か」。**各要素は必ず**「**・事実や観察 → 短い理由**」1行。半角 \` → \`（前後に空白可）を**必ず含める**）。【Kairoの判断】に簡潔に合わせる。痛み **（6/10）** 可。診断断定・恐怖表現は禁止。同じ文面の固定3行は禁止。`,
       `- **why_okay_bullets（最重要・重複避け）**：3件**とも**、同じ観点・同じ型の言い回し（例：会話事実の言い換えを3回）にしない。ネタ切れ・似た事実しか無いときは、**観点を分ける**（例①「今がつらさのピーク付近で、**これから落ち着く**こともある」②「**静かに休めば**負担が抜けやすい」③会話事実＋短い含み。など）。3行とも重い医学的安心に固めず、**軽く現実的な含み**を混ぜてよい。`,
+      `- **why_okay_bullets**：**各項目の \` → \` 右は必ず具体内容**（欠ける・受け皿一文だけにすると自動補完され**再試行**になる）。`,
       `- acceptance_conviction（🟢または🟡のみ）：納得文を**ちょうど2文**（改行で区切る。1文目は**句点「。」を付けない**・2文目は**「逆に動くと悪化しやすいので、」のように読点「、」で終わる**。「休む方が合理的です」は**出さない**）。断定形（「かもしれません」「でしょう」禁止）。意味は「今すぐ受診しても自宅と大きく変わらない」「無理に動くと悪化しやすい（ので、で終え）」に寄せる。主症状ラベルは必要なら1回まで。「あなたの場合」禁止。`,
       "- common = 一般的に頻度が高い**原因・きっかけ・物理的機序**（**ちょうど3件**）。各項目は「・<原因名> → <短い理由>」形式。**「→」右は一文**・句点「。」は文末に1つだけ。",
       "- **原因名（→の左）は**：病名・状態名・または**具体的な機序**（例：乾燥・摩擦・軽い切り傷・局所刺激・姿勢負荷・睡眠不足など）。主症状と無関係な病名は含めない。",
@@ -14623,6 +15165,11 @@ async function buildDiseaseSafetyFilteredMessage(
       "- rare_emergency = 稀だが緊急性あり。**2件のみ**（強制）。検索結果＋ユーザー症状から要約。腫瘍・出血・致死・がん・破裂などの重篤疾患はここにのみ入れる。固定テンプレート禁止。",
       "- common/conditional に腫瘍・出血・致死・がん・破裂を含めない",
       "- 「あなたの場合」「この症状は」などの個別化表現は禁止。恐怖を煽る表現は禁止",
+      ...(whyRetryAttempt > 0 && (level === "🟢" || level === "🟡")
+        ? [
+            `- **再試行（なぜ大丈夫か）**：前回、\`why_okay_bullets\` が箭印の右が欠けるかサーバ側の定型補完になりました。**3件とも**「**・事実や観察 → 具体的な短い含み**」とし、右を「今の事実の置き方で受け止めやすい」「手がかりに沿って受け止めやすい」などの受け皿一文だけにしない。`,
+          ]
+        : []),
     ].join("\n");
 
     const userContent = [
@@ -14644,7 +15191,7 @@ async function buildDiseaseSafetyFilteredMessage(
         { role: "system", content: prompt },
         { role: "user", content: userContent },
       ],
-      temperature: 0.2,
+      temperature,
       max_tokens: 1400,
     });
     const raw = completion?.choices?.[0]?.message?.content || "";
@@ -14652,10 +15199,24 @@ async function buildDiseaseSafetyFilteredMessage(
   };
 
   let parsed = null;
-  try {
-    parsed = await tryExtract();
-  } catch (_) {
-    /* fallback */
+  for (let attempt = 0; attempt < WHY_OKAY_ENSURE_ARROW_FALLBACK_MAX_ATTEMPTS; attempt++) {
+    try {
+      const candidate = await tryExtract(0.2 + attempt * 0.05, attempt);
+      if (!candidate || typeof candidate !== "object") continue;
+      parsed = candidate;
+      if (level !== "🟢" && level !== "🟡") break;
+      const whyProbe = mergeWhyOkayFromModalLlMParsed(
+        candidate,
+        state,
+        level,
+        userSummary,
+        mainSymptomDisplay,
+        mainSymptom
+      );
+      if (!whyOkayBulletsListUsesEnsureArrowFallback(whyProbe)) break;
+    } catch (_) {
+      /* 次の試行へ */
+    }
   }
 
   const hasDanger = (text) =>
@@ -17063,7 +17624,7 @@ function shouldBlockRedByRecentShortDuration(state) {
   ).trim();
   const selectedIndex = state?.durationMeta?.selectedIndex;
   if (selectedIndex === 0 || selectedIndex === 1) return true;
-  return /(さっき|今さっき|数時間前|数時間|数分|数十分|今朝)/.test(durationRaw);
+  return /(さっき|今さっき|数時間前|数時間|数分|数十分|今朝|\d+\s*分(?:間)?(?:前|後)?)/.test(durationRaw);
 }
 
 /**
@@ -17085,6 +17646,11 @@ function isDurationWithinOneWeek(state) {
       if (Number.isFinite(d) && d > 7) return false;
     }
     if (normMeta === "short" || normMeta === "today" || normMeta === "hours") return true;
+    const mm = normMeta.match(/^(\d+)m_ago$/);
+    if (mm) {
+      const mins = Number(mm[1]);
+      if (Number.isFinite(mins) && mins <= 7 * 24 * 60) return true;
+    }
     if (/^\d+h_ago$/.test(normMeta)) return true;
   }
   const nCompact = normalizeUserText(durationRaw).replace(/\s+/g, "");
@@ -17146,6 +17712,14 @@ function buildDurationTemporaryPossibilityLabelForRedGuard(state) {
   const selectedIndex = state?.durationMeta?.selectedIndex;
   if (selectedIndex === 0) return "さっきから（一時的な可能性）";
   if (selectedIndex === 1) return "数時間前から（一時的な可能性）";
+  const dm = dur.match(/(\d+)\s*分/);
+  if (dm) {
+    const mv = Number(dm[1]);
+    if (Number.isFinite(mv)) {
+      if (mv <= 180) return "さっきから（一時的な可能性）";
+      if (mv < 24 * 60) return "数時間前から（一時的な可能性）";
+    }
+  }
   if (/(さっき|今さっき|たった今|数分|数十分)/.test(dur)) return "さっきから（一時的な可能性）";
   if (/(数時間前|数時間)/.test(dur)) return "数時間前から（一時的な可能性）";
   if (/(今朝)/.test(dur)) return "今朝から（一時的な可能性）";
@@ -17164,7 +17738,7 @@ function shouldExcludeComboCandidateDueToRedGuardOnsetOverlap(label, state) {
   if (/^症状は/.test(s)) return true;
   if (/^経過の様子は/.test(s)) return false;
   if (/^発症から時間が短い$|^症状が続いている$/.test(s)) return true;
-  if (/(?:^|[\s「])(さっき|今さっき|数時間前|数十分|今朝|たった今|短い経過)/.test(s)) return true;
+  if (/(?:^|[\s「])(さっき|今さっき|数時間前|数十分|今朝|たった今|短い経過|\d{1,4}分(?:前|くらい)?)/.test(s)) return true;
   return false;
 }
 
@@ -17843,7 +18417,7 @@ app.post("/api/chat", async (req, res) => {
     reconcilePostSummaryStateIfNeeded(state, historyForGuard, clientMeta, forceFreshSession);
     if (mustUseFollowUpPhase(state, historyForGuard, clientMeta, userMessageCountBefore)) {
       console.log("🛑 FORCE FOLLOW MODE (earliest guard) - summary generation blocked");
-      return handleFollowUpPhase(res, conversationId, message, state, locationPromptMessage, locationRePromptMessage);
+      return await handleFollowUpPhase(res, conversationId, message, state, locationPromptMessage, locationRePromptMessage);
     }
 
     ensureSlotFilledConsistency(conversationState[conversationId]);
@@ -17876,7 +18450,7 @@ app.post("/api/chat", async (req, res) => {
     // 二重ガード（最早ガードで既にreturn済みのはず。ここは保険。）
     if (forceFollowMode) {
       console.log("🛑 FORCE FOLLOW MODE (secondary guard) - redirecting to handleFollowUpPhase");
-      return handleFollowUpPhase(res, conversationId, message, state, locationPromptMessage, locationRePromptMessage);
+      return await handleFollowUpPhase(res, conversationId, message, state, locationPromptMessage, locationRePromptMessage);
     }
 
     // フェーズ制御（優先順位厳守）: ①初回は質問のみ ②triage未完了は質問 ③summary未生成はまとめ
@@ -18165,14 +18739,21 @@ app.post("/api/chat", async (req, res) => {
 
     // confirmationShown && !summaryShown の場合は確認待ち。フォローアップで閉じメッセージを返さない。
     const followUpResult = state.summaryDeliveredForFollowUp
-      ? generateFollowResponse(state, message, {
+      ? await generateFollowResponse(state, message, {
           history: conversationHistory[conversationId] || [],
         })
       : null;
     if (state.summaryShown && state.summaryDeliveredForFollowUp && !followUpResult) {
-      // 仕様8.2通り：フォロー質問は固定テンプレ。🔴は質問①、🟢🟡は質問②を返す。
+      const histMain = conversationHistory[conversationId] || [];
       const specFollowUp = getInitialFollowUpQuestionBySpec(state);
-      const outMessage = specFollowUp || buildFollowClosingMessage();
+      let outMessage =
+        (await emitFollowLlm(
+          state,
+          message,
+          { history: histMain },
+          "まとめ提示済みだがフォロー応答が未取得。**軽い受け答えテンプレ1行のみ**は禁止。ログと判定に沿う一文以上。"
+        )) || "";
+      outMessage = (outMessage && outMessage.trim()) || specFollowUp || "";
       if (!state.hasSummaryBlockGenerated) {
         state.hasSummaryBlockGenerated = true;
       }
@@ -18206,7 +18787,22 @@ app.post("/api/chat", async (req, res) => {
       });
     }
     if (followUpResult) {
-      const outMessage = followUpResult.message;
+      let outMessage =
+        typeof followUpResult.message === "string"
+          ? followUpResult.message.trim()
+          : String(followUpResult.message || "").trim();
+      const histMainFu = conversationHistory[conversationId] || [];
+      const userSummaryReqFu = userAskedSummary(message) || /まとめ|要約/.test(String(message || ""));
+      if (!outMessage) {
+        const hintFu = userSummaryReqFu
+          ? "ユーザーはまとめや要約の再掲に近い要望。**まとめ全文の複製禁止**。要点の扱いを短く。"
+          : "まとめ提示後フォローのこのターンへの応答。会話ログと緊急度に沿う。**軽い受け答えのテンプレ1行のみ**は禁止。";
+        const fill = await emitFollowLlm(state, message, { history: histMainFu }, hintFu);
+        outMessage = (fill && fill.trim()) || "";
+      }
+      if (!outMessage.trim()) {
+        outMessage = getInitialFollowUpQuestionBySpec(state) || "";
+      }
       if (FORBIDDEN_FOLLOW_UP.test(outMessage || "")) {
         // 禁止メッセージは置き換えず、出さない（会話履歴にも追加しない）
         conversationHistory[conversationId].push({ role: "user", content: message });
@@ -18735,7 +19331,7 @@ app.post("/api/chat", async (req, res) => {
         stLate.hasSummaryBlockGenerated
       ) {
         console.log("🛑 LLM triage blocked: post-summary / FOLLOW_UP (defense before completion)");
-        return handleFollowUpPhase(
+        return await handleFollowUpPhase(
           res,
           conversationId,
           message,
@@ -18771,7 +19367,7 @@ app.post("/api/chat", async (req, res) => {
           stGuard.hasSummaryBlockGenerated)
       ) {
         console.error("🚨 BLOCKED: LLM full-summary path while post-summary flags set (redirect to follow-up)");
-        return handleFollowUpPhase(
+        return await handleFollowUpPhase(
           res,
           conversationId,
           message,
@@ -19358,7 +19954,7 @@ app.post("/api/chat", async (req, res) => {
       if (followUpMessage) toPop++;
       if (followUpQuestion && shouldSendFollowUpQuestion(sections, aiResponse)) toPop++;
       for (let i = 0; i < toPop && hist?.length; i++) hist.pop();
-      return handleFollowUpPhase(
+      return await handleFollowUpPhase(
         res,
         conversationId,
         req.body?.message || message,
