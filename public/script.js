@@ -759,7 +759,7 @@ function setConcreteModalBody(textOrStructured, options = {}) {
 }
 
 const GREEN_YELLOW_MODAL_ACCEPTANCE_FALLBACK =
-  "今すぐ受診しても、得られる対応は自宅と大きく変わりません\n逆に動くと悪化しやすいので、";
+  "今すぐ受診しても、得られる対応は自宅での様子見と大きく変わりません\n逆に動くと悪化しやすいので、";
 
 /** 🤝/📝モーダル中間ブロック：見出し固定（本文は `whyOkayBullets`・**必ず3件**） */
 function getGreenYellowModalMiddleBlockHeadingClient(_triageLevel) {
