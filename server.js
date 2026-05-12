@@ -656,7 +656,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 ⸻
 
 
-✅ あなたの今すぐやること
+✅ 今すぐできること
 
 
 今日は次の3つだけ意識してください。
@@ -976,7 +976,7 @@ function buildStateAboutContextForSummary(state) {
   return `【🤝 Kairoの判断（ユーザー固有・必ず参照）】
 ${bullets.join("\n")}
 
-✅ あなたの今すぐやること は、上記の状態に即した具体的な行動を出してください。一般的なテンプレ・汎用表現は禁止。痛みの強さ・きっかけ・経過など、上記の具体語を理由に反映すること。
+✅ 今すぐできること は、上記の状態に即した具体的な行動を出してください。一般的なテンプレ・汎用表現は禁止。痛みの強さ・きっかけ・経過など、上記の具体語を理由に反映すること。
 `;
 }
 
@@ -1001,8 +1001,8 @@ ${stateContext ? `\n${stateContext}\n` : ""}
 - 選択肢や箇条書きの記号は必ず「・」を使う
 - ❗どのブロックも欠けてはいけない（1ブロックのみの出力は禁止）
 - ❗見出しは必ず以下を全て含める（順番厳守）：
-  - 🟢 ここまでの情報を整理します / 🤝 Kairoの判断 / ✅ あなたの今すぐやること / ⏳ 今後の見通し / 🌱 最後に
-  - または 📝 Kairoの判断 / ✅ あなたの今すぐやること / 🏥 受診先の候補 / 💬 最後に
+  - 🟢 ここまでの情報を整理します / 🤝 Kairoの判断 / ✅ 今すぐできること / ⏳ 今後の見通し / 🌱 最後に
+  - または 📝 Kairoの判断 / ✅ 今すぐできること / 🏥 受診先の候補 / 💬 最後に
 - ❗🟢/🟡/🔴 ここまでの情報を整理します の本文は固定のみ。前文は「必要な情報はそろいました」「ここまでで判断に必要な情報は確認できました」「ここまでで、今の状態はかなり整理できました」のいずれか1文をランダム。改行のあと「今の症状なら、まずどう動くべきかをはっきりお伝えします」を必ず続ける。自由生成禁止。
 - 📝 Kairoの判断 は事実のみ・具体的に書く
   - 「ない」「不明」「特になし」だけの記述は禁止
@@ -1036,7 +1036,7 @@ ${stateContext ? `\n${stateContext}\n` : ""}
    - 「だから今日はこれでいいですよ」を必ず含める
 4) Kairoとしての判断（「今の情報を見る限り」「現時点では」の前置き必須）
 
-✅ あなたの今すぐやること：
+✅ 今すぐできること：
 - 項目は最大3つ
 - 各項目は「行動 + 理由（1文）」のセット
 ${stateContext ? "- 上記【🤝 Kairoの判断】の内容を必ず反映し、その状態に即した具体的な行動を出す（テンプレ・汎用表現は禁止）\n" : ""}- 理由は不安を下げる説明に限定（正しさの証明・詳細な医学説明は禁止）
@@ -1091,8 +1091,10 @@ function normalizeHospitalMemoHeaderText(text) {
     .replace(/📝\s*いまの状態を整理します（メモ）?/g, "📝 Kairoの判断")
     .replace(/🤝\s*今の状態について/g, "🤝 Kairoの判断")
     .replace(/📝\s*今の状態について/g, "📝 Kairoの判断")
-    .replace(/✅\s*今すぐやること（これだけでOK）/g, "✅ あなたの今すぐやること（これだけでOK）")
-    .replace(/✅\s*今すぐやること/g, "✅ あなたの今すぐやること");
+    .replace(/✅\s*あなたの今すぐやること（これだけでOK）/g, "✅ 今すぐできること（これだけでOK）")
+    .replace(/✅\s*あなたの今すぐやること/g, "✅ 今すぐできること")
+    .replace(/✅\s*今すぐやること（これだけでOK）/g, "✅ 今すぐできること（これだけでOK）")
+    .replace(/✅\s*今すぐやること/g, "✅ 今すぐできること");
 }
 
 function hasAnySummaryBlocks(text) {
@@ -1101,7 +1103,7 @@ function hasAnySummaryBlocks(text) {
     /🔴\s*ここまでの情報を整理します/.test(normalized) ||
     normalized.includes("🟢 ここまでの情報を整理します") ||
     textIncludesHandshakeAboutHeader(normalized) ||
-    normalized.includes("✅ あなたの今すぐやること") ||
+    normalized.includes("✅ 今すぐできること") ||
     normalized.includes("⏳ 今後の見通し") ||
     normalized.includes("💊 一般的な市販薬") ||
     normalized.includes("🌱 最後に") ||
@@ -1246,10 +1248,11 @@ function lineMatchesSummaryHeaderFlex(line, header) {
   if (header === "📝 Kairoの判断" || header === "📝 いまの状態を整理します（メモ）") {
     return isMemoStateAboutHeaderLine(t);
   }
-  if (header === "✅ あなたの今すぐやること") {
+  if (header === "✅ 今すぐできること") {
     return (
-      t.startsWith("✅ あなたの今すぐやること") ||
-      t.startsWith("✅ 今すぐやること")
+      t.startsWith("✅ 今すぐできること") ||
+      t.startsWith("✅ 今すぐやること") ||
+      t.startsWith("✅ あなたの今すぐやること")
     );
   }
   return false;
@@ -1260,13 +1263,13 @@ function hasAllSummaryBlocks(text) {
   const hospitalHeaders = [
     "🔴 ここまでの情報を整理します",
     "📝 Kairoの判断",
-    "✅ あなたの今すぐやること",
+    "✅ 今すぐできること",
     "🏥 受診先の候補",
     "💬 最後に",
   ];
-  const normalHeaders = ["🟢 ここまでの情報を整理します", "🤝 Kairoの判断", "✅ あなたの今すぐやること", "⏳ 今後の見通し", "🌱 最後に"];
+  const normalHeaders = ["🟢 ここまでの情報を整理します", "🤝 Kairoの判断", "✅ 今すぐできること", "⏳ 今後の見通し", "🌱 最後に"];
   /** finalize 後は先頭見出しは 🟢 に正規化（ensureGreenHeaderForYellow）。🟡 判定は文中の 🟡 等でなく getRequiredSummaryHeadersByLevel と同形にする */
-  const yellowHeaders = ["🟢 ここまでの情報を整理します", "🤝 Kairoの判断", "✅ あなたの今すぐやること", "⏳ 今後の見通し", "🌱 最後に"];
+  const yellowHeaders = ["🟢 ここまでの情報を整理します", "🤝 Kairoの判断", "✅ 今すぐできること", "⏳ 今後の見通し", "🌱 最後に"];
   const required = isHospitalFlow(normalized)
     ? hospitalHeaders
     : normalized.includes("🟡")
@@ -1302,7 +1305,7 @@ function getRequiredSummaryHeadersByLevel(level) {
     return [
       "🔴 ここまでの情報を整理します",
       "📝 Kairoの判断",
-      "✅ あなたの今すぐやること",
+      "✅ 今すぐできること",
       "🏥 受診先の候補",
       "💬 最後に",
     ];
@@ -1311,7 +1314,7 @@ function getRequiredSummaryHeadersByLevel(level) {
     return [
       "🟢 ここまでの情報を整理します",
       "🤝 Kairoの判断",
-      "✅ あなたの今すぐやること",
+      "✅ 今すぐできること",
       "⏳ 今後の見通し",
       "🌱 最後に",
     ];
@@ -1319,7 +1322,7 @@ function getRequiredSummaryHeadersByLevel(level) {
   return [
     "🟢 ここまでの情報を整理します",
     "🤝 Kairoの判断",
-    "✅ あなたの今すぐやること",
+    "✅ 今すぐできること",
     "⏳ 今後の見通し",
     "🌱 最後に",
   ];
@@ -1587,7 +1590,7 @@ const ALL_SUMMARY_HEADERS = [
   "🔴 ここまでの情報を整理します",
   "🟢 ここまでの情報を整理します",
   "🤝 Kairoの判断",
-  "✅ あなたの今すぐやること",
+  "✅ 今すぐできること",
   "⏳ 今後の見通し",
   "🌱 最後に",
   "📝 Kairoの判断",
@@ -1647,10 +1650,10 @@ async function enforceSummaryStructureStrict(text, level, history, state) {
     return await buildLocalSummaryFallback(level, history, state);
   }
   // PAIN/INFECTION+🟡強: ブロック単位で1件目固定を強制適用（所定位置を確実に確保）
-  if (shouldApplyPainInfectionYellowBedRestFirst(state, level) && blocks.has("✅ あなたの今すぐやること")) {
-    const actionBlock = blocks.get("✅ あなたの今すぐやること");
+  if (shouldApplyPainInfectionYellowBedRestFirst(state, level) && blocks.has("✅ 今すぐできること")) {
+    const actionBlock = blocks.get("✅ 今すぐできること");
     const fixedBlock = ensurePainInfectionYellowFirstAction(actionBlock, level, state);
-    blocks.set("✅ あなたの今すぐやること", fixedBlock);
+    blocks.set("✅ 今すぐできること", fixedBlock);
   }
   // 強制的に仕様順へ再構成（順序ゆらぎを排除）
   let result = headers.map((h) => blocks.get(h)).join("\n\n").trim();
@@ -3658,25 +3661,17 @@ function correctKanjiAndTypos(text) {
   return t;
 }
 
-/** 下段：受診を本気で検討すべきほど強い変化のみ（KAIRO_SPEC・「・」3行で出力） */
-const OUTLOOK_ESCALATION_CORE = [
-  "激しい震えや強い冷汗が強く続く",
-  "ひどい嘔吐が続く、または水も飲めないほどのむかつきがある",
-  "意識のもうろう、または息苦しさ・胸の痛みが急に強くなる",
-];
-
-const OUTLOOK_ESCALATION_INFECTION_EXTRA = [
-  "息苦しさや胸の重さが新しく出る",
-  "水をほとんど飲めない、または意識がはっきり保てない",
-  "体力的に急に底をついたように感じる",
-];
-
-const OUTLOOK_ESCALATION_GI_EXTRA = [
-  "血が混じる便や真っ黒い便、または激しい腹痛が引かない",
-];
-
-const OUTLOOK_ESCALATION_NEURO_EXTRA = [
-  "手足の力が急に入りにくい、いままでにない変化が出る",
+/** 下段：受診を本気で検討すべきほど強い変化（KAIRO_SPEC・「・」3行はこのプールからランダム3件） */
+const OUTLOOK_ESCALATION_TEMPLATES = [
+  "水も飲めない状態が続く",
+  "呼吸が苦しい、または急に息がしづらくなる",
+  "意識がぼんやりする、反応がおかしい",
+  "胸の強い痛みや圧迫感が出る",
+  "立てないほど強いふらつきがある",
+  "何度も繰り返し吐いてしまう",
+  "急激に症状が悪化している",
+  "高熱が長時間続き、ぐったりしている",
+  "けいれんや体の異常な震えが出る",
 ];
 
 const OUTLOOK_VISIT_CLOSING_VARIANTS = [
@@ -3825,18 +3820,7 @@ function coerceOutlookFullBodyUpperForDayScale(body, state) {
 }
 
 function buildOutlookEscalationBullets(state) {
-  const category = state?.triageCategory || resolveQuestionCategoryFromState(state);
-  const pool = OUTLOOK_ESCALATION_CORE.slice();
-  if (category === "INFECTION") {
-    pool.push(...OUTLOOK_ESCALATION_INFECTION_EXTRA);
-  }
-  if (category === "GI") {
-    pool.push(...OUTLOOK_ESCALATION_GI_EXTRA);
-  }
-  if (buildStateFactsBullets(state, { forSummary: true }).some((l) => /ふらつ|めまい|痺れ|意識/.test(l))) {
-    pool.push(...OUTLOOK_ESCALATION_NEURO_EXTRA);
-  }
-  const shuffled = pool.slice();
+  const shuffled = OUTLOOK_ESCALATION_TEMPLATES.slice();
   for (let i = shuffled.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
@@ -4425,15 +4409,15 @@ const RED_PAIN_INFECTION_SAFE_WAIT_FIRST = {
   reason: "体を休息モードに切り替えることで、自然な回復の流れが働きやすくなります。",
 };
 
-/** 夜間（20:00〜02:59）の `✅ あなたの今すぐやること` 1件目（🟢/🟡）または 2件目（🔴）を強制固定するための定数 */
+/** 夜間（20:00〜02:59）の `✅ 今すぐできること` 1件目（🟢/🟡）または 2件目（🔴）を強制固定するための定数 */
 const NIGHT_SLEEP_FIRST_ACTION = {
-  title: "今日はできるだけ早く寝てください。",
+  title: "今日はできるだけ早く寝るようにしてください。",
   reason: "睡眠をとることで自然と回復に繋がります。",
   isOtc: false,
 };
 
 /**
- * `✅ あなたの今すぐやること` の夜間ルール用時間帯判定。
+ * `✅ 今すぐできること` の夜間ルール用時間帯判定。
  * 仕様：「午後8時〜午前2時」 = 20:00〜02:59 を真とする。
  * `state.clientMeta.tz` を優先し、未設定時はサーバ時刻にフォールバック。
  */
@@ -4464,7 +4448,7 @@ const RED_MODAL_CLOSING_LINE =
 function buildRedModalContent(state, historyText = "", research = null) {
   const safeWaitItems = buildRedSafeWaitSection(state, research);
   const parts = [
-    "① あなたの今すぐやること（受診優先）",
+    "① 今すぐできること（受診優先）",
     "・本日中に医療機関へ連絡する",
     "→ 早い段階で確認することで、重大な問題でないことが分かるケースも多くあります。",
     "",
@@ -4517,7 +4501,7 @@ function buildRedImmediateActionsBlock(state, historyText, research = null, refi
     "→ 早い段階で確認することで、重大な問題でないことが分かるケースも多くあります。",
   ];
   const safeWaitSection = buildRedSafeWaitSection(state, research, refinedSafeWaitActions);
-  const blockLines = ["✅ あなたの今すぐやること", "", ...fixedFirst];
+  const blockLines = ["✅ 今すぐできること", "", ...fixedFirst];
   if (isActionsLateNightWindow(state)) {
     blockLines.push("");
     blockLines.push(`・${NIGHT_SLEEP_FIRST_ACTION.title}`);
@@ -4573,7 +4557,7 @@ async function ensureRedImmediateActionsBlock(text, state, historyText = "", res
   }
   if (!plan) plan = await buildImmediateActionFallbackPlanFromState(state);
   const block = buildRedImmediateActionsBlock(state, historyText, plan, refinedSafeWait);
-  const replaced = replaceSummaryBlock(text, "✅ あなたの今すぐやること", block);
+  const replaced = replaceSummaryBlock(text, "✅ 今すぐできること", block);
   if (replaced === text) {
     const insertAfter = "📝 Kairoの判断";
     const lines = text.split("\n");
@@ -4689,18 +4673,19 @@ function replaceSummaryBlock(text, header, block) {
     if (header === "📝 Kairoの判断" || header === "📝 いまの状態を整理します") {
       return isMemoStateAboutHeaderLine(line);
     }
-    if (header === "✅ あなたの今すぐやること") {
+    if (header === "✅ 今すぐできること") {
       return (
-        line.startsWith("✅ あなたの今すぐやること") ||
-        line.startsWith("✅ 今すぐやること")
+        line.startsWith("✅ 今すぐできること") ||
+        line.startsWith("✅ 今すぐやること") ||
+        line.startsWith("✅ あなたの今すぐやること")
       );
     }
     return line.startsWith(header);
   });
   if (startIndex === -1) {
-    const altHeaderNew = "✅ あなたの今すぐやること（これだけでOK）";
+    const altHeaderNew = "✅ 今すぐできること（これだけでOK）";
     const altHeaderOld = "✅ 今すぐやること（これだけでOK）";
-    if (header === "✅ あなたの今すぐやること") {
+    if (header === "✅ 今すぐできること") {
       if (lines.some((l) => l.startsWith(altHeaderNew))) {
         return replaceSummaryBlock(text, altHeaderNew, block);
       }
@@ -4767,7 +4752,7 @@ async function ensureHandshakeStateBlockFull(text, state, historyTextForCare = "
   return text;
 }
 
-/** 先行まとめが揃っているとき、確認で追加情報があった場合に「✅ あなたの今すぐやること」だけ差し替える（他ブロックは維持） */
+/** 先行まとめが揃っているとき、確認で追加情報があった場合に「✅ 今すぐできること」だけ差し替える（他ブロックは維持） */
 async function replaceImmediateActionsBlockOnly(summaryText, state, historyText = "") {
   if (!summaryText || !state) return summaryText;
   const level = finalizeRiskLevel(state);
@@ -5494,7 +5479,7 @@ function buildDoActionsFromPlan(plan, state, level, options = {}) {
     { skipSupplements }
   ).map((x) => ({ action: toConciseActionTitle(x.title), reason: ensureReliableReason(x.reason, evidence) }));
 
-  // PAIN/INFECTION+🟡の1件目固定（ベッドで休む）は本文の「✅ あなたの今すぐやること」ブロックのみ。のど・咽頭系は summaryPainInfectionFixedPick=false で未適用
+  // PAIN/INFECTION+🟡の1件目固定（ベッドで休む）は本文の「✅ 今すぐできること」ブロックのみ。のど・咽頭系は summaryPainInfectionFixedPick=false で未適用
   if (summaryPainInfectionFixedPick) {
     const fixed = { action: PAIN_INFECTION_YELLOW_FIRST_ACTION.title, reason: PAIN_INFECTION_YELLOW_FIRST_ACTION.reason };
     ensured = [fixed, ...ensured.filter((x) => String(x.action || "").trim() !== String(fixed.action || "").trim())].slice(
@@ -5635,7 +5620,7 @@ ${fullRules}
 async function buildImmediateActionsBlock(level, state, historyText = "", research = null) {
   const plan = research || {};
   const context = plan?.currentStateContext || buildCurrentStateContext(state, historyText || "", state?.lastConcreteDetailsText || "");
-  const lines = ["✅ あなたの今すぐやること"];
+  const lines = ["✅ 今すぐできること"];
 
   const refinedActions = await refineDoActionsWithLLM(plan, state, level, { forSummary: true });
   let doActions = buildDoActionsFromPlan(plan, state, level, {
@@ -5670,42 +5655,94 @@ async function buildImmediateActionsBlock(level, state, historyText = "", resear
 
 function buildYellowPsychologicalCushionLine() {
   const templates = [
-    "いまの経過であれば、少し力を抜いて体の負担を整える時間として受け止められます。",
-    "現在の症状の流れは、判断を急がず落ち着いて体調の変化を見られる段階と捉えられます。",
-    "ここまでの経過なら、無理に動かず体を整えながら変化を見ていく時間と考えられます。",
+    "安静に休めば回復へ向かいやすく、まずは休息を優先してよい段階です。",
+    "無理せず休んでいれば体は回復しやすく、落ち着きへ向かいやすい流れです。",
+    "休むことを優先すれば症状はよくなりやすく、安静が回復の土台になります。",
   ];
-  const forbidden = /(しましょう|してください|安全|大丈夫|問題ありません|緊急性|危険)/;
+  const forbidden = /(しましょう|してください|緊急性|危険|救急)/;
   const inRange = (text) => {
     const len = String(text || "").length;
-    return len >= 40 && len <= 65;
+    return len >= 32 && len <= 80;
   };
-  const candidates = templates.filter((line) => !forbidden.test(line) && inRange(line));
+  const candidates = templates.filter(
+    (line) =>
+      !forbidden.test(line) &&
+      inRange(line) &&
+      /(安静|休|休息)/.test(line) &&
+      /(回復|よくな|落ち着)/.test(line)
+  );
   if (candidates.length > 0) {
     return candidates[Math.floor(Math.random() * candidates.length)];
   }
-  return "いまの経過なら、判断を急がず体の負担を整えながら落ち着いて様子を見られる段階と捉えられます。";
+  return "安静に休めば回復へ向かいやすく、まずは休息を優先してよい段階です。";
+}
+
+/** ✅ モーダル先頭の心理クッション1文（安静・休息→回復が伝わるよう LLM 生成。失敗時は buildYellowPsychologicalCushionLine） */
+async function generateActionModalPsychologicalCushionLineViaLlm(state) {
+  const pickFallback = () => buildYellowPsychologicalCushionLine();
+  if (!process.env.OPENAI_API_KEY) return pickFallback();
+  const main = String(getSyncedMainSymptomDisplayLabel(state) || state?.primarySymptom || "症状").trim();
+  const level = state?.decisionLevel || finalizeRiskLevel(state);
+  const bullets = (buildStateFactsBullets(state, { forSummary: true }) || []).slice(0, 8).join("\n");
+  const systemPrompt = [
+    "あなたは医療用チャットの「✅ 今すぐできること」モーダル先頭の心理クッション文を1文だけ書きます。",
+    "目的：ユーザーに「安静・休息をとれば回復（よくなる・落ち着く）へ向かいやすい」ことがはっきり伝わる文にする。",
+    "必須：安静・休息・休む等のニュアンスと、回復・よくなる・落ち着く等のニュアンスの両方を自然に含める。",
+    "禁止：「様子を見られる段階」「判断を急がない」「経過であれば」だけで終わる曖昧な励まし。恐れ煽り・受診勧め・断定診断・「あなたの場合」。",
+    "1文のみ。敬体（です・ます）。「・」や見出しは付けない。",
+    `主症状（表示）: ${main}。緊急度: ${level}。`,
+    bullets ? `【状況（参考）】\n${bullets}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: "上記に従い、心理クッション文を1文だけ出力してください。" },
+        ],
+        temperature: 0.35 + attempt * 0.08,
+        max_tokens: 140,
+      });
+      let text = String(completion?.choices?.[0]?.message?.content || "").trim();
+      text = text.replace(/^[\s「『]+|[」』]+$/g, "").replace(/\n+/g, "");
+      if (text.length < 28 || text.length > 90) continue;
+      if (!/(安静|休んで|休む|休息|横にな|寝|力を抜)/.test(text)) continue;
+      if (!/(回復|よくな|落ち着|軽くな|治り|持ち直し|改善)/.test(text)) continue;
+      if (!/[。！？]$/.test(text)) text += "。";
+      return text;
+    } catch (_) {
+      /* retry */
+    }
+  }
+  return pickFallback();
 }
 
 /**
- * 🟢/🟡 の `✅ あなたの今すぐやること` 1件目を、指定の固定行（actionRaw / reasonRaw）に矯正する内部実装。
+ * 🟢/🟡 の `✅ 今すぐできること` 1件目を、指定の固定行（actionRaw / reasonRaw）に矯正する内部実装。
  * 既存の `ensurePainInfectionYellowFirstAction` の処理を、固定文だけ可変にして再利用するための関数。
  */
 function enforceFirstActionInImmediateActionsBlock(text, fixedAction, fixedReason) {
   if (!text) return text;
   const lines = text.split("\n");
   const headerPatterns = [
-    "✅ あなたの今すぐやること",
-    "✅ あなたの今すぐやること（これだけでOK）",
-    "🟡 あなたの今すぐやること",
+    "✅ 今すぐできること",
+    "✅ 今すぐできること（これだけでOK）",
+    "🟡 今すぐできること",
     "✅ 今すぐやること",
     "✅ 今すぐやること（これだけでOK）",
     "🟡 今すぐやること",
+    "✅ あなたの今すぐやること",
+    "✅ あなたの今すぐやること（これだけでOK）",
+    "🟡 あなたの今すぐやること",
   ];
   const headerIdx = lines.findIndex((l) => headerPatterns.some((p) => l.trim().startsWith(p)));
   if (headerIdx === -1) {
     const outlookIdx = lines.findIndex((l) => l.trim().startsWith("⏳ 今後の見通し"));
     const insertIdx = outlookIdx >= 0 ? outlookIdx : lines.length;
-    const newBlock = ["✅ あなたの今すぐやること", "", fixedAction, fixedReason, ""];
+    const newBlock = ["✅ 今すぐできること", "", fixedAction, fixedReason, ""];
     return [...lines.slice(0, insertIdx), ...newBlock, ...lines.slice(insertIdx)].join("\n");
   }
   let firstBulletIdx = -1;
@@ -5740,7 +5777,7 @@ function enforceFirstActionInImmediateActionsBlock(text, fixedAction, fixedReaso
 }
 
 /**
- * 🟢/🟡 で夜間（20:00〜02:59）のとき、`✅ あなたの今すぐやること` の1件目を必ず就寝文に矯正する。
+ * 🟢/🟡 で夜間（20:00〜02:59）のとき、`✅ 今すぐできること` の1件目を必ず就寝文に矯正する。
  * PAIN/INFECTION のベッド休息固定よりこちらが優先。
  */
 function ensureNightSleepFirstActionForGreenYellow(text, level, state) {
@@ -5764,19 +5801,22 @@ function ensurePainInfectionYellowFirstAction(text, level, state) {
   const fixedReason = "→ 体を休息モードに切り替えることで、自然な回復の流れが働きやすくなります。";
   const lines = text.split("\n");
   const headerPatterns = [
-    "✅ あなたの今すぐやること",
-    "✅ あなたの今すぐやること（これだけでOK）",
-    "🟡 あなたの今すぐやること",
+    "✅ 今すぐできること",
+    "✅ 今すぐできること（これだけでOK）",
+    "🟡 今すぐできること",
     "✅ 今すぐやること",
     "✅ 今すぐやること（これだけでOK）",
     "🟡 今すぐやること",
+    "✅ あなたの今すぐやること",
+    "✅ あなたの今すぐやること（これだけでOK）",
+    "🟡 あなたの今すぐやること",
   ];
   const headerIdx = lines.findIndex((l) => headerPatterns.some((p) => l.trim().startsWith(p)));
   if (headerIdx === -1) {
     // ブロックが存在しない場合は、⏳の直前に挿入
     const outlookIdx = lines.findIndex((l) => l.trim().startsWith("⏳ 今後の見通し"));
     const insertIdx = outlookIdx >= 0 ? outlookIdx : lines.length;
-    const newBlock = ["✅ あなたの今すぐやること", "", fixedAction, fixedReason, ""];
+    const newBlock = ["✅ 今すぐできること", "", fixedAction, fixedReason, ""];
     const updated = [...lines.slice(0, insertIdx), ...newBlock, ...lines.slice(insertIdx)];
     return updated.join("\n");
   }
@@ -5818,7 +5858,7 @@ async function ensureImmediateActionsBlock(text, level, state, historyText = "",
   if (!text) return text;
   if (level !== "🟡" && level !== "🟢") return text;
   const block = await buildImmediateActionsBlock(level, state, historyText, research);
-  let result = replaceSummaryBlock(text, "✅ あなたの今すぐやること", block);
+  let result = replaceSummaryBlock(text, "✅ 今すぐできること", block);
   // 夜間（20:00〜02:59）は就寝文が1件目。ベッド休息固定より優先。
   result = ensureNightSleepFirstActionForGreenYellow(result, level, state);
   result = ensurePainInfectionYellowFirstAction(result, level, state);
@@ -6105,7 +6145,7 @@ async function buildConcreteImmediateActionsDetails(state, actionSection = "") {
   const plan = await buildImmediateActionHypothesisPlan(state, historyText, actionSection || "");
   const ctxForDont = plan?.currentStateContext || {};
   const seedDont = buildDontActionsFromContext(ctxForDont, plan?.evidence || {});
-  const cushion = buildYellowPsychologicalCushionLine();
+  const cushion = await generateActionModalPsychologicalCushionLineViaLlm(state);
 
   const appendSingaporeRest = shouldAppendSingaporeRestSection(state);
   // refine do / refine dont / Singapore を並列化
@@ -6239,7 +6279,7 @@ function buildRestMcDecisionBlock(level, state) {
 }
 
 function ensureRestMcDecisionBlock(text, level, state) {
-  // 仕様変更：🧾 ブロックは使用しない（MCは✅あなたの今すぐやること内でのみ制御）
+  // 仕様変更：🧾 ブロックは使用しない（MCは✅今すぐできること内でのみ制御）
   return text;
 }
 
@@ -6267,7 +6307,7 @@ function enforceSummaryIntroTemplate(text) {
     const hasGreenStructure =
       textIncludesHandshakeAboutHeader(text) ||
       textIncludesMemoAboutHeader(text) ||
-      text.includes("✅ あなたの今すぐやること") ||
+      text.includes("✅ 今すぐできること") ||
       text.includes("✅ 今すぐやること") ||
       text.includes("⏳ 今後の見通し") ||
       text.includes("🌱 最後に");
@@ -6689,7 +6729,7 @@ function historyContainsSummaryBlock(history) {
     /🤝\s*(?:今の状態について|Kairoの判断)/,
     /📝\s*(?:今の状態について|Kairoの判断)/,
     /📝\s*いまの状態を整理します/,
-    /✅\s*(?:あなたの)?今すぐやること/,
+    /✅\s*(?:今すぐできること|(?:あなたの)?今すぐやること)/,
     /⏳\s*今後の見通し/,
     /🏥\s*受診先の候補/,
     /🌱\s*最後に/,
@@ -11274,28 +11314,165 @@ function pickUserPreferredPhraseOverSlotLabel(state, slotLabel) {
 }
 
 /** ユーザー文を句切りし、箇条書きに無い断片だけ追補候補にする。 */
+function isUserUtteranceSegmentExcludedFromBulletCoverage(segment) {
+  const seg = String(segment || "").trim();
+  if (!seg) return true;
+  if (isConfirmationOnlyAnswer(seg)) return true;
+  if (isRejectionOnlyAnswer(seg)) return true;
+  if (isBulletTranscriptNoiseUserLine(seg)) return true;
+  if (/^(はい|うん|ええ|OK|ok|オッケー|おっけー)/i.test(seg)) return true;
+  return false;
+}
+
+function isSubstantiveUserUtteranceCoverageSegment(segment) {
+  const seg = String(segment || "").trim();
+  if (!seg || isUserUtteranceSegmentExcludedFromBulletCoverage(seg)) return false;
+  if (seg.length >= 6) return true;
+  if (bulletTextContainsDegreeHedge(seg)) return true;
+  if (/\d/.test(seg)) return true;
+  if (/[\/／]10/.test(seg)) return true;
+  if (
+    /(痛|熱|咳|吐|微熱|発熱|頭|めまい|下痢|鼻|喉|寒|だる|しびれ|発疹|便秘|息|動悸|疲|眠)/.test(seg)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function shouldRequireUserUtteranceSegmentInBullets(state, segment) {
+  if (!isSubstantiveUserUtteranceCoverageSegment(segment)) return false;
+  if (state && isRawValueMainSymptomOnlyEcho(state, segment)) return false;
+  return true;
+}
+
+function extractUserUtteranceCoverageSegmentsFromText(text) {
+  const u = String(text || "").trim();
+  if (!u) return [];
+  const segs = new Set();
+  const pushSeg = (raw) => {
+    const seg = String(raw || "").replace(/\s+/g, " ").trim();
+    if (!seg) return;
+    for (const chunk of splitSlotAnswerIntoBulletChunks(seg)) {
+      const c = String(chunk || "").trim();
+      if (!c) continue;
+      segs.add(c);
+    }
+  };
+  for (const sent of u.split(/[。！？\n]+/)) {
+    pushSeg(sent);
+  }
+  if (segs.size === 0) pushSeg(u);
+  return [...segs];
+}
+
+function extractUserUtteranceCoverageSegments(state) {
+  if (!state) return [];
+  const seen = new Set();
+  const out = [];
+  const addRequired = (seg) => {
+    const t = String(seg || "").trim();
+    if (!t || seen.has(t)) return;
+    if (!shouldRequireUserUtteranceSegmentInBullets(state, t)) return;
+    seen.add(t);
+    out.push(t);
+  };
+  for (const u of collectUserUtterancesForBulletCoverage(state)) {
+    for (const seg of extractUserUtteranceCoverageSegmentsFromText(u)) {
+      addRequired(seg);
+    }
+  }
+  for (const extra of state?.confirmationExtraFacts || []) {
+    for (const seg of extractUserUtteranceCoverageSegmentsFromText(String(extra || ""))) {
+      addRequired(seg);
+    }
+  }
+  return out;
+}
+
+function validateBulletCoverageFromUserUtterances(state, bullets) {
+  const missing = [];
+  for (const seg of extractUserUtteranceCoverageSegments(state)) {
+    if (!bulletLinesCoverSlotText(bullets, seg)) missing.push(seg);
+  }
+  const unique = [...new Set(missing.map((s) => String(s || "").trim()).filter(Boolean))];
+  return { ok: unique.length === 0, missing: unique };
+}
+
+function validateCompleteBulletCoverage(state, bullets) {
+  const fromRaw = validateBulletCoverageFromRaw(state, bullets);
+  const fromUser = validateBulletCoverageFromUserUtterances(state, bullets);
+  const missing = [...new Set([...(fromRaw.missing || []), ...(fromUser.missing || [])])];
+  return {
+    ok: fromRaw.ok && fromUser.ok,
+    missing,
+    rawOk: fromRaw.ok,
+    userOk: fromUser.ok,
+    rawMissing: fromRaw.missing,
+    userMissing: fromUser.missing,
+  };
+}
+
+function resolveConfirmationBulletsMaxForState(state) {
+  const required = extractUserUtteranceCoverageSegments(state).length;
+  const { raw } = collectRawInputsForStateBullets(state);
+  let rawSlots = 0;
+  if (raw && raw !== "ユーザーの回答がまだありません") {
+    for (const line of raw.split("\n")) {
+      const m = line.match(/^([^:]+):\s*(.+)$/);
+      if (!m) continue;
+      const label = m[1].trim();
+      const value = m[2].trim();
+      if (/^会話内自由記述/.test(label)) continue;
+      if (isRawSlotValueExcludedFromBulletCoverage(label, value)) continue;
+      rawSlots += 1;
+    }
+  }
+  const needed = Math.max(required, rawSlots, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS);
+  return Math.min(Math.max(PRE_SUMMARY_CONFIRMATION_MAX_BULLETS, needed + 1), 24);
+}
+
+function reconcileBulletCoverageGaps(state, bullets, opts = {}) {
+  const maxOut =
+    typeof opts.maxOut === "number" ? opts.maxOut : resolveConfirmationBulletsMaxForState(state);
+  let base = Array.isArray(bullets) ? bullets.slice() : [];
+  const maxIter = typeof opts.maxIter === "number" ? opts.maxIter : 10;
+  let iter = 0;
+  while (iter < maxIter) {
+    const cov = validateCompleteBulletCoverage(state, base);
+    if (cov.ok) break;
+    const prevLen = base.length;
+    if (cov.rawMissing?.length) {
+      base = appendMissingRawValuesAsBullets(base, cov.rawMissing, state);
+    }
+    if (cov.userMissing?.length) {
+      base = appendMissingRawValuesAsBullets(base, cov.userMissing, state);
+    }
+    const userLines = collectUserUtterancesForBulletCoverage(state);
+    const heur = heuristicSupplementBulletsFromUserUtterances(base, userLines);
+    if (heur?.length) base = appendMissingRawValuesAsBullets(base, heur, state);
+    const cat = state.triageCategory || resolveQuestionCategoryFromState(state) || "PAIN";
+    base = injectMissingSlotBulletsFromState(base, state, cat, { maxOut }) || base;
+    base = mergeRawSlotInputsIntoBullets(state, base);
+    base = sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(base), state);
+    if (base.length === prevLen && !validateCompleteBulletCoverage(state, base).ok) break;
+    iter += 1;
+  }
+  return base.slice(0, maxOut);
+}
+
 function heuristicSupplementBulletsFromUserUtterances(bullets, userLines) {
   const out = [];
   const base = Array.isArray(bullets) ? bullets.slice() : [];
   for (const u of userLines) {
-    const segs = String(u)
-      .split(/[。！？\n]+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-    for (const rawSeg of segs) {
-      const seg = rawSeg.replace(/[、,]+/g, " ").replace(/\s+/g, " ").trim();
-      const segHasHedge = bulletTextContainsDegreeHedge(rawSeg);
-      if (seg.length < 10 && !segHasHedge) continue;
-      if (seg.length < 6) continue;
-      if (/^(はい|うん|ええ|OK|ok|オッケー|おっけー)/i.test(seg)) continue;
-      if (isConfirmationOnlyAnswer(seg)) continue;
+    for (const seg of extractUserUtteranceCoverageSegmentsFromText(u)) {
+      if (!isSubstantiveUserUtteranceCoverageSegment(seg)) continue;
+      if (isUserUtteranceSegmentExcludedFromBulletCoverage(seg)) continue;
       if (bulletLinesCoverSlotText(base, seg)) continue;
       if (out.some((o) => bulletLinesCoverSlotText([`・${o}`], seg))) continue;
       const polished = polishUserSlotForBulletLine(seg);
-      if (!polished || (polished.length < 8 && !segHasHedge)) continue;
+      if (!polished || !isSubstantiveUserUtteranceCoverageSegment(polished)) continue;
       out.push(polished);
       base.push(`・${polished}`);
-      if (out.length >= 5) return out;
     }
   }
   return out;
@@ -11324,7 +11501,10 @@ function mergeMissingBulletLinesIntoStateAboutCache(state, base, missingLines) {
     deduped.push(line);
     added++;
   }
-  state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(sanitizeBulletPoints(deduped, state).slice(0, 14), state);
+  state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
+    sanitizeBulletPoints(deduped, state).slice(0, resolveConfirmationBulletsMaxForState(state)),
+    state
+  );
   return added;
 }
 
@@ -11347,6 +11527,11 @@ async function supplementStateBulletsFromUncoveredUserUtterances(state) {
   }
   const missing = heuristicSupplementBulletsFromUserUtterances(base, userLines);
   const added = mergeMissingBulletLinesIntoStateAboutCache(state, base, missing || []);
+  const repaired = reconcileBulletCoverageGaps(state, state.stateAboutBulletsCache || base);
+  state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
+    sanitizeBulletPoints(repaired, state).slice(0, resolveConfirmationBulletsMaxForState(state)),
+    state
+  );
   console.log("[KAIRO] supplementStateBulletsFromUncoveredUserUtterances", {
     conversationId: state.conversationId,
     userUtteranceCount: userLines.length,
@@ -11538,27 +11723,18 @@ function finalizeStateAboutBulletsCacheForSummary(state) {
   if (!Array.isArray(base)) base = [];
   base = sanitizeBulletPoints(base, state);
   const cat = state.triageCategory || resolveQuestionCategoryFromState(state) || "PAIN";
-  const internalMax = Math.max(PRE_SUMMARY_CONFIRMATION_MAX_BULLETS, 18);
-  base = injectMissingSlotBulletsFromState(base, state, cat, { maxOut: internalMax }) || base;
+  const maxBullets = resolveConfirmationBulletsMaxForState(state);
+  base = injectMissingSlotBulletsFromState(base, state, cat, { maxOut: maxBullets }) || base;
   base = mergeRawSlotInputsIntoBullets(state, base);
   base = sanitizeBulletPoints(base, state);
-  let check = validateBulletCoverageFromRaw(state, base);
-  let iter = 0;
-  while (!check.ok && iter < 6) {
-    base = appendMissingRawValuesAsBullets(base, check.missing, state);
-    base = mergeRawSlotInputsIntoBullets(state, base);
-    base = injectMissingSlotBulletsFromState(base, state, cat, { maxOut: internalMax }) || base;
-    base = sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(base), state);
-    check = validateBulletCoverageFromRaw(state, base);
-    iter += 1;
-  }
-  base = sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(base), state);
+  base = reconcileBulletCoverageGaps(state, base, { maxOut: maxBullets });
   if (Array.isArray(state.bulletLlmPreferredLines) && state.bulletLlmPreferredLines.length > 0) {
     base = dedupeBulletsPreferPreferredWhenSimilar(base, state.bulletLlmPreferredLines);
     base = sanitizeBulletPoints(base, state);
+    base = reconcileBulletCoverageGaps(state, base, { maxOut: maxBullets });
   }
   state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
-    base.slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS),
+    base.slice(0, maxBullets),
     state
   );
 }
@@ -11582,7 +11758,7 @@ function summaryJudgmentBulletsCoverFilledSlots(summaryText, state) {
   if (!state) return true;
   const bullets = extractJudgmentBulletLinesFromSummaryText(summaryText);
   if (bullets.length < MIN_KAIRO_JUDGMENT_FACT_BULLETS) return false;
-  const check = validateBulletCoverageFromRaw(state, bullets);
+  const check = validateCompleteBulletCoverage(state, bullets);
   return check.ok;
 }
 
@@ -11594,45 +11770,23 @@ function enforceConfirmationBulletsCompletenessCore(state) {
   if (!state) return [];
   syncHistoryTextForCareFromConversation(state);
   const cat = state.triageCategory || resolveQuestionCategoryFromState(state) || "PAIN";
+  const maxBullets = resolveConfirmationBulletsMaxForState(state);
   let base =
     Array.isArray(state.stateAboutBulletsCache) && state.stateAboutBulletsCache.length > 0
       ? state.stateAboutBulletsCache.slice()
       : buildStateFactsBulletsLegacy(state, { forSummary: true });
   if (!Array.isArray(base)) base = [];
   base = sanitizeBulletPoints(base, state);
-  base = injectMissingSlotBulletsFromState(base, state, cat, { maxOut: 14 }) || base;
-  base = sanitizeBulletPoints(base, state);
+  base = injectMissingSlotBulletsFromState(base, state, cat, { maxOut: maxBullets }) || base;
   base = mergeRawSlotInputsIntoBullets(state, base);
   base = sanitizeBulletPoints(base, state);
-
-  let check = validateBulletCoverageFromRaw(state, base);
-  if (!check.ok) {
-    base = appendMissingRawValuesAsBullets(base, check.missing, state);
-    base = sanitizeBulletPoints(base, state);
-  }
-  check = validateBulletCoverageFromRaw(state, base);
-  if (!check.ok) {
-    const userLines = collectUserUtterancesForBulletCoverage(state);
-    const heur = heuristicSupplementBulletsFromUserUtterances(base, userLines);
-    if (heur && heur.length) {
-      mergeMissingBulletLinesIntoStateAboutCache(state, base, heur);
-      base = state.stateAboutBulletsCache.slice();
-    }
-    base = mergeRawSlotInputsIntoBullets(state, base);
-    base = sanitizeBulletPoints(base, state);
-    check = validateBulletCoverageFromRaw(state, base);
-    if (!check.ok) {
-      base = appendMissingRawValuesAsBullets(base, check.missing, state);
-      base = sanitizeBulletPoints(base, state);
-    }
-  }
-
+  base = reconcileBulletCoverageGaps(state, base, { maxOut: maxBullets });
   state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
-    sanitizeBulletPoints(base, state).slice(0, 18),
+    sanitizeBulletPoints(base, state).slice(0, maxBullets),
     state
   );
   finalizeStateAboutBulletsCacheForSummary(state);
-  const cov = validateBulletCoverageFromRaw(state, state.stateAboutBulletsCache);
+  const cov = validateCompleteBulletCoverage(state, state.stateAboutBulletsCache);
   if (!cov.ok) {
     console.warn("[KAIRO] confirmation bullets coverage still incomplete after finalize pass", {
       conversationId: state.conversationId,
@@ -11643,7 +11797,7 @@ function enforceConfirmationBulletsCompletenessCore(state) {
     finalizeStateAboutBulletLinesForSpec(state.stateAboutBulletsCache),
     state
   );
-  return state.stateAboutBulletsCache.slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS);
+  return state.stateAboutBulletsCache.slice(0, maxBullets);
 }
 
 function hashStringFnv1a32Hex(str) {
@@ -11756,6 +11910,7 @@ async function polishConfirmationBulletsWithLlm(state) {
   if (preStash.length === 0) return;
   const sourceFp = computeBulletLlmPrePolishFingerprint(state);
   const { raw } = collectRawInputsForStateBullets(state);
+  const maxBullets = resolveConfirmationBulletsMaxForState(state);
   const bulletText = preStash.join("\n");
   const qaTranscript = buildTriageQuestionAnswerTranscriptForBullets(state);
   const slotRefRaw =
@@ -11824,7 +11979,7 @@ async function polishConfirmationBulletsWithLlm(state) {
           return inner ? `・${inner}` : null;
         })
         .filter(Boolean)
-        .slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS);
+        .slice(0, maxBullets);
       if (out.length === 0) continue;
       const preferredLlm = sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(out), state);
       let merged = preferredLlm.slice();
@@ -11832,18 +11987,12 @@ async function polishConfirmationBulletsWithLlm(state) {
       merged = sanitizeBulletPoints(merged, state);
       merged = dedupeBulletsPreferPreferredWhenSimilar(merged, preferredLlm);
       merged = sanitizeBulletPoints(merged, state);
-      let cov = validateBulletCoverageFromRaw(state, merged);
-      if (!cov.ok && cov.missing?.length) {
-        merged = appendMissingRawValuesAsBullets(merged, cov.missing, state);
-        merged = sanitizeBulletPoints(merged, state);
-        merged = dedupeBulletsPreferPreferredWhenSimilar(merged, preferredLlm);
-        merged = sanitizeBulletPoints(merged, state);
-        cov = validateBulletCoverageFromRaw(state, merged);
-      }
+      merged = reconcileBulletCoverageGaps(state, merged, { maxOut: maxBullets });
+      const cov = validateCompleteBulletCoverage(state, merged);
       if (cov.ok) {
         state.bulletLlmPreferredLines = preferredLlm.slice();
         state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
-          sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(merged), state).slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS),
+          sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(merged), state).slice(0, maxBullets),
           state
         );
         state.bulletLlmPolishedSourceFingerprint = sourceFp;
@@ -11889,7 +12038,7 @@ async function enforceConfirmationBulletsCompleteness(state, opts = {}) {
     await polishConfirmationBulletsWithLlm(state);
   }
   finalizeStateAboutBulletsCacheForSummary(state);
-  return (state.stateAboutBulletsCache || []).slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS);
+  return (state.stateAboutBulletsCache || []).slice(0, resolveConfirmationBulletsMaxForState(state));
 }
 
 /**
@@ -18804,7 +18953,7 @@ async function generateSummaryForConfirmation(conversationId) {
         stateBlock || "症状の状態を確認しました。",
         ...(aboutRedMemo ? ["", aboutRedMemo] : []),
         "",
-        "✅ あなたの今すぐやること",
+        "✅ 今すぐできること",
         actionsBlock,
         "",
         "🏥 受診先の候補",
@@ -18831,7 +18980,7 @@ async function generateSummaryForConfirmation(conversationId) {
       "🤝 Kairoの判断",
       handshakeBody,
       "",
-      "✅ あなたの今すぐやること",
+      "✅ 今すぐできること",
       actionsBlock,
       "",
       ...String(outlookBlockMinimal || buildOutlookBlock(state)).split("\n"),
@@ -19152,7 +19301,7 @@ app.post("/api/chat", async (req, res) => {
             "🤝 Kairoの判断",
             handshakeBlock,
             "",
-            "✅ あなたの今すぐやること",
+            "✅ 今すぐできること",
             "・無理をせず、安静を優先してください",
             "",
             ...outlookConf.split("\n"),
@@ -19187,7 +19336,7 @@ app.post("/api/chat", async (req, res) => {
           "🤝 Kairoの判断",
           handshakeBlock,
           "",
-          "✅ あなたの今すぐやること",
+          "✅ 今すぐできること",
           "・無理をせず、安静を優先してください",
           "",
           ...outlookBlockStr.split("\n"),
@@ -20837,7 +20986,7 @@ app.post("/api/action-details", async (req, res) => {
               });
               const body = (c?.choices?.[0]?.message?.content || "").trim();
               if (body && body.length > 20) {
-                llmMsg = `${buildYellowPsychologicalCushionLine()}\n\n${body}`;
+                llmMsg = `${await generateActionModalPsychologicalCushionLineViaLlm(retryState)}\n\n${body}`;
                 break;
               }
             } catch (_) {}
@@ -20896,8 +21045,11 @@ function getSummarySectionSpecsByJudgement(judgement) {
       },
       {
         id: 3,
-        title: "✅ あなたの今すぐやること",
-        patterns: [/^✅\s*(?:あなたの)?今すぐやること（これだけでOK）/, /^✅\s*(?:あなたの)?今すぐやること/],
+        title: "✅ 今すぐできること",
+        patterns: [
+          /^✅\s*(?:今すぐできること|(?:あなたの)?今すぐやること)（これだけでOK）/,
+          /^✅\s*(?:今すぐできること|(?:あなたの)?今すぐやること)/,
+        ],
       },
       { id: 4, title: "🏥 受診先の候補", patterns: [/^🏥\s*受診先の候補/, /^🏥\s*Kairoの判断/] },
       { id: 5, title: "💬 最後に", patterns: [/^💬\s*最後に/] },
@@ -20913,8 +21065,11 @@ function getSummarySectionSpecsByJudgement(judgement) {
       { id: 2, title: "🤝 Kairoの判断", patterns: [/^🤝\s*(?:今の状態について|Kairoの判断)/] },
       {
         id: 3,
-        title: "✅ あなたの今すぐやること",
-        patterns: [/^✅\s*(?:あなたの)?今すぐやること（これだけでOK）/, /^✅\s*(?:あなたの)?今すぐやること/],
+        title: "✅ 今すぐできること",
+        patterns: [
+          /^✅\s*(?:今すぐできること|(?:あなたの)?今すぐやること)（これだけでOK）/,
+          /^✅\s*(?:今すぐできること|(?:あなたの)?今すぐやること)/,
+        ],
       },
       { id: 4, title: "⏳ 今後の見通し", patterns: [/^⏳\s*今後の見通し/, /^⏳\s*この先の見通し/] },
       { id: 5, title: "🌱 最後に", patterns: [/^🌱\s*最後に/] },
@@ -20929,8 +21084,11 @@ function getSummarySectionSpecsByJudgement(judgement) {
     { id: 2, title: "🤝 Kairoの判断", patterns: [/^🤝\s*(?:今の状態について|Kairoの判断)/] },
     {
       id: 3,
-      title: "✅ あなたの今すぐやること",
-      patterns: [/^✅\s*(?:あなたの)?今すぐやること（これだけでOK）/, /^✅\s*(?:あなたの)?今すぐやること/],
+      title: "✅ 今すぐできること",
+      patterns: [
+        /^✅\s*(?:今すぐできること|(?:あなたの)?今すぐやること)（これだけでOK）/,
+        /^✅\s*(?:今すぐできること|(?:あなたの)?今すぐやること)/,
+      ],
     },
     { id: 4, title: "⏳ 今後の見通し", patterns: [/^⏳\s*今後の見通し/, /^⏳\s*この先の見通し/] },
     { id: 5, title: "🌱 最後に", patterns: [/^🌱\s*最後に/] },

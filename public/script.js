@@ -427,7 +427,7 @@ function parseAIMessage(text) {
     { icon: '🟡', name: 'ここまでの情報を整理します' },
     { icon: '🔴', name: 'ここまでの情報を整理します' },
     { icon: '🤝', name: 'Kairoの判断' },
-    { icon: '✅', name: 'あなたの今すぐやること' },
+    { icon: '✅', name: '今すぐできること' },
     { icon: '⏳', name: '今後の見通し' },
     { icon: '💊', name: '一般的な市販薬' },
     { icon: '🌱', name: '最後に' },
@@ -479,7 +479,7 @@ function parseAIMessage(text) {
         if (!/受診先の候補|Kairoの判断/.test(name)) continue;
       }
       if (pattern.icon === "✅") {
-        if (!/^\s*✅[\s\u3000]*(?:あなたの)?今すぐやること/.test(line)) continue;
+        if (!/^\s*✅[\s\u3000]*(?:今すぐできること|(?:あなたの)?今すぐやること)/.test(line)) continue;
       }
       foundHeader = { ...pattern };
       const nameMatch = line.match(new RegExp(`${pattern.icon}\\s*(.+)`));
@@ -546,7 +546,7 @@ function truncateBlocksAfterTerminalLastBlock(blocks) {
 
 /**
  * 同一の「絵文字＋見出し名」ブロックが二重（LLM やサーバの重複出力）のとき、先頭のみ採用する。
- * （例：`🤝 Kairoの判断` や `✅ あなたの今すぐやること` が2回続く）
+ * （例：`🤝 Kairoの判断` や `✅ 今すぐできること` が2回続く）
  */
 function dedupeParsedMessageBlocksByHeader(blocks) {
   if (!Array.isArray(blocks) || blocks.length <= 1) return blocks;
@@ -1077,7 +1077,7 @@ function isDecisionCompleted(text) {
     '🟡 ここまでの情報を整理します',
     '🤝 Kairoの判断',
     '🤝 今の状態について',
-    '✅ あなたの今すぐやること',
+    '✅ 今すぐできること',
     '✅ 今すぐやること',
     '⏳ 今後の見通し',
     '🏥 受診先の候補',
@@ -1410,7 +1410,7 @@ function addMessage(text, isUser = false, save = true, options = {}) {
         /今の状態について|Kairoの判断|いまの状態を整理します/.test(block?.header?.name || "");
       const isActionBlock =
         block?.header?.icon === "✅" &&
-        /(?:あなたの)?今すぐやること/.test(block?.header?.name || "");
+        /(?:今すぐできること|(?:あなたの)?今すぐやること)/.test(block?.header?.name || "");
       const isHospitalBlock =
         block?.header?.icon === "🏥" &&
         /受診先の候補|Kairoの判断/.test(block?.header?.name || "");
