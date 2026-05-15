@@ -718,10 +718,10 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 - **最後のまとめセクション（💬 最後に または 🌱 最後に）は必ず毎回表示すること**
 
 【今後の見通しのポイント】
-- **二段**：上は**経過の目安**＋**幅広の安心**（地の文1行・行頭に「・」なし・経過文＋時間帯）、**逆に、**以降は**「・」付き3行**で**受診レベルの急変**のみ。**上段と締めはローカル時間帯に合わせる**（outlookLocalTimeAdviceHintForPrompt／outlookDurationMetaHintForPrompt）
-- 上段で**ビビらせない**／下段に**弱い**心配事を**出さない**
-- 締めは**受診**を**考える**の**同趣旨**（表現は**焼き直し**可）
-- 病名**断定**・**救急**の断定は出さない（**下段＋締め**の**受診検討**は**出してよい**）
+- **🟢／🟡弱**：**「・」3行**（急変）→ 固定「これらの症状が出ない限り、病院にはいかなくて大丈夫です。」→ **経過＋安心**の地の文1行（**「逆に、」なし・受診締めなし**）
+- **🟡強・🔴**：**二段**（上＝経過＋安心1行、**逆に、**＋「・」3行＋受診締め）。上段・締めはローカル時間帯に合わせる（outlookLocalTimeAdviceHintForPrompt／outlookDurationMetaHintForPrompt）
+- 安心段で**ビビらせない**／急変「・」行に**弱い**心配のみを**出さない**
+- 病名**断定**・**救急**の断定は出さない
 
 【病院をおすすめする時の禁止事項 - 最重要】
 - ❌ 冒頭でいきなり「病院に行ってください」と言わない
@@ -1016,7 +1016,7 @@ ${stateContext ? `\n${stateContext}\n` : ""}
 - 🤝 Kairoの判断は一般論の説明を禁止し、感覚の翻訳にする
   - 「今のあなたの状態なら、こう考えて大丈夫です」
   - 「だから今日はこれでいいですよ」
-- ⏳ 今後の見通しは**二段**（**上**＝**経過の目安**＋安心を地の文1行・経過スロットと整合。**ユーザーTZ**で休養・様子見を言い換え。**下**＝**逆に、**のあと「・」から始める短文が**連続3行**＝急変の**描写のみ**。**各行に受診の語は入れず**、**締め1行のみ**に**受診を考える／検討**。サーバ組み立ては buildOutlookBlockWithLlm／buildOutlookBlock と cleanupOutlookEscalationBulletsInBlock）
+- ⏳ 今後の見通し：**🟢／🟡弱**は「・」3行→固定橋渡し→経過＋安心1行（`assembleGreenYellowWeakOutlookBlockBody`）。**🟡強・🔴**は従来の二段（安心→**逆に、**→「・」3行→受診締め・`assembleOutlookBlockBody`）。`buildOutlookBlockWithLlm`／`buildOutlookBlock`／`usesGreenYellowWeakOutlookLayout`
 
 🤝 Kairoの判断（LLM理解レイヤー）：
 - 情報整理は単なる言い換えではなく「症状の状態を説明する文章」として生成する。
@@ -3679,6 +3679,10 @@ const OUTLOOK_VISIT_CLOSING_VARIANTS = [
   "このような変化がみられたときは、受診を検討してください。",
 ];
 
+/** 🟢／🟡弱の「⏳ 今後の見通し」：急変3行の直後に挿入する固定文 */
+const OUTLOOK_GREEN_YELLOW_WEAK_BRIDGE_LINE =
+  "これらの症状が出ない限り、病院にはいかなくて大丈夫です。";
+
 /**
  * 「⏳ 今後の見通し」上段：clientMeta.tz に基づくローカル時刻バンドごとの安心リード（ニュートラル混入で偏り過ぎない）
  */
@@ -3902,6 +3906,7 @@ function cleanupOutlookEscalationBulletsInBlock(block) {
 
 /**
  * まとめ用「⏳ 今後の見通し」本文組み立て：上段1行（・なし）→ 逆に、 → 受診目安3行（・付き）→ 締め
+ * 🟡強・🔴 向け（従来レイアウト）
  */
 function assembleOutlookBlockBody(reassuranceLines, escalationLines, closingLine) {
   const r = (reassuranceLines || []).map(normalizeOutlookParagraphLine);
@@ -3913,9 +3918,55 @@ function assembleOutlookBlockBody(reassuranceLines, escalationLines, closingLine
   );
 }
 
+/** 🟢／🟡弱：急変「・」3行 → 固定橋渡し → 経過・安心1行（「逆に、」・受診締めなし） */
+function assembleGreenYellowWeakOutlookBlockBody(reassuranceLines, escalationLines) {
+  const r = (reassuranceLines || []).map(normalizeOutlookParagraphLine).filter(Boolean);
+  const e = (escalationLines || []).map(formatOutlookEscalationLine).filter(Boolean);
+  const bridge = OUTLOOK_GREEN_YELLOW_WEAK_BRIDGE_LINE;
+  if (r.length < 1 || e.length < 3 || !bridge) return null;
+  return cleanupOutlookEscalationBulletsInGreenYellowWeakBlock(
+    ["⏳ 今後の見通し", ...e.slice(0, 3), bridge, ...r.slice(0, 1)].join("\n")
+  );
+}
+
+/** 🟢／🟡弱レイアウトか（🟡強・🔴 は従来の二段レイアウト） */
+function usesGreenYellowWeakOutlookLayout(state) {
+  if (!state) return true;
+  const level = finalizeRiskLevel(state);
+  if (level === "🟢") return true;
+  if (level === "🟡") return isYellowWeakTier(state);
+  return false;
+}
+
+/** ⏳ ブロック（🟢／🟡弱）：固定橋渡しより前の「・」行から行末の受診語を除去 */
+function cleanupOutlookEscalationBulletsInGreenYellowWeakBlock(block) {
+  const lines = String(block || "").replace(/\r\n/g, "\n").split("\n");
+  const hdr = lines.findIndex((l) => /^\s*⏳\s*今後の見通し\s*$/.test(String(l || "").trim()));
+  const startIdx = hdr >= 0 ? hdr + 1 : 0;
+  const bridgeAbs = lines.findIndex((l, i) => i >= startIdx && /これらの症状が出ない限り/.test(String(l || "").trim()));
+  if (bridgeAbs < 0) return block;
+  const out = lines.slice();
+  for (let i = startIdx; i < bridgeAbs; i++) {
+    const raw = String(out[i] || "");
+    const trimmed = raw.trim();
+    if (!/^・/.test(trimmed)) continue;
+    const inner = trimmed.replace(/^・\s*/, "");
+    const c = stripTrailingVisitAdviceFromOutlookEscalationLine(inner);
+    if (c) {
+      const m = /^(\s*)/.exec(raw);
+      const indent = m ? m[1] : "";
+      out[i] = `${indent}・${c}`;
+    }
+  }
+  return out.join("\n");
+}
+
 function buildOutlookBlock(state) {
   const re = buildOutlookReassuranceBullets(state);
   const es = buildOutlookEscalationBullets(state);
+  if (usesGreenYellowWeakOutlookLayout(state)) {
+    return assembleGreenYellowWeakOutlookBlockBody(re, es) || "";
+  }
   const closing = OUTLOOK_VISIT_CLOSING_VARIANTS[Math.floor(Math.random() * OUTLOOK_VISIT_CLOSING_VARIANTS.length)];
   return assembleOutlookBlockBody(re, es, closing) || "";
 }
@@ -3939,8 +3990,23 @@ function outlookLlmBodyLooksValid(body) {
   return mid.slice(0, 3).every((l) => l.length > 15);
 }
 
+function outlookGreenYellowWeakLlmBodyLooksValid(body) {
+  const t = String(body || "")
+    .replace(/\r\n/g, "\n")
+    .trim();
+  if (t.length < 60) return false;
+  if (!/これらの症状が出ない限り/.test(t)) return false;
+  const rawLines = t.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+  const bridgeIdx = rawLines.findIndex((l) => /これらの症状が出ない限り/.test(l));
+  if (bridgeIdx < 1) return false;
+  const bullets = rawLines.slice(0, bridgeIdx).filter((l) => /^・/.test(l));
+  if (bullets.length < 3) return false;
+  const lower = rawLines.slice(bridgeIdx + 1).filter((l) => !/^・/.test(l));
+  return lower.some((l) => l.length >= 12);
+}
+
 /**
- * まとめの「⏳ 今後の見通し」：安心1行→逆に、→受診目安（LLM）／失敗時は buildOutlookBlock。
+ * まとめの「⏳ 今後の見通し」：🟢／🟡弱は急変3行→固定橋渡し→安心1行。🟡強・🔴は従来（LLM／静的）。
  */
 async function buildOutlookBlockWithLlm(state) {
   if (!process.env.OPENAI_API_KEY) return null;
@@ -3952,6 +4018,75 @@ async function buildOutlookBlockWithLlm(state) {
   const seedRe = buildOutlookReassuranceBullets(state);
   const seedEs = buildOutlookEscalationBullets(state);
   const visitClosings = OUTLOOK_VISIT_CLOSING_VARIANTS;
+  const greenYellowWeak = usesGreenYellowWeakOutlookLayout(state);
+
+  if (greenYellowWeak) {
+    for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
+      try {
+        const systemPrompt = [
+          "体調相談の「⏳ 今後の見通し」ブロック（🟢／🟡弱レイアウト）。見出し行「⏳ 今後の見通し」は**出さない**（呼び出し側が付与）。",
+          "必須**型**（この順で組み立てる。あなたは JSON のみ返す）:",
+          "1) **行頭に「・」**を付けて**ちょうど3行**。各行は**症状・身体の変化の描写だけ**で終える。**各行に「受診」「検討」「考えてください」「してください」は入れない**。**「〜場合は受診」も禁止**。受診を本気で検討すべき急変のみ。短め。",
+          `2) 固定橋渡し（**そのまま**・変更禁止）: ${OUTLOOK_GREEN_YELLOW_WEAK_BRIDGE_LINE}`,
+          "3) **行頭に「・」は付けない**地の文を**1行**：**経過の目安**（落ち着き方）＋**大きな心配はいりません**級の安心。**敬体（です・ます）**のみ。**上段に受診語を混ぜない**。【経過】【ローカルの現在】と矛盾させない。",
+          "**「逆に、」行は出さない**。**「このような変化があれば受診を…」の締めも出さない**（橋渡し固定文で代替）。",
+          'JSONのみ: {"escalation_bullets":["下段3行・症状のみ・受診語なし"],"reassurance_bullets":["経過＋安心の地の文1行・・なし"]}',
+          '互換: {"body":"・3行\\n固定橋渡し\\n安心1行（見出しなし）"}',
+          "病名断定・恐怖・救急の断定は禁止。",
+          `主症状: 「${main}」。カテゴリ: ${category}。緊急度: ${level}。`,
+          painScore !== null ? `痛のスコア(参考): ${painScore}/10` : "",
+          outlookLocalTimeAdviceHintForPrompt(state),
+          outlookDurationMetaHintForPrompt(state),
+          `静的 seed（**コピー禁止・言い換え**） 急変3行(seed): ${JSON.stringify(seedEs)} ／ 安心下段(seed): ${JSON.stringify(seedRe)}`,
+          bulletHints ? `【今の整理（参考）】\n${bulletHints}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n");
+        const completion = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: "上記に沿ってJSONだけ返してください。" },
+          ],
+          temperature: 0.48 + attempt * 0.06,
+          max_tokens: 550,
+        });
+        const parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
+        const es = Array.isArray(parsed?.escalation_bullets) ? parsed.escalation_bullets : [];
+        const re = Array.isArray(parsed?.reassurance_bullets) ? parsed.reassurance_bullets : [];
+        const eLines = es
+          .map((x) =>
+            String(x || "")
+              .replace(/^[・\s]+/u, "")
+              .trim()
+          )
+          .filter(Boolean);
+        const rLines = re
+          .map((x) =>
+            String(x || "")
+              .replace(/^[・\s]+/u, "")
+              .trim()
+          )
+          .filter(Boolean)
+          .map((line) => coerceOutlookUpperReassuranceLineForDayScale(line, state));
+        if (eLines.length >= 3 && rLines.length >= 1) {
+          const block = assembleGreenYellowWeakOutlookBlockBody(rLines.slice(0, 1), eLines.slice(0, 3));
+          if (block && String(block).length > 50) return block;
+        }
+        const bodyFromLlm = String(parsed?.body || "")
+          .replace(/\r\n/g, "\n")
+          .trim();
+        if (bodyFromLlm && outlookGreenYellowWeakLlmBodyLooksValid(bodyFromLlm)) {
+          const bod = coerceOutlookFullBodyUpperForDayScale(bodyFromLlm, state);
+          return cleanupOutlookEscalationBulletsInGreenYellowWeakBlock(["⏳ 今後の見通し", bod].join("\n"));
+        }
+      } catch (_) {
+        /* retry */
+      }
+    }
+    return null;
+  }
+
   for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
     try {
       const systemPrompt = [
@@ -4806,7 +4941,9 @@ async function ensureOutlookBlockAsync(text, state) {
   if (!block || !String(block).trim()) {
     block = buildOutlookBlock(state);
   }
-  block = cleanupOutlookEscalationBulletsInBlock(block);
+  block = usesGreenYellowWeakOutlookLayout(state)
+    ? cleanupOutlookEscalationBulletsInGreenYellowWeakBlock(block)
+    : cleanupOutlookEscalationBulletsInBlock(block);
   return replaceSummaryBlock(text, "⏳ 今後の見通し", block);
 }
 
