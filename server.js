@@ -1016,7 +1016,7 @@ ${stateContext ? `\n${stateContext}\n` : ""}
 - 🤝 Kairoの判断は一般論の説明を禁止し、感覚の翻訳にする
   - 「今のあなたの状態なら、こう考えて大丈夫です」
   - 「だから今日はこれでいいですよ」
-- ⏳ 今後の見通し：**🟢／🟡弱**は「・」3行→固定橋渡し→経過＋安心1行（`assembleGreenYellowWeakOutlookBlockBody`）。**🟡強・🔴**は従来の二段（安心→**逆に、**→「・」3行→受診締め・`assembleOutlookBlockBody`）。`buildOutlookBlockWithLlm`／`buildOutlookBlock`／`usesGreenYellowWeakOutlookLayout`
+- ⏳ 今後の見通し：**🟢／🟡弱**は「・」3行→固定橋渡し→経過＋安心1行（assembleGreenYellowWeakOutlookBlockBody）。**🟡強・🔴**は従来の二段（安心→**逆に、**→「・」3行→受診締め・assembleOutlookBlockBody）。buildOutlookBlockWithLlm／buildOutlookBlock／usesGreenYellowWeakOutlookLayout
 
 🤝 Kairoの判断（LLM理解レイヤー）：
 - 情報整理は単なる言い換えではなく「症状の状態を説明する文章」として生成する。
