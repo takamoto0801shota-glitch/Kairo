@@ -718,7 +718,7 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 - **最後のまとめセクション（💬 最後に または 🌱 最後に）は必ず毎回表示すること**
 
 【今後の見通しのポイント】
-- **🟢／🟡弱**：**「・」3行**（急変）→ 固定「これらの症状が出ない限り、病院にはいかなくて大丈夫です。」→ **経過＋安心**の地の文1行（**「逆に、」なし・受診締めなし**）
+- **🟢／🟡弱**：**「・」3行**（急変）→ 固定「これらの症状が出ない限り、病院にはいかなくて大丈夫です。」→ **経過の目安1文のみ**（安心の追い文は 🌱 最後に。**「逆に、」なし・受診締めなし**）
 - **🟡強・🔴**：**二段**（上＝経過＋安心1行、**逆に、**＋「・」3行＋受診締め）。上段・締めはローカル時間帯に合わせる（outlookLocalTimeAdviceHintForPrompt／outlookDurationMetaHintForPrompt）
 - 安心段で**ビビらせない**／急変「・」行に**弱い**心配のみを**出さない**
 - 病名**断定**・**救急**の断定は出さない
@@ -1016,7 +1016,7 @@ ${stateContext ? `\n${stateContext}\n` : ""}
 - 🤝 Kairoの判断は一般論の説明を禁止し、感覚の翻訳にする
   - 「今のあなたの状態なら、こう考えて大丈夫です」
   - 「だから今日はこれでいいですよ」
-- ⏳ 今後の見通し：**🟢／🟡弱**は「・」3行→固定橋渡し→経過＋安心1行（assembleGreenYellowWeakOutlookBlockBody）。**🟡強・🔴**は従来の二段（安心→**逆に、**→「・」3行→受診締め・assembleOutlookBlockBody）。buildOutlookBlockWithLlm／buildOutlookBlock／usesGreenYellowWeakOutlookLayout
+- ⏳ 今後の見通し：**🟢／🟡弱**は「・」3行→固定橋渡し→経過1行のみ（buildOutlookGreenYellowWeakCourseLine・assembleGreenYellowWeakOutlookBlockBody）。**🟡強・🔴**は従来の二段（経過＋安心→**逆に、**→「・」3行→受診締め・assembleOutlookBlockBody）。buildOutlookBlockWithLlm／buildOutlookBlock／usesGreenYellowWeakOutlookLayout
 
 🤝 Kairoの判断（LLM理解レイヤー）：
 - 情報整理は単なる言い換えではなく「症状の状態を説明する文章」として生成する。
@@ -1254,6 +1254,15 @@ function lineMatchesSummaryHeaderFlex(line, header) {
       t.startsWith("✅ 今すぐやること") ||
       t.startsWith("✅ あなたの今すぐやること")
     );
+  }
+  if (header === "🌱 最後に") {
+    return /^🌱[\s\u3000]*最後に/.test(t);
+  }
+  if (header === "💬 最後に") {
+    return /^💬[\s\u3000]*最後に/.test(t);
+  }
+  if (header === "⏳ 今後の見通し") {
+    return /^⏳[\s\u3000]*(?:今後の見通し|この先の見通し)/.test(t);
   }
   return false;
 }
@@ -1660,6 +1669,11 @@ async function enforceSummaryStructureStrict(text, level, history, state) {
   // PAIN/INFECTION+🟡: 最終ガードとして1件目固定を適用
   if (level === "🟡" && state) {
     result = ensurePainInfectionYellowFirstAction(result, level, state);
+  }
+  const lastHdr = level === "🔴" ? "💬 最後に" : "🌱 最後に";
+  const lastBody = findLastBlockSectionInSummary(result, level);
+  if (!lastBody.found || !lastBody.body || lastBody.body.length < 20) {
+    result = await ensureLastBlock(result, level, state);
   }
   return result;
 }
@@ -3778,6 +3792,7 @@ const OUTLOOK_WARM_TAIL_NEUTRAL = [
 
 /**
  * 「⏳ 今後の見通し」上段1行：**予想経過**（durationMeta・`buildExpectedCourse`）＋時間帯の安心一言。
+ * 🟡強・🔴（B レイアウト）向け。🟢／🟡弱は `buildOutlookGreenYellowWeakCourseLine`（経過1文のみ）。
  */
 function buildOutlookReassuranceBullets(state) {
   const course = buildExpectedCourse({}, state || null);
@@ -3787,6 +3802,72 @@ function buildOutlookReassuranceBullets(state) {
   const tail = pool[Math.floor(Math.random() * pool.length)];
   const one = `${String(course || "").trim()}${tail}`.trim();
   return one ? [one] : [];
+}
+
+/** 🟢／🟡弱レイアウト：橋渡しの直後は経過見通しの1文のみ（安心の追い文は 🌱 最後に に任せる） */
+function buildOutlookGreenYellowWeakCourseLine(state) {
+  const course = String(buildExpectedCourse({}, state || null) || "").trim();
+  if (course) return course.endsWith("。") ? course : `${course}。`;
+  return "多くの場合、数時間〜1日程度で徐々に落ち着いていきます。";
+}
+
+function isOutlookComfortTailOnlySentence(sentence) {
+  const t = String(sentence || "").trim();
+  if (!t || t.length < 6) return false;
+  if (
+    /(大きな心配|心配は少なそう|心配はいりません|心配は少ない|大丈夫なことが多い|見通しは良い|安心しやすい|就寝まで急変|今夜しっかり休め|夕方まで急に|午前〜昼ごろまで大きく悪化)/.test(
+      t
+    )
+  ) {
+    return !/(安静|休め|休養|落ち着|回復|数時間|数日|半日|徐々|良くな|変化の方向|持ち直し)/.test(t);
+  }
+  return false;
+}
+
+/** LLM／結合文から経過見通し1文だけを抽出（2文目の安心は捨てる） */
+function normalizeOutlookGreenYellowWeakCourseLine(text, state) {
+  const fallback = buildOutlookGreenYellowWeakCourseLine(state);
+  let t = String(text || "").replace(/\s+/g, " ").trim();
+  if (!t) return fallback;
+
+  const sentences = t
+    .split(/(?<=。)/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const s of sentences) {
+    if (s && !isOutlookComfortTailOnlySentence(s)) {
+      const one = coerceOutlookUpperReassuranceLineForDayScale(s, state);
+      if (one) return one;
+    }
+  }
+
+  const comfortStarts = [
+    /(?=いまの強さから)/,
+    /(?=いまの文脈なら)/,
+    /(?=急に強く変わらなければ)/,
+    /(?=急に変わらなければ)/,
+    /(?=大きな心配は)/,
+    /(?=心配は少なそう)/,
+    /(?=心配はいりません)/,
+    /(?=午前〜)/,
+    /(?=午後に急変)/,
+    /(?=今夜しっかり)/,
+    /(?=就寝まで急変)/,
+    /(?=夕方まで急に)/,
+  ];
+  for (const re of comfortStarts) {
+    const m = t.match(re);
+    if (m && typeof m.index === "number" && m.index >= 12) {
+      t = t.slice(0, m.index).trim();
+      break;
+    }
+  }
+  if (t && !t.endsWith("。")) t += "。";
+  if (t && !isOutlookComfortTailOnlySentence(t)) {
+    const one = coerceOutlookUpperReassuranceLineForDayScale(t, state);
+    if (one) return one;
+  }
+  return fallback;
 }
 
 /**
@@ -3801,7 +3882,9 @@ function coerceOutlookUpperReassuranceLineForDayScale(line, state) {
   const hourCentric =
     /数時間|半日(?:ほど|程度)?(?:で|、)|〜\s*(?:半日|[０-９0-9]{1,2}\s*時間)|[０-９0-9]\s*[〜〜～]\s*[０-９0-9]+\s*時間|数時間〜/.test(t);
   if (!hourCentric) return t;
-  const fb = (buildOutlookReassuranceBullets(state) || [])[0];
+  const fb = usesGreenYellowWeakOutlookLayout(state)
+    ? buildOutlookGreenYellowWeakCourseLine(state)
+    : (buildOutlookReassuranceBullets(state) || [])[0];
   const fbs = String(fb || "").trim();
   return fbs.length >= 12 ? fbs : t;
 }
@@ -3824,12 +3907,80 @@ function coerceOutlookFullBodyUpperForDayScale(body, state) {
 }
 
 function buildOutlookEscalationBullets(state) {
+  void state;
   const shuffled = OUTLOOK_ESCALATION_TEMPLATES.slice();
   for (let i = shuffled.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
   }
   return shuffled.slice(0, 3);
+}
+
+/** 「・」3行は常にテンプレートプールから（LLM 生成は使わない） */
+function pickOutlookEscalationLinesFromTemplates(state) {
+  return buildOutlookEscalationBullets(state).slice(0, 3);
+}
+
+function extractOutlookReassuranceLineAfterGreenYellowWeakBridge(body) {
+  const lines = String(body || "")
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((l) => String(l || "").trim())
+    .filter(Boolean);
+  const bridgeIdx = lines.findIndex((l) => /これらの症状が出ない限り/.test(l));
+  if (bridgeIdx < 0) return "";
+  const after = lines.slice(bridgeIdx + 1).filter((l) => !/^・/.test(l));
+  return after.join("").trim() || "";
+}
+
+function extractOutlookReassuranceAndClosingFromClassicBody(body) {
+  const lines = String(body || "")
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((l) => String(l || "").trim())
+    .filter(Boolean);
+  const invIdx = lines.findIndex((l) => /^逆に[、,]?\s*$/.test(l));
+  if (invIdx < 0) return { reassurance: "", closing: "" };
+  const upper = lines.slice(0, invIdx).filter((l) => !/^・/.test(l) && !/^逆に/.test(l));
+  const closingIdx = lines.findIndex(
+    (l, i) => i > invIdx && (/^(このような変化が|こうした変化が)/.test(l) || /受診/.test(l))
+  );
+  const closing = closingIdx >= 0 ? lines[closingIdx] : "";
+  return { reassurance: upper.join("").trim(), closing };
+}
+
+/**
+ * 組み立て済み ⏳ ブロックの「・」3行を、必ずテンプレートプールのランダム3件に差し替える。
+ */
+function enforceTemplateEscalationInOutlookBlock(block, state) {
+  if (!block || !state) return block;
+  const templateEscalation = pickOutlookEscalationLinesFromTemplates(state);
+  if (templateEscalation.length < 3) return block;
+  const seedRe = buildOutlookReassuranceBullets(state);
+  const bodyOnly = String(block || "")
+    .replace(/^\s*⏳\s*今後の見通し\s*\n?/u, "")
+    .trim();
+  if (usesGreenYellowWeakOutlookLayout(state)) {
+    const reassurance = normalizeOutlookGreenYellowWeakCourseLine(
+      extractOutlookReassuranceLineAfterGreenYellowWeakBridge(bodyOnly) ||
+        buildOutlookGreenYellowWeakCourseLine(state),
+      state
+    );
+    if (!reassurance) return block;
+    return (
+      assembleGreenYellowWeakOutlookBlockBody([reassurance], templateEscalation.slice(0, 3)) || block
+    );
+  }
+  const { reassurance, closing } = extractOutlookReassuranceAndClosingFromClassicBody(bodyOnly);
+  const rOne = coerceOutlookUpperReassuranceLineForDayScale(
+    reassurance || (seedRe || [])[0] || "",
+    state
+  );
+  const end =
+    closing ||
+    OUTLOOK_VISIT_CLOSING_VARIANTS[Math.floor(Math.random() * OUTLOOK_VISIT_CLOSING_VARIANTS.length)];
+  if (!rOne || !end) return block;
+  return assembleOutlookBlockBody([rOne], templateEscalation.slice(0, 3), end) || block;
 }
 
 /** 「⏳ 今後の見通し」本文の1行。**行頭に「・」は付けない**（読み込み時は混入した「・」のみ除去） */
@@ -3962,11 +4113,12 @@ function cleanupOutlookEscalationBulletsInGreenYellowWeakBlock(block) {
 }
 
 function buildOutlookBlock(state) {
-  const re = buildOutlookReassuranceBullets(state);
   const es = buildOutlookEscalationBullets(state);
   if (usesGreenYellowWeakOutlookLayout(state)) {
-    return assembleGreenYellowWeakOutlookBlockBody(re, es) || "";
+    const course = [buildOutlookGreenYellowWeakCourseLine(state)];
+    return assembleGreenYellowWeakOutlookBlockBody(course, es) || "";
   }
+  const re = buildOutlookReassuranceBullets(state);
   const closing = OUTLOOK_VISIT_CLOSING_VARIANTS[Math.floor(Math.random() * OUTLOOK_VISIT_CLOSING_VARIANTS.length)];
   return assembleOutlookBlockBody(re, es, closing) || "";
 }
@@ -4006,7 +4158,7 @@ function outlookGreenYellowWeakLlmBodyLooksValid(body) {
 }
 
 /**
- * まとめの「⏳ 今後の見通し」：🟢／🟡弱は急変3行→固定橋渡し→安心1行。🟡強・🔴は従来（LLM／静的）。
+ * まとめの「⏳ 今後の見通し」：🟢／🟡弱は急変3行→固定橋渡し→経過1行のみ。🟡強・🔴は従来（LLM／静的）。
  */
 async function buildOutlookBlockWithLlm(state) {
   if (!process.env.OPENAI_API_KEY) return null;
@@ -4016,7 +4168,8 @@ async function buildOutlookBlockWithLlm(state) {
   const painScore = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
   const bulletHints = (buildStateFactsBullets(state, { forSummary: true }) || []).slice(0, 10).join("\n");
   const seedRe = buildOutlookReassuranceBullets(state);
-  const seedEs = buildOutlookEscalationBullets(state);
+  const seedCourse = buildOutlookGreenYellowWeakCourseLine(state);
+  const templateEscalation = pickOutlookEscalationLinesFromTemplates(state);
   const visitClosings = OUTLOOK_VISIT_CLOSING_VARIANTS;
   const greenYellowWeak = usesGreenYellowWeakOutlookLayout(state);
 
@@ -4025,19 +4178,18 @@ async function buildOutlookBlockWithLlm(state) {
       try {
         const systemPrompt = [
           "体調相談の「⏳ 今後の見通し」ブロック（🟢／🟡弱レイアウト）。見出し行「⏳ 今後の見通し」は**出さない**（呼び出し側が付与）。",
-          "必須**型**（この順で組み立てる。あなたは JSON のみ返す）:",
-          "1) **行頭に「・」**を付けて**ちょうど3行**。各行は**症状・身体の変化の描写だけ**で終える。**各行に「受診」「検討」「考えてください」「してください」は入れない**。**「〜場合は受診」も禁止**。受診を本気で検討すべき急変のみ。短め。",
-          `2) 固定橋渡し（**そのまま**・変更禁止）: ${OUTLOOK_GREEN_YELLOW_WEAK_BRIDGE_LINE}`,
-          "3) **行頭に「・」は付けない**地の文を**1行**：**経過の目安**（落ち着き方）＋**大きな心配はいりません**級の安心。**敬体（です・ます）**のみ。**上段に受診語を混ぜない**。【経過】【ローカルの現在】と矛盾させない。",
-          "**「逆に、」行は出さない**。**「このような変化があれば受診を…」の締めも出さない**（橋渡し固定文で代替）。",
-          'JSONのみ: {"escalation_bullets":["下段3行・症状のみ・受診語なし"],"reassurance_bullets":["経過＋安心の地の文1行・・なし"]}',
-          '互換: {"body":"・3行\\n固定橋渡し\\n安心1行（見出しなし）"}',
+          "あなたが書くのは**経過の目安の地の文1行だけ**。**「・」3行はサーバが固定テンプレートから挿入するので生成しない**。",
+          `組み立て順（参考）: ①テンプレ「・」3行 ②固定: ${OUTLOOK_GREEN_YELLOW_WEAK_BRIDGE_LINE} ③あなたの経過1行`,
+          "**行頭に「・」は付けない**地の文を**1行**：**安静・休養を続けたときの経過の目安**のみ（例：数時間ほどで落ち着く／数日かけて回復）。**敬体（です・ます）**のみ。【経過】【ローカルの現在】と矛盾させない。",
+          "**禁止**：「大きな心配はいりません」「急に変わらなければ」など**安心・心配の追い文**（🌱 最後に で述べる）。**受診**語も書かない。",
+          'JSONのみ: {"reassurance_bullets":["経過の目安1行・・なし"]}',
           "病名断定・恐怖・救急の断定は禁止。",
           `主症状: 「${main}」。カテゴリ: ${category}。緊急度: ${level}。`,
           painScore !== null ? `痛のスコア(参考): ${painScore}/10` : "",
           outlookLocalTimeAdviceHintForPrompt(state),
           outlookDurationMetaHintForPrompt(state),
-          `静的 seed（**コピー禁止・言い換え**） 急変3行(seed): ${JSON.stringify(seedEs)} ／ 安心下段(seed): ${JSON.stringify(seedRe)}`,
+          `経過文の参考(seed・言い換え可・安心の追い文は付けない): ${JSON.stringify([seedCourse])}`,
+          `挿入される急変3行（**変更不可・この文言のまま**）: ${JSON.stringify(templateEscalation)}`,
           bulletHints ? `【今の整理（参考）】\n${bulletHints}` : "",
         ]
           .filter(Boolean)
@@ -4052,15 +4204,7 @@ async function buildOutlookBlockWithLlm(state) {
           max_tokens: 550,
         });
         const parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
-        const es = Array.isArray(parsed?.escalation_bullets) ? parsed.escalation_bullets : [];
         const re = Array.isArray(parsed?.reassurance_bullets) ? parsed.reassurance_bullets : [];
-        const eLines = es
-          .map((x) =>
-            String(x || "")
-              .replace(/^[・\s]+/u, "")
-              .trim()
-          )
-          .filter(Boolean);
         const rLines = re
           .map((x) =>
             String(x || "")
@@ -4068,17 +4212,27 @@ async function buildOutlookBlockWithLlm(state) {
               .trim()
           )
           .filter(Boolean)
-          .map((line) => coerceOutlookUpperReassuranceLineForDayScale(line, state));
-        if (eLines.length >= 3 && rLines.length >= 1) {
-          const block = assembleGreenYellowWeakOutlookBlockBody(rLines.slice(0, 1), eLines.slice(0, 3));
+          .map((line) => normalizeOutlookGreenYellowWeakCourseLine(line, state));
+        if (rLines.length >= 1 && templateEscalation.length >= 3) {
+          const block = assembleGreenYellowWeakOutlookBlockBody(
+            rLines.slice(0, 1),
+            templateEscalation.slice(0, 3)
+          );
           if (block && String(block).length > 50) return block;
         }
         const bodyFromLlm = String(parsed?.body || "")
           .replace(/\r\n/g, "\n")
           .trim();
         if (bodyFromLlm && outlookGreenYellowWeakLlmBodyLooksValid(bodyFromLlm)) {
-          const bod = coerceOutlookFullBodyUpperForDayScale(bodyFromLlm, state);
-          return cleanupOutlookEscalationBulletsInGreenYellowWeakBlock(["⏳ 今後の見通し", bod].join("\n"));
+          const reassurance = extractOutlookReassuranceLineAfterGreenYellowWeakBridge(bodyFromLlm);
+          const rOne = normalizeOutlookGreenYellowWeakCourseLine(
+            reassurance || seedCourse,
+            state
+          );
+          if (rOne && templateEscalation.length >= 3) {
+            const block = assembleGreenYellowWeakOutlookBlockBody([rOne], templateEscalation.slice(0, 3));
+            if (block && String(block).length > 50) return block;
+          }
         }
       } catch (_) {
         /* retry */
@@ -4091,20 +4245,18 @@ async function buildOutlookBlockWithLlm(state) {
     try {
       const systemPrompt = [
         "体調相談の「⏳ 今後の見通し」ブロック。見出し行「⏳ 今後の見通し」は**出さない**（呼び出し側が付与）。",
-        "必須**型**（この順）:",
-        "1) **行頭に「・」は付けない**地の文を**1行（短文に寄せる）**：**経過の目安**（多くの場合の落ち着き方）を含めつつ**大きな心配はいりません**級の安心を幅広に。【経過】【ローカルの現在】と**矛盾させない**。断定しすぎない。**敬体（です・ます）**のみ。**過剰な敬語は禁止**。上段に**受診**や**強い不安**は混ぜない。",
-        "2) 次行は**逆に、** だけ（本文は他に書かない）。",
-        "3) **行頭に「・」**を付けて**ちょうど3行**。各行は**症状・身体の変化の描写だけ**で終える（名詞句／～が続く／～がある 等）。**各行に「受診」「検討」「考えてください」「してください」は入れない**。**「〜場合は受診」「〜ときは受診」も禁止**（受診の勧めは手順4の closing 1文のみ）。**受診を本気で検討すべき急変のみ**。**短め**。弱い心配のみで埋めない。**病名断定はしない**。",
-        "4) 最終行のみ：このような変化があれば、その時は**受診**を**考える／検討する**（です・ますで1文）。**ここだけ**に「受診」を書く。**同趣旨**で言い換え可。",
-        "JSONのみ。最優先: {\"reassurance_bullets\":[\"上段1行（・なし・経過＋安心）\"],\"escalation_bullets\":[\"下段3行・本文は症状のみ・受診語なし\"],\"closing\":\"締め1文（受診・本文唯一）\"}",
-        "互換: {\"body\":\"上記を**改行**だけつないだ本文（見出しなし）。下段は各行「・」先頭・**症状のみ**で終え、**行末に受診の語を付けない**。受診は**最終行1文だけ**。\"}",
-        "病名**断定**・恐怖・**救急**の断定は禁止。上段に**Kairo**と書く必要は**ない**（**締め**は**受診**）。",
+        "あなたが書くのは**上段の安心1行**と**締め1文**のみ。**「・」3行はサーバが固定テンプレートから挿入するので生成しない**。",
+        "必須**型**（サーバ組み立て順）: ①安心1行 ②**逆に、** ③テンプレ「・」3行 ④締め",
+        "1) **行頭に「・」は付けない**地の文を**1行**：**経過の目安**＋**大きな心配はいりません**級の安心。【経過】【ローカルの現在】と矛盾させない。**敬体（です・ます）**のみ。上段に**受診**語を混ぜない。",
+        "2) 締め1文：このような変化があれば〜**受診を考える／検討する**（です・ます）。**ここだけ**に「受診」を書く。",
+        'JSONのみ: {"reassurance_bullets":["上段1行（・なし・経過＋安心）"],"closing":"締め1文（受診・本文唯一）"}',
+        "病名**断定**・恐怖・**救急**の断定は禁止。",
         `主症状: 「${main}」。カテゴリ: ${category}。緊急度: ${level}。`,
         painScore !== null ? `痛のスコア(参考): ${painScore}/10` : "",
         outlookLocalTimeAdviceHintForPrompt(state),
         outlookDurationMetaHintForPrompt(state),
-        "痛み**以外**（熱・のど・胃腸等）の手がかりが【今の整理】にあるなら、下段に**偏りすぎない**よう反映。",
-        `静的 seed（**コピー禁止・言い換え**） 安心上段イメージ: ${JSON.stringify(seedRe)} ／ 受診目安(seed): ${JSON.stringify(seedEs)}`,
+        `安心上段の参考(seed・言い換え可): ${JSON.stringify(seedRe)}`,
+        `挿入される急変3行（**変更不可・この文言のまま**）: ${JSON.stringify(templateEscalation)}`,
         `締め候補: ${JSON.stringify(visitClosings)}`,
         bulletHints ? `【今の整理（参考）】\n${bulletHints}` : "",
       ]
@@ -4121,7 +4273,6 @@ async function buildOutlookBlockWithLlm(state) {
       });
       const parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
       const re = Array.isArray(parsed?.reassurance_bullets) ? parsed.reassurance_bullets : [];
-      const es = Array.isArray(parsed?.escalation_bullets) ? parsed.escalation_bullets : [];
       const closing = String(parsed?.closing || visitClosings[Math.floor(Math.random() * visitClosings.length)]).trim();
       const rLines = re
         .map((x) =>
@@ -4133,23 +4284,28 @@ async function buildOutlookBlockWithLlm(state) {
         .map((line, idx) =>
           idx === 0 ? coerceOutlookUpperReassuranceLineForDayScale(line, state) : line
         );
-      const eLines = es
-        .map((x) =>
-          String(x || "")
-            .replace(/^[・\s]+/u, "")
-            .trim()
-        )
-        .filter(Boolean);
-      if (rLines.length >= 1 && eLines.length >= 3) {
-        const block = assembleOutlookBlockBody(rLines.slice(0, 1), eLines.slice(0, 3), closing);
+      if (rLines.length >= 1 && templateEscalation.length >= 3 && closing) {
+        const block = assembleOutlookBlockBody(
+          rLines.slice(0, 1),
+          templateEscalation.slice(0, 3),
+          closing
+        );
         if (block && String(block).length > 50) return block;
       }
       const bodyFromLlm = String(parsed?.body || "")
         .replace(/\r\n/g, "\n")
         .trim();
       if (bodyFromLlm && outlookLlmBodyLooksValid(bodyFromLlm)) {
-        const bod = coerceOutlookFullBodyUpperForDayScale(bodyFromLlm, state);
-        return cleanupOutlookEscalationBulletsInBlock(["⏳ 今後の見通し", bod].join("\n"));
+        const { reassurance, closing: closingFromBody } = extractOutlookReassuranceAndClosingFromClassicBody(bodyFromLlm);
+        const rOne = coerceOutlookUpperReassuranceLineForDayScale(
+          reassurance || (seedRe || [])[0] || "",
+          state
+        );
+        const end = closingFromBody || closing;
+        if (rOne && templateEscalation.length >= 3 && end) {
+          const block = assembleOutlookBlockBody([rOne], templateEscalation.slice(0, 3), end);
+          if (block && String(block).length > 50) return block;
+        }
       }
     } catch (_) {
       /* retry */
@@ -4815,6 +4971,9 @@ function replaceSummaryBlock(text, header, block) {
         line.startsWith("✅ あなたの今すぐやること")
       );
     }
+    if (header === "🌱 最後に" || header === "💬 最後に" || header === "⏳ 今後の見通し") {
+      return lineMatchesSummaryHeaderFlex(line, header);
+    }
     return line.startsWith(header);
   });
   if (startIndex === -1) {
@@ -4941,6 +5100,7 @@ async function ensureOutlookBlockAsync(text, state) {
   if (!block || !String(block).trim()) {
     block = buildOutlookBlock(state);
   }
+  block = enforceTemplateEscalationInOutlookBlock(block, state);
   block = usesGreenYellowWeakOutlookLayout(state)
     ? cleanupOutlookEscalationBulletsInGreenYellowWeakBlock(block)
     : cleanupOutlookEscalationBulletsInBlock(block);
@@ -4968,23 +5128,27 @@ function truncateLastBlockBodyToMaxSentences(body, maxSentences = 2) {
   return cutAt >= 0 ? trimmed.slice(0, cutAt + 1).trim() : trimmed;
 }
 
+function findLastBlockSectionInSummary(text, level) {
+  const header = level === "🔴" ? "💬 最後に" : "🌱 最後に";
+  const altHeader = level === "🔴" ? "🌱 最後に" : "💬 最後に";
+  const lines = String(text || "").split("\n");
+  const idx = lines.findIndex(
+    (l) => lineMatchesSummaryHeaderFlex(l, header) || lineMatchesSummaryHeaderFlex(l, altHeader)
+  );
+  if (idx === -1) return { found: false, body: "", foundHeader: null };
+  const foundHeader = lineMatchesSummaryHeaderFlex(lines[idx], header) ? header : altHeader;
+  const next = lines.findIndex((l, i) => i > idx && /^(🟢|🟡|🔴|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(l));
+  const end = next === -1 ? lines.length : next;
+  const body = lines.slice(idx + 1, end).join("\n").trim();
+  return { found: true, body, foundHeader };
+}
+
 /** 🌱/💬 最後にブロック：LLM生成を優先。既存ブロックに十分な内容があればそのまま。欠落時はLLMで生成。本文は2文以内。 */
 async function ensureLastBlock(text, level, state = null, contextText = "") {
   if (!text) return text;
   const header = level === "🔴" ? "💬 最後に" : "🌱 最後に";
   const altHeader = level === "🔴" ? "🌱 最後に" : "💬 最後に";
-  const hasBlock = (t) => {
-    const lines = t.split("\n");
-    const idx = lines.findIndex((l) => l.startsWith(header) || l.startsWith(altHeader));
-    if (idx === -1) return { found: false, body: "", foundHeader: null };
-    const foundHeader = lines[idx].startsWith(header) ? header : altHeader;
-    const start = idx;
-    const next = lines.findIndex((l, i) => i > start && /^(🟢|🟡|🔴|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(l));
-    const end = next === -1 ? lines.length : next;
-    const body = lines.slice(start + 1, end).join("\n").trim();
-    return { found: true, body, foundHeader };
-  };
-  const { found, body, foundHeader } = hasBlock(text);
+  const { found, body, foundHeader } = findLastBlockSectionInSummary(text, level);
   if (found && body && body.length >= 20) {
     const truncated = truncateLastBlockBodyToMaxSentences(body, 2);
     if (truncated !== body) {
@@ -4993,7 +5157,18 @@ async function ensureLastBlock(text, level, state = null, contextText = "") {
     }
     return text;
   }
-  const block = await generateLastBlockWithLLM(level, state, contextText);
+  let block = "";
+  try {
+    block = await generateLastBlockWithLLM(level, state, contextText);
+  } catch (e) {
+    console.warn("[KAIRO] ensureLastBlock generateLastBlockWithLLM failed", e?.message || e);
+  }
+  if (!block || !String(block).trim()) {
+    block =
+      level === "🔴"
+        ? "💬 最後に\n今の状況で受診を選ぶのは適切な判断です。無理に我慢せず、一度確認してもらうと安心です。"
+        : "🌱 最後に\n今の情報なら安心して休んで大丈夫です。まずは休息を優先してください。不安になったらまたここで確認してください。";
+  }
   let result = replaceSummaryBlock(text, header, block);
   if (result === text) result = replaceSummaryBlock(text, altHeader, block);
   if (result === text) result = (text.trimEnd() + "\n\n" + block).trim();
@@ -5241,7 +5416,7 @@ function isExpectedCourseHoursScaleVariant(state) {
 }
 
 /**
- * 予想経過（安心設計・`durationMeta`）。**本文の主な利用先**は `⏳ 今後の見通し` 上段（`buildOutlookReassuranceBullets`）。旧・✅ブロック内の単独行は廃止（KAIRO_SPEC）。
+ * 予想経過（安心設計・`durationMeta`）。**本文の主な利用先**は `⏳ 今後の見通し`（🟢／🟡弱は `buildOutlookGreenYellowWeakCourseLine`、🟡強・🔴は `buildOutlookReassuranceBullets` の経過部）。旧・✅ブロック内の単独行は廃止（KAIRO_SPEC）。
  */
 function buildExpectedCourse(context = {}, state = null) {
   if (state && isExpectedCourseDaysScaleVariant(state)) {
@@ -5722,15 +5897,19 @@ ${fullRules}
     level === "🔴"
       ? "「今の状況で受診を選ぶのは適切な判断です。無理に我慢せず、一度確認してもらうと安心です。」をそのまま返してください。"
       : "「今の情報なら安心して休んで大丈夫です。まずは休息を優先し、不安になったらまたここで確認してください。」をそのまま返してください。";
-  const last = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [{ role: "user", content: copyPrompt }],
-    temperature: 0,
-    max_tokens: 90,
-  });
-  const body = (last?.choices?.[0]?.message?.content || "").trim().replace(/^[🌱💬]\s*最後に\s*\n?/i, "");
-  if (body && body.length > 5) {
-    return `${header}\n${truncateLastBlockBodyToMaxSentences(body, 2)}`;
+  try {
+    const last = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: copyPrompt }],
+      temperature: 0,
+      max_tokens: 90,
+    });
+    const body = (last?.choices?.[0]?.message?.content || "").trim().replace(/^[🌱💬]\s*最後に\s*\n?/i, "");
+    if (body && body.length > 5) {
+      return `${header}\n${truncateLastBlockBodyToMaxSentences(body, 2)}`;
+    }
+  } catch (_) {
+    /* static fallback below */
   }
   for (let i = 0; i < 10; i++) {
     try {
@@ -13251,25 +13430,17 @@ function buildGreenYellowComboIntegratedParagraph(state, level, parts, causeShor
 
   if (windy) {
     const lead = clause ? `${clause}このことから、` : `これらの症状の組み合わせから、`;
-    const tail =
-      lv === "🟡"
-        ? `風の初期症状としてよく見られる一方で、注意が必要なサインも含まれます。`
-        : `風の初期症状としてよく見られるパターンです。`;
-    return `${lead}\n${tail}`;
+    return `${lead}\n風の初期症状としてよく見られるパターンです。`;
   }
 
   const noun = greenYellowPatternNounForTemporary(state);
   const lead = clause ? `${clause}このことから、` : `今の状態の組み合わせから、`;
-  const tail =
-    lv === "🟡"
-      ? `一時的な${noun}としてよく見られる一方で、注意が必要なサインも含まれます。`
-      : `一時的な${noun}としてよく見られるパターンです。`;
-  return `${lead}\n${tail}`;
+  return `${lead}\n一時的な${noun}としてよく見られるパターンです。`;
 }
 
 /**
  * 同上の **async 版（本線）**：意味行（②）を `generateGreenYellowStateAboutMeaningLineViaLlm` で
- * 組み合わせ＋主症状から LLM 動的生成する。文末は固定（🟢=「パターンです。」／🟡=「サインも含まれます。」）。
+ * 組み合わせ＋主症状から LLM 動的生成する。文末は 🟢／🟡 共通で「パターンです。」。
  * 風の初期症状例外時は LLM プロンプトにヒントを渡して語を含めさせる。
  */
 async function buildGreenYellowComboIntegratedParagraphAsync(state, level, parts, causeShortOverride) {
@@ -13983,7 +14154,7 @@ ${mainSymptom}
 
 /**
  * 🟢/🟡「意味」1行：組み合わせ＋主症状から LLM 生成（最大4リトライ）。会話キャッシュあり。
- * 文末は固定：🟢=「パターンです。」／🟡=「サインも含まれます。」を必ず守らせ、外れたらリトライ。
+ * 文末は 🟢／🟡 共通で「パターンです。」（🟡専用の「注意が必要なサインも含まれます。」は使わない）。
  * 風の初期症状例外時は LLM プロンプトに「風の初期症状として見られる」旨をヒントとして渡す（語の挿入を要求）。
  * 失敗時のみ従来固定文にフォールバック。
  */
@@ -13993,8 +14164,7 @@ async function generateGreenYellowStateAboutMeaningLineViaLlm(state, level, part
   const noun = greenYellowPatternNounForTemporary(state) || "体調不良";
   const joined = (parts || []).map((p) => String(p || "").trim()).filter(Boolean).join("＋");
 
-  const exactTail =
-    lv === "🟡" ? "注意が必要なサインも含まれます。" : "パターンです。";
+  const exactTail = "パターンです。";
   const cacheKey = buildStateAboutMeaningCacheKey({
     level: lv,
     mainSymptom: noun,
@@ -14006,13 +14176,9 @@ async function generateGreenYellowStateAboutMeaningLineViaLlm(state, level, part
 
   const pickFallback = () => {
     if (windy) {
-      return lv === "🟡"
-        ? `風の初期症状としてよく見られる一方で、注意が必要なサインも含まれます。`
-        : `風の初期症状としてよく見られるパターンです。`;
+      return `風の初期症状としてよく見られるパターンです。`;
     }
-    return lv === "🟡"
-      ? `一時的な${noun}としてよく見られる一方で、注意が必要なサインも含まれます。`
-      : `一時的な${noun}としてよく見られるパターンです。`;
+    return `一時的な${noun}としてよく見られるパターンです。`;
   };
 
   if (!process.env.OPENAI_API_KEY || !joined) {
@@ -14022,9 +14188,9 @@ async function generateGreenYellowStateAboutMeaningLineViaLlm(state, level, part
   }
 
   const lvDescription =
-    lv === "🟢"
-      ? "緊急性は低い側（🟢）。トーンは安心寄り：「よく見られる」「一時的」「自然な範囲」などの語感を使い、不安を煽らない。断定・恐怖喚起は禁止。"
-      : "中等度（🟡）。トーンは中立で注意あり：「注意が必要」「気をつけたい」などを使い、安心しすぎ／軽視しすぎを避ける。煽りや断定は禁止。";
+    lv === "🟡"
+      ? "中等度（🟡）。意味文の書き方・文末は 🟢 と同一（「よく見られるパターンです。」）。トーンは安心寄り：「よく見られる」「一時的」「自然な範囲」など。不安を煽らない。断定・恐怖喚起は禁止。"
+      : "緊急性は低い側（🟢）。トーンは安心寄り：「よく見られる」「一時的」「自然な範囲」などの語感を使い、不安を煽らない。断定・恐怖喚起は禁止。";
 
   const windyHint = windy
     ? "この組み合わせは『風の初期症状（風邪のかかりはじめ）として見られるパターン』に当てはまる。文中にその趣旨が伝わる語（例：『風の初期症状』『風邪のかかりはじめ』など）を必ず1回だけ自然に含めること。"
@@ -14033,6 +14199,7 @@ async function generateGreenYellowStateAboutMeaningLineViaLlm(state, level, part
   const systemPrompt = [
     "あなたは医療判断を補助する説明生成AIです。",
     "「症状の組み合わせ＋主症状」から、組み合わせ全体としての意味を1文で示してください。固定テンプレ・一般論ではなく、「この組み合わせ・この主症状」だからこそ言える具体的な意味を出すこと。",
+    "🟢 でも 🟡 でも、意味文の型は同じ（文末は必ず「パターンです。」）。🟡 用の「注意が必要なサインも含まれます」など別文末は禁止。",
     "",
     `【症状の組み合わせ】${joined}`,
     `【主症状】${noun}`,
@@ -14042,9 +14209,7 @@ async function generateGreenYellowStateAboutMeaningLineViaLlm(state, level, part
     "【ルール】",
     "・必ず1文（改行なし）。",
     `・文末は必ず「${exactTail}」で終える（句点まで含めて出力。「${exactTail}」以外の語尾は禁止）。`,
-    lv === "🟢"
-      ? "・安心を阻害する語（例：「危険」「危ない」「すぐ受診」など）は禁止。"
-      : "・「危険」「致死」「緊急」など過度に強い語は禁止。注意の度合いは「注意が必要」「気をつけたい」レベルにとどめる。",
+    "・安心を阻害する語（例：「危険」「危ない」「すぐ受診」「注意が必要なサインも含まれます」など）は禁止。",
     "・「あなたの場合」「あなたには」などの個別化フレーズは禁止。",
     "・抽象語（「状態」「出方」「感じ」など）の単独使用は避ける。",
     "・組み合わせ全体としての意味を述べる。単一症状の説明は禁止。",
@@ -18927,7 +19092,6 @@ async function generateSummaryForConfirmation(conversationId) {
     }
   }
   aiResponse = await ensureOutlookBlockAsync(aiResponse, state);
-  aiResponse = await ensureLastBlock(aiResponse, level, state, historyTextForOtc || aiResponse);
   aiResponse = enforceYellowOtcPositionStrict(aiResponse, level);
   if (level === "🔴") {
     aiResponse = await ensureHospitalMemoBlock(aiResponse, state, historyTextForOtc);
@@ -18972,7 +19136,9 @@ async function generateSummaryForConfirmation(conversationId) {
   aiResponse = stripHospitalMapLinks(aiResponse);
   aiResponse = stripMcForRed(aiResponse, level);
   aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
+  aiResponse = await ensureLastBlock(aiResponse, level, state, historyTextForOtc || aiResponse);
   aiResponse = dedupeSummaryBlocksByCanonicalOrder(aiResponse, level);
+  aiResponse = await ensureLastBlock(aiResponse, level, state, historyTextForOtc || aiResponse);
   if (level === "🔴" && !summaryJudgmentBulletsCoverFilledSlots(aiResponse, state)) {
     aiResponse = await replaceStateAboutBlockOnly(aiResponse, state, historyTextForOtc);
   }
@@ -20407,7 +20573,6 @@ app.post("/api/chat", async (req, res) => {
         }
       }
       aiResponse = await ensureOutlookBlockAsync(aiResponse, conversationState[conversationId]);
-      aiResponse = await ensureLastBlock(aiResponse, level, conversationState[conversationId], historyTextForOtc || aiResponse);
       aiResponse = enforceYellowOtcPositionStrict(aiResponse, level);
       if (level === "🔴") {
         aiResponse = await ensureHospitalMemoBlock(aiResponse, conversationState[conversationId], historyTextForOtc);
@@ -20494,7 +20659,19 @@ app.post("/api/chat", async (req, res) => {
       aiResponse = stripHospitalMapLinks(aiResponse);
       aiResponse = stripMcForRed(aiResponse, level);
       aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
+      aiResponse = await ensureLastBlock(
+        aiResponse,
+        level,
+        conversationState[conversationId],
+        historyTextForOtc || aiResponse
+      );
       aiResponse = dedupeSummaryBlocksByCanonicalOrder(aiResponse, level);
+      aiResponse = await ensureLastBlock(
+        aiResponse,
+        level,
+        conversationState[conversationId],
+        historyTextForOtc || aiResponse
+      );
       conversationState[conversationId].summaryText = aiResponse;
       const decisionType =
         level === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING";
