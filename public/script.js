@@ -1642,9 +1642,12 @@ function renderSummary() {
   }
 }
 
+/** 初回画面専用（会話中・サーバー返答には出さない） */
+const INTRO_BANNER_LINE_1 = "体調の不安、1分で安心に変えます";
+const INTRO_BANNER_LINE_2 = "今どうするべきか、\nKairoが一緒に判断していきます";
+
 // Show initial message
 function showInitialMessage() {
-  const initialMessage = `体調の不安、1分で安心に変えます`;
   sessionStorage.setItem("kairo_intro_banner_displayed", "1");
   // 再検索・リロード後も古い conv ID でサーバーに溜まった「まとめ済み」状態を引かないよう、初回バナー表示時点で ID を捨てる
   localStorage.removeItem(CONVERSATION_ID_KEY);
@@ -1653,10 +1656,13 @@ function showInitialMessage() {
   appState.followUpSummarySuppress = false;
   appState.postSummaryFollowUpSuppress = false;
   appState.introSummarySuppress = true;
-  setTimeout(
-    () => addMessage(initialMessage, false, true, { skipSummaryBlock: true }),
-    QUESTION_DELAY_MS
-  );
+  const introOpts = { skipSummaryBlock: true };
+  setTimeout(() => {
+    addMessage(INTRO_BANNER_LINE_1, false, true, introOpts);
+    const lineCount = INTRO_BANNER_LINE_1.split("\n").length;
+    const secondDelay = Math.max(280, lineCount * 24 + 200);
+    setTimeout(() => addMessage(INTRO_BANNER_LINE_2, false, true, introOpts), secondDelay);
+  }, QUESTION_DELAY_MS);
 }
 
 

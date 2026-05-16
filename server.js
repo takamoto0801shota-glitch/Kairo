@@ -92,8 +92,8 @@ AI：「頭が痛いのはつらいですよね。
 	・	締め付けられる感じ」
 
 【絶対に守ること】
-- 「体調の不安、1分で安心に変えます」というメッセージは、会話中には絶対に表示しない
-- このメッセージは初回画面専用なので、AIの返答には絶対に含めない
+- 初回画面専用の「体調の不安、1分で安心に変えます」「今どうするべきか、Kairoが一緒に判断していきます」は、会話中には絶対に表示しない
+- これらはクライアント初回バナーのみ。AIの返答には絶対に含めない
 - messages.length === 2 の場合のみ「症状入力後の最初の返答」として扱う
 - それ以外の会話（messages.length > 2）では、通常の質問を続ける
 
@@ -478,10 +478,11 @@ contextFlag = true の場合、次のKairoの発話のどこかで
 - 軽症なのに病院を勧めない
 - 判断をユーザーに委ねない
 
-🟡（市販薬＋自宅ケア）の場合は必ず以下を含める：
+🟡強（痛み8–10・市販薬＋自宅ケア）の場合は必ず以下を含める：
 - 「今は緊急性は低そう」
-- 症状に応じた市販薬のカテゴリ＋具体例1つ
+- 症状に応じた市販薬のカテゴリ＋具体例1つ（行動文は条件付き前置き＋薬名。前置きは必須だが「きつい場合は、」等に固定しない）
 - 今夜やることは1〜2個だけ
+🟢／🟡弱では市販薬・OTCは勧めない（休息・水分・環境調整のみ）
 
 【緊急度判定：危険フラグ優先モデル - 最重要】
 - すべての質問が終了した後にのみ、緊急度を判定する（途中で結論を出さない）。
@@ -875,6 +876,8 @@ function initConversationState(input = {}) {
     confirmationPending: false,
     expectsCorrectionReason: false,
     confirmationExtraFacts: [],
+    /** 確認文に表示した「・」行のスナップショット（追加情報がないまとめではこれをそのまま再利用） */
+    confirmationBulletsSnapshot: null,
     /** ユーザー発話から抽出した体温（℃）。箇条書き・休息判定の補助用 */
     extractedBodyTemperatureC: null,
     confirmationShown: false,
@@ -1147,7 +1150,12 @@ function countBulletLinesInKairoJudgmentBlock(text) {
  */
 function ensureKairoJudgmentHasMinimumFactBullets(state, minCount = MIN_KAIRO_JUDGMENT_FACT_BULLETS) {
   if (!state) return false;
-  enforceConfirmationBulletsCompletenessCore(state);
+  if (shouldReuseConfirmationBulletsSnapshot(state)) {
+    return state.confirmationBulletsSnapshot.length >= minCount;
+  }
+  if (!state.bulletLlmPolishedSourceFingerprint) {
+    enforceConfirmationBulletsCompletenessCore(state);
+  }
   const count = () => sanitizeBulletPoints(buildStateFactsBullets(state, { forSummary: true }) || [], state).length;
   if (count() >= minCount) return true;
   let cur = (state.stateAboutBulletsCache || []).slice();
@@ -4806,7 +4814,7 @@ function buildRedImmediateActionsBlock(state, historyText, research = null, refi
 async function ensureHospitalMemoBlock(text, state, historyText = "") {
   if (!text) return text;
   ensureKairoJudgmentHasMinimumFactBullets(state, MIN_KAIRO_JUDGMENT_FACT_BULLETS);
-  const factBullets = sanitizeBulletPoints(buildStateFactsBullets(state, { forSummary: true }) || [], state);
+  const factBullets = getKairoJudgmentFactBullets(state, { forSummary: true });
   const memoLines = [
     "📝 Kairoの判断",
     ...factBullets,
@@ -5008,11 +5016,13 @@ function replaceSummaryBlock(text, header, block) {
 /** 追加情報・違う等のとき、「Kairoの判断」ブロックのみ差し替え（他ブロックはそのまま） */
 async function replaceStateAboutBlockOnly(summaryText, state, historyText = "") {
   if (!summaryText || !state) return summaryText;
-  finalizeStateAboutBulletsCacheForSummary(state);
+  if (!applyConfirmationBulletsSnapshotToCache(state)) {
+    finalizeStateAboutBulletsCacheForSummary(state);
+  }
   const hasRedStateBlock = textIncludesMemoAboutHeader(summaryText);
   if (hasRedStateBlock) {
     ensureKairoJudgmentHasMinimumFactBullets(state, MIN_KAIRO_JUDGMENT_FACT_BULLETS);
-    const factBullets = sanitizeBulletPoints(buildStateFactsBullets(state, { forSummary: true }) || [], state);
+    const factBullets = getKairoJudgmentFactBullets(state, { forSummary: true });
     const memoLines = [
       "📝 Kairoの判断",
       ...factBullets,
@@ -5039,7 +5049,9 @@ async function ensureHandshakeStateBlockFull(text, state, historyTextForCare = "
   if (!text || !state) return text;
   const level = finalizeRiskLevel(state);
   if (level !== "🟢" && level !== "🟡") return text;
-  finalizeStateAboutBulletsCacheForSummary(state);
+  if (!applyConfirmationBulletsSnapshotToCache(state)) {
+    finalizeStateAboutBulletsCacheForSummary(state);
+  }
   if (handshakeStateBlockNeedsEmpathy(text) || !summaryJudgmentBulletsCoverFilledSlots(text, state)) {
     return replaceStateAboutBlockOnly(text, state, historyTextForCare);
   }
@@ -5336,8 +5348,8 @@ function ensureActionCount(actions = [], targetCount = 2, context = {}, evidence
       {
         title: "白色ワセリンを患部に薄く塗り、2〜3時間ごとに塗り直す",
         reason: "バリアを保つことで、刺激の反復を減らしやすくなります。",
-        isOtc: true,
-      }
+        isOtc: false,
+      },
     );
   } else {
     supplements.push({
@@ -5541,20 +5553,16 @@ function getOtcActionForYellowModal(state, topic) {
 
   const byCategory = {
     頭: {
-      action: "市販の鎮痛薬（アセトアミノフェン等）を用法通りに使ってください",
+      action: "市販の鎮痛薬（アセトアミノフェン等）を用法通りに使う",
       reason: "痛みを和らげることで、休息を取りやすくなります。",
     },
     お腹: {
-      action: "整腸剤（市販）を用法通りに使ってください",
+      action: "整腸剤（市販）を用法通りに使う",
       reason: "腸の調子を整えることで、症状の推移を確認しやすくなります。",
     },
     喉: {
-      action: "のど飴やトローチを用法通りに使ってください",
-      reason: "のどを潤すことで、違和感を和らげやすくなります。",
-    },
-    皮膚: {
-      action: "白色ワセリンを患部に薄く塗り、2〜3時間ごとに塗り直してください",
-      reason: "バリアを保つことで、刺激の反復を減らしやすくなります。",
+      action: "市販の解熱鎮痛薬を用法通りに使う",
+      reason: "のどの痛みや発熱を和らげることで、休息を取りやすくなります。",
     },
   };
   return byCategory[normalizedTopic] || byCategory.頭;
@@ -5610,14 +5618,23 @@ async function refineDoActionsWithLLM(plan, state, level, options = {}) {
 
   for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
     try {
-      const isYellow = level === "🟡";
+      const allowOtc = shouldRecommendOtcMedication(state, level);
+      const forbidOtc = level === "🟢" || (level === "🟡" && !allowOtc);
+      const otcPromptLine = allowOtc
+        ? buildOtcMedicationLlmPromptLine(state, level, { forSummary, summaryPainInfectionYellow })
+        : forbidOtc
+          ? "市販薬（OTC）・パナドール・鎮痛薬等の**薬の勧めは出さない**（休息・水分・環境調整・刺激回避のみ。ワセリン・のど飴はOTCではない）。"
+          : "";
       const useSimple = attempt >= 3 || doActions.length === 0;
       let prompt;
       if (useSimple) {
         prompt = [
           `主症状「${symForPrompt}」に合わせて（ユーザー向け表示・まとめと同一）セルフケアを${minRequired}件生成。`,
+          otcPromptLine,
           "JSONのみ: {\"do\":[{\"action\":\"...\",\"reason\":\"...\"}]}。曖昧表現・医療行為禁止。",
-        ].join("\n");
+        ]
+          .filter(Boolean)
+          .join("\n");
       } else {
         prompt = [
           "あなたは医療情報を要約して行動を具体化するアシスタントです。",
@@ -5630,12 +5647,12 @@ async function refineDoActionsWithLLM(plan, state, level, options = {}) {
           "次の形式で返す: {\"do\":[{\"action\":\"...\",\"reason\":\"...\"}]}",
           forSummary
             ? summaryPainInfectionYellow
-              ? "doは1件のみ（本文では別途1件目が固定される）。各reasonは検索要点と整合する確実な理由にする。"
+              ? allowOtc
+                ? "doは1件のみ（本文では別途1件目がベッド休息で固定済み）。**その1件は市販薬（OTC）必須**（前置き＋薬。色・文言は文脈で）。reasonは検索要点と整合。"
+                : "doは1件のみ（本文では別途1件目が固定される）。各reasonは検索要点と整合する確実な理由にする。"
               : "doは2件。各reasonは検索要点と整合する確実な理由にする。"
             : "doは必ずちょうど4件。各reasonは検索要点と整合する確実な理由にする。",
-          isYellow && !forSummary
-            ? "OTC（市販薬）を1件必ず含める。PAIN/INFECTION かつ鎮痛のときはシンガポールのパナドールを扱う。**action（・行）は**「パナドール（青色）を服用する」「パナドール（赤色）を服用する」「パナドール（緑色）を服用する」のいずれか**1行のみ**（短く）。**パッケージの説明・成分・シンガポールでの入手先は reason（→行）にのみ**書く（行動文に書き足さない）。整腸剤・のど飴・ワセリン等は他部位向け。"
-            : "",
+          otcPromptLine,
           "「症状メモを2時間ごとに1回...」は禁止。",
         ]
           .filter(Boolean)
@@ -5665,7 +5682,12 @@ async function refineDoActionsWithLLM(plan, state, level, options = {}) {
       const parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
       const outDo = Array.isArray(parsed?.do) ? parsed.do : doActions;
       const valid = outDo.filter((x) => x && x.action && x.reason).map((x) => ({ title: x.action, reason: x.reason }));
-      const enriched = applyPanadolSingaporeDisplayToDoActionItems(valid, state, ctx);
+      let enriched = applyPanadolSingaporeDisplayToDoActionItems(valid, state, ctx);
+      enriched = applyOtcMedicationPolicyToDoItems(
+        enriched.map((x) => ({ action: x.title, reason: x.reason, title: x.title })),
+        state,
+        level
+      ).map((x) => ({ title: x.action, reason: x.reason }));
       if (enriched.length >= minRequired) return enriched;
       if (enriched.length > 0 && attempt >= LLM_RETRY_COUNT - 1) return enriched;
     } catch (_) {
@@ -5673,19 +5695,27 @@ async function refineDoActionsWithLLM(plan, state, level, options = {}) {
     }
   }
   if (doActions.length > 0) {
-    return applyPanadolSingaporeDisplayToDoActionItems(
-      doActions.map((x) => ({ title: x.action, reason: x.reason })),
+    return applyOtcMedicationPolicyToDoItems(
+      applyPanadolSingaporeDisplayToDoActionItems(
+        doActions.map((x) => ({ title: x.action, reason: x.reason })),
+        state,
+        ctx
+      ).map((x) => ({ action: x.title, reason: x.reason, title: x.title })),
       state,
-      ctx
-    );
+      level
+    ).map((x) => ({ title: x.action, reason: x.reason }));
   }
   const lastResort = await generateMinimalActionsLastResort(ctx);
   if (lastResort.length > 0) {
-    return applyPanadolSingaporeDisplayToDoActionItems(
-      lastResort.map((a) => ({ title: a.title, reason: a.reason })),
+    return applyOtcMedicationPolicyToDoItems(
+      applyPanadolSingaporeDisplayToDoActionItems(
+        lastResort.map((a) => ({ title: a.title, reason: a.reason })),
+        state,
+        ctx
+      ).map((x) => ({ action: x.title, reason: x.reason, title: x.title })),
       state,
-      ctx
-    );
+      level
+    ).map((x) => ({ title: x.action, reason: x.reason }));
   }
   return [];
 }
@@ -5783,6 +5813,7 @@ function buildDoActionsFromPlan(plan, state, level, options = {}) {
   const minCount = forSummary ? (summaryPainInfectionFixedPick ? 1 : 2) : 4;
   const maxCount = forSummary ? 2 : 4;
   const skipSupplements = Boolean(actionsOverride && actionsOverride.length > 0);
+  const allowOtc = shouldRecommendOtcMedication(state, level);
   let ensured = ensureMinimumDoActions(
     doItems.map((x) => ({ title: x.action, reason: x.reason, isOtc: false })),
     minCount,
@@ -5799,10 +5830,19 @@ function buildDoActionsFromPlan(plan, state, level, options = {}) {
       maxCount
     );
   }
-  if ((level === "🟡" || level === "🟢") && !forSummary) {
-    if (!ensured.some((x) => /ワセリン|鎮痛薬|整腸剤|のど飴|トローチ|市販|パナドール|Panadol/.test(x.action || ""))) {
+  if (allowOtc && !forSummary) {
+    if (!ensured.some((x) => isOtcMedicationActionText(x.action || ""))) {
       const topic = normalizeContextLocation(ctx?.location || "");
-      ensured = [...ensured, getOtcActionForYellowModal(state, topic)].slice(0, maxCount);
+      const otc = getOtcActionForYellowModal(state, topic);
+      if (otc && isOtcMedicationActionText(otc.action)) {
+        ensured = [
+          ...ensured,
+          {
+            action: ensureOtcMedicationActionIntroPrefix(otc.action, state),
+            reason: otc.reason,
+          },
+        ].slice(0, maxCount);
+      }
     }
   }
   // LLM 由来（actionsOverride）で3件以下のときも、モーダルは必ず4件に補填する（skipSupplements では止めない）
@@ -5821,6 +5861,7 @@ function buildDoActionsFromPlan(plan, state, level, options = {}) {
     action: toConciseActionTitle(x.action ?? x.title),
     reason: ensureReliableReason(x.reason, evidence),
   }));
+  ensured = applyOtcMedicationPolicyToDoItems(ensured, state, level);
   return ensured.slice(0, maxCount);
 }
 
@@ -5943,6 +5984,7 @@ async function buildImmediateActionsBlock(level, state, historyText = "", resear
     forSummary: true,
     actionsOverride: refinedActions.length > 0 ? refinedActions : undefined,
   });
+  doActions = applyOtcMedicationPolicyToDoItems(doActions, state, level);
   // 夜間（20:00〜02:59）：🟢/🟡 ともに1件目を「就寝文」で強制固定（PAIN/INFECTION のベッド休息より優先）
   // 通常時 PAIN/INFECTION+🟡: 1件目を強制固定（仕様厳守。不具合防止のため二重チェック）※のど・咽頭系は除外
   const category = state ? (state.triageCategory || resolveQuestionCategoryFromState(state)) : null;
@@ -6245,8 +6287,11 @@ async function buildImmediateActionFallbackPlanFromState(state, overrides = {}) 
   }
 
   const actionsToEnsure = seedActions.length > 0 ? seedActions : [];
+  const level = state ? finalizeRiskLevel(state) : "🟡";
   return {
-    actions: ensureActionCount(actionsToEnsure, 3, context, overrides.evidence || {}, { skipSupplements: true }),
+    actions: ensureActionCount(actionsToEnsure, 3, context, overrides.evidence || {}, {
+      skipSupplements: true,
+    }),
     currentStateContext: context,
     searchQuery: overrides.searchQuery || "",
     sourceNames: Array.isArray(overrides.sourceNames) ? overrides.sourceNames : [],
@@ -9014,6 +9059,133 @@ function shouldApplyPainInfectionYellowBedRestFirst(state, level) {
   if (category !== "PAIN" && category !== "INFECTION") return false;
   if (shouldSkipBedRestFirstActionForPainInfectionYellow(state)) return false;
   return true;
+}
+
+/** 市販薬（OTC）を勧めてよい緊急度か（🟡強のみ。🟢／🟡弱／🔴 では出さない） */
+function shouldRecommendOtcMedication(state, level) {
+  const lv = level || (state ? finalizeRiskLevel(state) : "");
+  if (lv !== "🟡" || !state) return false;
+  return isYellowStrongTier(state);
+}
+
+/** OTC に含めないアクセサリー類（ワセリン・のど飴・トローチ等。市販薬ではない） */
+function isOtcAccessoryProductText(text) {
+  return /ワセリン|のど飴|トローチ|潤喉|喉スプレー|保湿(?:剤|クリーム)|リップ(?:クリーム|バーム)|バリアクリーム|患部に.*塗り|塗り直し/i.test(
+    String(text || "")
+  );
+}
+
+/** 市販薬（内服・外用薬）のみ。アクセサリー類は false */
+function isOtcMedicationActionText(text) {
+  const t = String(text || "");
+  if (isOtcAccessoryProductText(t)) return false;
+  return /鎮痛|整腸|解熱|パナドール|Panadol|服用|アセトアミノフェン|イブ|ロキソニン|タイレノール|抗ヒスタミン|胃薬|市販薬|錠|カプセル|顆粒|シロップ|液剤|内服|外用薬/i.test(
+    t
+  );
+}
+
+/** OTC action に条件付き前置きがあるか（「きつい場合は、」固定ではない） */
+function hasOtcMedicationConditionalIntro(text) {
+  const t = String(text || "")
+    .trim()
+    .replace(/^・\s*/, "");
+  return /^(きつい場合は|つらい場合は|つらくなった場合は|痛みが強い場合は|痛みがつらい場合は|症状がつらい場合は|熱がつらい場合は|発熱がつらい場合は|のどがつらい場合は|喉がつらい場合は|しんどい場合は|辛い場合は|苦しい場合は|必要な場合は|鎮痛が必要な場合は|つらく感じる場合は)/.test(
+    t
+  );
+}
+
+/** 主症状・痛みスコアから前置きを臨機応変に選ぶ（サーバ補完用） */
+function pickOtcMedicationConditionalIntroPrefix(state) {
+  const pain = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
+  const labels = [
+    String(getSyncedMainSymptomDisplayLabel(state) || ""),
+    String(state?.primarySymptom || ""),
+    String(state?.historyTextForCare || "").slice(0, 240),
+  ].join(" ");
+  if (pain != null && pain >= 8) return "痛みが強い場合は、";
+  if (/(熱|発熱|高熱)/.test(labels)) return "熱がつらい場合は、";
+  if (/(喉|のど|咽)/.test(labels)) return "のどがつらい場合は、";
+  if (/(頭痛|頭が痛|ズキズキ)/.test(labels)) return "つらい場合は、";
+  const pool = ["きつい場合は、", "つらい場合は、", "症状がつらい場合は、"];
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+/** LLM／固定 OTC 行動：条件付き前置きが無いときだけ文脈に合わせて補完 */
+function ensureOtcMedicationActionIntroPrefix(actionText, state = null) {
+  const bare = String(actionText || "")
+    .trim()
+    .replace(/^・\s*/, "");
+  if (!bare) return bare;
+  if (hasOtcMedicationConditionalIntro(bare)) return bare;
+  return `${pickOtcMedicationConditionalIntroPrefix(state)}${bare}`;
+}
+
+/** PAIN/INFECTION 向け：パナドール色選択の LLM ヒント（青固定しない） */
+function otcPanadolSelectionHintForPrompt(state) {
+  if (!state) return "";
+  const cat = state.triageCategory || resolveQuestionCategoryFromState(state);
+  if (cat !== "PAIN" && cat !== "INFECTION") return "";
+  const topic = normalizeContextLocation(
+    getSyncedMainSymptomDisplayLabel(state) || state.primarySymptom || ""
+  );
+  const pack = resolvePanadolPackForPainInfection(state, topic);
+  if (pack === "red") {
+    return "鎮痛ではパナドール**赤色**が候補（痛みスコア高め）。**青／赤／緑は主症状・痛み・喉/風邪寄りで臨機応変**（`resolvePanadolPackForPainInfection`）。";
+  }
+  if (pack === "green") {
+    return "喉・風の初期寄りではパナドール**緑色**が候補。色は文脈に合わせ1つだけ。";
+  }
+  return "鎮痛ではパナドール**青／赤／緑のいずれか1つ**（痛み>8→赤、喉→緑、それ以外→青）。**青色に固定しない**。";
+}
+
+/** 🟡強向け OTC 行動の LLM 指示（前置き必須・テンプレ固定禁止・色は文脈で） */
+function buildOtcMedicationLlmPromptLine(state, level, options = {}) {
+  if (!shouldRecommendOtcMedication(state, level)) return "";
+  const { forSummary = false, summaryPainInfectionYellow = false } = options;
+  const introRule =
+    "市販薬（OTC）の **action** は**条件付き前置き＋具体的な薬行動**（前置きは必須だが**「きつい場合は、」に固定しない**）。例：「つらい場合は、」「痛みが強い場合は、」「熱がつらい場合は、」など症状・強さに合わせて言い換える。";
+  const panadolHint = otcPanadolSelectionHintForPrompt(state);
+  if (forSummary && summaryPainInfectionYellow) {
+    return [introRule, panadolHint, "doは1件のみ（別途1件目はベッド休息固定）。**その1件はOTC必須**。reasonに成分・入手先。"]
+      .filter(Boolean)
+      .join(" ");
+  }
+  if (forSummary) {
+    return [
+      introRule,
+      panadolHint,
+      "doのうち市販薬（OTC）を**ちょうど1件**含める。もう1件は薬以外のセルフケア。成分・入手先は reason のみ。",
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+  return [
+    introRule,
+    panadolHint,
+    "OTCは**市販薬のみ1件**（内服・外用薬。パナドール／鎮痛・解熱・整腸等）。**ワセリン・のど飴・トローチ等のアクセサリー類はOTCに含めない**（必要なら別行のセルフケア）。",
+    "actionは短く（例：パナドール（○色）を服用する）。**○色は文脈で1つ**。説明・成分・入手先は reason のみ。",
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+/** 🟡強以外では OTC 行を除去し、🟡強では action に前置きを付与 */
+function applyOtcMedicationPolicyToDoItems(items, state, level) {
+  const allow = shouldRecommendOtcMedication(state, level);
+  return (Array.isArray(items) ? items : [])
+    .filter((x) => {
+      const action = String(x?.action ?? x?.title ?? "").trim();
+      return allow || !isOtcMedicationActionText(action);
+    })
+    .map((x) => {
+      const raw = String(x?.action ?? x?.title ?? "").trim();
+      if (!allow || !isOtcMedicationActionText(raw)) {
+        const action = toConciseActionTitle(raw);
+        return { ...x, action, title: action };
+      }
+      const action = ensureOtcMedicationActionIntroPrefix(toConciseActionTitle(raw), state);
+      return { ...x, action, title: action };
+    });
 }
 
 function finalizeRiskLevel(state) {
@@ -12367,8 +12539,48 @@ async function buildStateFactsBulletsTwoStage(state, opts = {}) {
   return enforceConfirmationBulletsCompleteness(state, opts);
 }
 
+function hasConfirmationBulletsSnapshot(state) {
+  return Array.isArray(state?.confirmationBulletsSnapshot) && state.confirmationBulletsSnapshot.length > 0;
+}
+
+/** 確認文表示時点の箇条書きをまとめでそのまま使うか（追加・訂正の追記が無いとき） */
+function shouldReuseConfirmationBulletsSnapshot(state) {
+  if (!hasConfirmationBulletsSnapshot(state)) return false;
+  const extras = state?.confirmationExtraFacts || [];
+  return extras.length === 0;
+}
+
+function snapshotConfirmationBulletsForSummary(state) {
+  if (!state) return;
+  const maxBullets = resolveConfirmationBulletsMaxForState(state);
+  const lines = sanitizeBulletPoints((state.stateAboutBulletsCache || []).slice(), state).slice(0, maxBullets);
+  if (lines.length > 0) state.confirmationBulletsSnapshot = lines.slice();
+}
+
+function applyConfirmationBulletsSnapshotToCache(state) {
+  if (!shouldReuseConfirmationBulletsSnapshot(state)) return false;
+  state.stateAboutBulletsCache = state.confirmationBulletsSnapshot.slice();
+  return true;
+}
+
+/** 確認文・まとめ「Kairoの判断」で共通の「・」行（LLM 整形済みキャッシュ／確認スナップショット） */
+function getKairoJudgmentFactBullets(state, opts = {}) {
+  if (!state) return [];
+  const max = resolveConfirmationBulletsMaxForState(state);
+  if (opts?.forSummary !== false && shouldReuseConfirmationBulletsSnapshot(state)) {
+    return state.confirmationBulletsSnapshot.slice(0, max);
+  }
+  if (state.stateAboutBulletsCache?.length > 0) {
+    return sanitizeBulletPoints(state.stateAboutBulletsCache, state).slice(0, max);
+  }
+  return sanitizeBulletPoints(buildStateFactsBulletsLegacy(state, { forSummary: true }) || [], state).slice(0, max);
+}
+
 /** 情報整理ブロック：キャッシュがあればそれを優先。なければ従来ロジック。forSummary: true のときは箇条書きのみ。 */
 function buildStateFactsBullets(state, opts = {}) {
+  if (opts?.forSummary && shouldReuseConfirmationBulletsSnapshot(state)) {
+    return state.confirmationBulletsSnapshot.slice();
+  }
   if (state?.stateAboutBulletsCache?.length > 0) {
     const cached = state.stateAboutBulletsCache;
     if (opts?.forSummary) return cached;
@@ -14351,14 +14563,12 @@ function computeBulletLlmPrePolishFingerprint(state) {
 
 /** まとめ前確認文：①導入 ②箇条書き ③確認2行（共感・判断はまとめ側へ移動） */
 function buildPreSummaryConfirmationMessage(state) {
-  ensureKairoJudgmentHasMinimumFactBullets(state, MIN_KAIRO_JUDGMENT_FACT_BULLETS);
-  let bulletLines = buildStateFactsBullets(state, { forSummary: true }) || [];
-  if (!Array.isArray(bulletLines) || bulletLines.length === 0) {
-    bulletLines = enforceConfirmationBulletsCompletenessCore(state);
+  let bullets = getKairoJudgmentFactBullets(state, { forSummary: true });
+  if (bullets.length < MIN_KAIRO_JUDGMENT_FACT_BULLETS) {
+    ensureKairoJudgmentHasMinimumFactBullets(state, MIN_KAIRO_JUDGMENT_FACT_BULLETS);
+    bullets = getKairoJudgmentFactBullets(state, { forSummary: true });
   }
-  const bullets = Array.isArray(bulletLines)
-    ? bulletLines.slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS)
-    : [];
+  bullets = bullets.slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS);
   const phrase = PRE_SUMMARY_CONFIRMATION_PHRASES[
     Math.floor(Math.random() * PRE_SUMMARY_CONFIRMATION_PHRASES.length)
   ];
@@ -17807,7 +18017,7 @@ function buildSearchBackedHeuristicActions(context, evidence) {
     actions.push({
       title: "白色ワセリンを米粒2〜3粒ぶん、患部に白く残る厚さで塗り、2〜3時間ごとに半日続けて再評価してください",
       reason: "保護ケアで刺激の反復を減らし、バリアを保つためです。",
-      isOtc: true,
+      isOtc: false,
     });
   }
   if (topic === "お腹") {
@@ -17948,7 +18158,7 @@ function buildStateDecisionLine(state, level) {
 /** 🟢/🟡「🤝 Kairoの判断」本文：KAIRO_SPEC（事実箇条書き → 空行 → ①②一体段落＋③👉） */
 function buildGreenYellowHandshakeBlockBodySync(state, aboutLine) {
   ensureKairoJudgmentHasMinimumFactBullets(state, MIN_KAIRO_JUDGMENT_FACT_BULLETS);
-  const factBullets = sanitizeBulletPoints(buildStateFactsBullets(state, { forSummary: true }) || [], state);
+  const factBullets = getKairoJudgmentFactBullets(state, { forSummary: true });
   const core = String(aboutLine || "").trim();
   const lines = [...factBullets];
   if (factBullets.length > 0 && core) lines.push("");
@@ -17972,7 +18182,9 @@ async function normalizeStateBlockForGreenYellowAsync(text, state) {
   const sliceEnd = end >= 0 ? end : lines.length;
   const level = finalizeRiskLevel(state);
   if (level !== "🟢" && level !== "🟡") return text;
-  finalizeStateAboutBulletsCacheForSummary(state);
+  if (!applyConfirmationBulletsSnapshotToCache(state)) {
+    finalizeStateAboutBulletsCacheForSummary(state);
+  }
   let aboutLine = await buildStateAboutLineAsync(state, level);
   if (!String(aboutLine || "").trim()) {
     aboutLine = buildGreenYellowStateAboutBlock(state, level);
@@ -18966,8 +19178,15 @@ async function generateSummaryForConfirmation(conversationId) {
   state.summaryGenerating = true;
   state.summaryPartialSections = [];
   try {
-    // 確認応答で追加情報が入ったあとも、ここで merge なしだと confirmationExtraFacts が反映されない（キャッシュを組み直して上書きする）
-    await buildStateFactsBulletsTwoStage(state, { mergeExtraFacts: true, skipBulletLlmIfContentUnchanged: true });
+    // 追加情報が無いときは確認文と同じ箇条書き（スナップショット）をそのまま使う。あるときだけ twoStage で再生成
+    if (applyConfirmationBulletsSnapshotToCache(state)) {
+      state.skipSupplementBeforeSummary = true;
+    } else {
+      await buildStateFactsBulletsTwoStage(state, {
+        mergeExtraFacts: true,
+        skipBulletLlmIfContentUnchanged: true,
+      });
+    }
     state.summaryPartialSections = buildSummaryPartialSectionsBeforeLlm(state);
   } catch (e) {
     console.error("[generateSummaryForConfirmation buildStateFactsBulletsTwoStage]", e?.message || e);
@@ -19521,23 +19740,38 @@ app.post("/api/chat", async (req, res) => {
         .filter((m) => m.role === "user")
         .map((m) => m.content)
         .join("\n");
-      if (hasAddedInfo) {
+      const shouldRebuildBullets = hasAddedInfo || isRejectionOnly;
+      if (shouldRebuildBullets) {
         conversationState[conversationId].summaryGenerationEpoch =
           (conversationState[conversationId].summaryGenerationEpoch || 0) + 1;
         conversationState[conversationId].summaryGenerationPromise = null;
         conversationState[conversationId].summaryPrefetchFingerprint = null;
-        if (shouldAppendConfirmationExtraFacts(msg)) {
+        if (hasAddedInfo && shouldAppendConfirmationExtraFacts(msg)) {
           (conversationState[conversationId].confirmationExtraFacts =
             conversationState[conversationId].confirmationExtraFacts || []).push(msg);
         }
         conversationState[conversationId].stateAboutBulletsCache = null;
+        conversationState[conversationId].confirmationBulletsSnapshot = null;
         conversationState[conversationId].bulletLlmPolishedSourceFingerprint = null;
+        conversationState[conversationId].bulletLlmPreferredLines = null;
+      } else {
+        applyConfirmationBulletsSnapshotToCache(conversationState[conversationId]);
       }
       ensureUserUtterancesCapturedBeforeConfirmation(conversationId, conversationState[conversationId]);
-      await buildStateFactsBulletsTwoStage(conversationState[conversationId], {
-        mergeExtraFacts: true,
-        skipBulletLlmIfContentUnchanged: true,
-      });
+      if (shouldRebuildBullets) {
+        await buildStateFactsBulletsTwoStage(conversationState[conversationId], {
+          mergeExtraFacts: hasAddedInfo,
+          skipBulletLlmIfContentUnchanged: false,
+        });
+        if (hasAddedInfo) {
+          snapshotConfirmationBulletsForSummary(conversationState[conversationId]);
+        }
+      } else if (!shouldReuseConfirmationBulletsSnapshot(conversationState[conversationId])) {
+        await buildStateFactsBulletsTwoStage(conversationState[conversationId], {
+          mergeExtraFacts: false,
+          skipBulletLlmIfContentUnchanged: true,
+        });
+      }
       let summaryMsg = "";
       let followUpQ = null;
       let immediateActionsPatchedInTry = false;
@@ -20229,10 +20463,12 @@ app.post("/api/chat", async (req, res) => {
       ensureUserUtterancesCapturedBeforeConfirmation(conversationId, conversationState[conversationId]);
       try {
         await buildStateFactsBulletsTwoStage(conversationState[conversationId], { mergeExtraFacts: false });
+        snapshotConfirmationBulletsForSummary(conversationState[conversationId]);
       } catch (e) {
         console.error("[KAIRO] buildStateFactsBulletsTwoStage before confirmation", e?.message || e);
         try {
           enforceConfirmationBulletsCompletenessCore(conversationState[conversationId]);
+          snapshotConfirmationBulletsForSummary(conversationState[conversationId]);
         } catch (_) {
           /* best effort */
         }
