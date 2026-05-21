@@ -416,9 +416,9 @@ slot_status = {
 - **確認文の後にユーザーが何かしら言ったら、まとめをいつでも出してよい。必ずまとめを出す。それ以外のもの（中間メッセージ等）は強制的に出さない。**
 - **ユーザーの言葉の仕分け**：肯定のみ（あっている・大丈夫・ない・特にない・はい等）→ 既存まとめを使用。追加情報（症状・経過等を補足）や違う等→ **「✅ 今すぐできること」ブロックのみ**差し替え（他ブロックはそのまま）。
 - この順番を必ず守る：確認 → ユーザー応答 → まとめ。
-- **確認文は出すだけ**。全スロット完了時点では、**応答前に** `buildStateFactsBulletsTwoStage`（網羅＋追補＋**箇条書き LLM 文体整形を必須。`OPENAI_API_KEY` 必須）を `await` し、**確認文に含む箇条書き**と**以降のまとめ（🤝/📝）が参照する** `stateAboutBulletsCache` を**いずれも LLM 通過済み**にしてから返す。同一内容の二重呼び出しを避けるため、先行**まとめ**生成内の `buildStateFactsBulletsTwoStage` では、直前の整形と同じなら箇条書き LLM をスキップしてよい。**応答返却後**に**先行まとめ生成**（`generateSummaryForConfirmation`）を続行する。本生成は**本線パイプライン**（まとめ本文用 LLM 等）で**完走**する。進捗は `GET /api/summary-progress` で参照可能。**先行表示できるのは「ここまでの情報を整理します」のみ**とする。**「🤝/📝 Kairoの判断」は、箇条書き・共感・判断・網羅検証を含む完全形が組み立てられてから**まとめ本文返却（または完了時の `summaryPartialSections` 更新）で**初めて**出す（箇条書きだけが先に出ると不完全になるため、先行ストリームには含めない）。
+- **確認文は出すだけ**。全スロット完了時点では、**応答前に** `buildConfirmationBulletsDraftSync`（網羅＋追補の**同期下書きのみ**）で確認文の箇条書きを組み立てて**即返却**する。**箇条書き LLM 文体整形**（`polishConfirmationBulletsWithLlm`）は**返却後にバックグラウンド**（`startBackgroundBulletPolish`）で実行し、完了時に `confirmationBulletsSnapshot` を更新する。まとめ生成（`generateSummaryForConfirmation`）は整形完了を `awaitBulletPolishForSummary` で待ってから本線に進む（未完了時は下書きで先行し、完了後に差し替え）。**応答返却後**に**先行まとめ生成**を続行する。本生成は**ブロック組み立て本線**（`buildSummaryByBlocksPipelineAsync`：全文 LLM 廃止、✅・⏳・🌱 並列、🤝 はキャッシュ付き 1 回）で完走する。進捗は `GET /api/summary-progress` で参照可能。**先行表示**は「ここまでの情報を整理します」に加え、**🤝/📝 Kairoの判断**を**同期フォールバック**（箇条書き＋👉 まで）で出してよい。LLM 版 🤝 が揃ったら `summaryPartialSections`／生成中 `summaryText` の当該ブロックを差し替える。
 - **カテゴリ別の質問数**：PAIN/GI/SKIN=5スロット、INFECTION=6スロット、worsening_trend ありで+1等、カテゴリと状態によりスロット数が異なる。そのカテゴリの全質問を終了したら、またはスロットが全て埋まったら、確認文へ移行する。
-- **全スロット完了時、または質問完了時**：上記のとおり確認文を**先に表示**し、**表示直後**に先行まとめ生成を開始する。ユーザー応答時は生成完了を待ってからまとめを表示する（生成中は `/api/summary-progress` で**先頭ブロック（ここまでの情報を整理します）のみ**先行表示可。「Kairoの判断」は上記のとおり完全形が揃うまで出さない）。
+- **全スロット完了時、または質問完了時**：上記のとおり確認文を**先に表示**し、**表示直後**に先行まとめ生成を開始する。ユーザー応答時は生成完了を待ってからまとめを表示する（生成中は `/api/summary-progress` で**先頭＋🤝（同期版）**まで先行表示可。🤝 の意味行・組み合わせ短語 LLM 完了後は差し替え）。
 - ユーザーが応答したら、**まとめを出すだけ**。中間メッセージ・閉じメッセージ・LLM応答等は一切出さない。
 - まとめの出力は**ユーザーが確認文に対して何かを言った後**のみ行う。それまでは待機。
 - ユーザー応答時、まだまとめ生成が終わっていなければ**完了まで待ってから出力**する。
@@ -541,7 +541,7 @@ slot_status = {
 
 **適用範囲**：🟢/🟡のまとめブロック、🔴の📝 Kairoの判断、まとめ前の確認文。いずれも同じ設計で生成する。
 
-**確認文とまとめの箇条書き本文**は同一パイプライン（`buildStateFactsBulletsTwoStage` → `polishConfirmationBulletsWithLlm`）。確認文表示直後に `confirmationBulletsSnapshot` を保存し、追加情報が無いまとめではその行をそのまま再利用する。
+**確認文とまとめの箇条書き本文**は同一ソース（`buildConfirmationBulletsDraftSync` → バックグラウンド `polishConfirmationBulletsWithLlm`）。確認文は下書きで即表示し、整形完了後に `confirmationBulletsSnapshot` を更新。追加情報が無いまとめではスナップショットをそのまま再利用する。
 
 **確認文とまとめの出力形式の違い**（最大6項目）：
 
@@ -581,7 +581,7 @@ slot_status = {
 2. **網羅**：`collectRawInputsForStateBullets` で作ったラベル付き raw と照合し、未反映のスロット値を `mergeRawSlotInputsIntoBullets` 等で追記する（`enforceConfirmationBulletsCompletenessCore`）。
 3. **付随「なし」等の表示専用**：条件に応じて `injectDisplayOnlyNoOtherSymptomsBullet` で1行を挿入。
 4. **会話抜け**：`supplementStateBulletsFromUncoveredUserUtterances` でヒューリスティック追補。
-5. **文体整形（必須・最大数回リトライ）**：`polishConfirmationBulletsWithLlm` — `OPENAI_API_KEY` 必須。同一の同期入力に対しては重複 API を省略してよい（確認文直前と先行まとめの二重呼び出し対策）。網羅検証に通るまで再試行する。元文がかなりぎこちないことをプロンプトで明示し、内容は維持したまま整える。JSON で `bullets` のみ返し、事実の追加・病名推測は禁止。**似た箇条書き・同趣旨の言い換え二重は禁止**（プロンプトで明示）。**下書き raw と LLM 整形行が二重になったときはリセットせず、`dedupeBulletsPreferPreferredWhenSimilar` で LLM 側（`state.bulletLlmPreferredLines`）を残す**（`mergeRawSlotInputsIntoBullets`／`finalizeStateAboutBulletsCacheForSummary` 後も適用）。`bulletLinesCoverSlotText` は文字列包含に加え `bulletsAreSimilar` でも同趣旨を検出する。
+5. **文体整形（必須・返却後バックグラウンド）**：`polishConfirmationBulletsWithLlm` — 全量再送は最大 **2 回**、網羅不足時は不足追記用の短いプロンプトを **1 回**、それでも不足なら下書き＋`reconcileBulletCoverageGaps` で確定（throw しない）。同一 fingerprint では重複 API を省略してよい。元文がかなりぎこちないことをプロンプトで明示し、内容は維持したまま整える。JSON で `bullets` のみ返し、事実の追加・病名推測は禁止。**似た箇条書き・同趣旨の言い換え二重は禁止**（プロンプトで明示）。**下書き raw と LLM 整形行が二重になったときはリセットせず、`dedupeBulletsPreferPreferredWhenSimilar` で LLM 側（`state.bulletLlmPreferredLines`）を残す**（`mergeRawSlotInputsIntoBullets`／`finalizeStateAboutBulletsCacheForSummary` 後も適用）。`bulletLinesCoverSlotText` は文字列包含に加え `bulletsAreSimilar` でも同趣旨を検出する。
 
 **経過・悪化傾向**：ユーザーが「ない」「わからない」等と答えた場合や、仕様上の**特定の表示専用**を除き、**スロットに実回答がある限り箇条書きに必ず反映する**（欠けた場合は `injectMissingSlotBulletsFromState` で補完）。表現は軽く書き言葉に整えてよい。
 
@@ -657,14 +657,14 @@ slot_status = {
 - **痛み方（`worsening`）**は1文字でも入力があれば**必ず**先に確保（スコア不問と整合）。**きっかけ**は `polishCausePhraseToWrittenJapanese` で整え**短語化**し、**`＋`列の先頭**（`buildCauseComboShortLabelAsync`／同期 `buildCauseComboShortLabelSync`、ユーザー語の核を残す）。短語候補の逆優先では後回しでも**事実文に別途**入れ得る。並び優先：**痛み方**は常に先、**きっかけ**は他に十分候補があると**短語列では後**（足りなければ繰り上げ）。
 - **出どころ**：**主症状ラベルは入れない**、まとめ箇条書き（`stateAboutBulletsCache` / `buildStateFactsBullets`）と**同系**でよい（キャッシュ優先可）。`comboSlotAllowsGreenYellowCombo`＋**風の初期**（咳・鼻づまり＋`isThroatMainSymptom`）は従来どおり。
 - **🔴**（`📝 Kairoの判断` の組み合わせ行）：`pickRedComboPartsInCandidateOrder` により、**高リスク候補を先**、**足りなければ中リスク**の順に寄せる（`redComboTier`＋`inv` 順）。`gatherRedHighComboCandidatesFromBullets`／`collectRedHighRiskCombinationLabels`。
-- **🟢／🟡 共通（② 意味行）**：`「…」このことから、一時的な〇〇としてよく見られるパターンです。`（**LLM 動的生成・文末「パターンです。」固定**）。組み合わせが組みづらいときの接続は **`今の状態の組み合わせから、`** へ。**🟡 専用の「注意が必要なサインも含まれます。」文末は使わない**（🟢 と同型に統一）。
-- **風の初期症状**（`PAIN`／`INFECTION`、§詳細条件）：**一時的な〇〇**句の代わりに 🟢／🟡 共通で **`風の初期症状としてよく見られるパターンです。`**（LLM 生成・フォールバックとも同一）。事実ゼロは **`これらの症状の組み合わせから、`**（付随の咳等・`isThroatMainSymptom` は従来どおり）。
-- **意味行（②）は LLM 動的生成（本線・🔴と統一の方針）**：本線 async 経路（`buildGreenYellowComboIntegratedParagraphAsync` → `generateGreenYellowStateAboutMeaningLineViaLlm`）では、上記の②パターン文は **組み合わせ＋主症状＋レベル＋windy 例外** を入力に **LLM が1文を動的生成**する。固定テンプレ・一般論は禁止し、「この組み合わせ・この主症状」だからこそ言える具体的な意味を1文で出す（最大4リトライ）。
-  - **文末は固定（🟢／🟡 共通）**：必ず「**パターンです。**」で終える。文末が一致しないときはリトライ（「注意が必要なサインも含まれます。」等の 🟡 旧文末は不可）。
-  - **トーン（🟢／🟡 共通）**：安心寄り（「よく見られる」「一時的」「自然な範囲」等）。煽り・断定・致死語は禁止。「あなたの場合」等の個別化フレーズも禁止。🟡 でも意味文の型は 🟢 と同じ（緊急度の差は **③ 判断の 👉 2 行** で出す）。
-  - **風の初期症状例外（windy）**：プロンプトに「風の初期症状（風邪のかかりはじめ）として見られる」ヒントを渡し、文中に **「風の初期症状」「風邪」「かかりはじめ」** のいずれかを 1 回含めさせる（含まれないときはリトライ）。それ以外（通常）は **「一時的な〇〇」** または **主症状ラベル**に 1 回触れさせる。
-  - **キャッシュ**：`buildStateAboutMeaningCacheKey({ level, mainSymptom, parts, windy })` をキーに `state.stateAboutMeaningCacheByKey` で保持。同一会話内で同じ組み合わせ・主症状・レベル・windy なら **同一文** を再利用し、追加情報やポーリング差し替えでブレないようにする。
-  - **フォールバック**：`OPENAI_API_KEY` 未設定／4回リトライ後も外れたとき・空組み合わせ時は、🟢／🟡 共通の固定文（`一時的な〇〇としてよく見られるパターンです。` ／ `風の初期症状としてよく見られるパターンです。`）に落とす（フォールバック結果もキャッシュ）。同期版 `buildGreenYellowComboIntegratedParagraph`（フォールバック用）も同形。
+- **🟢／🟡 共通（② 意味行）**：`「…」このことから、` ＋ **短い意味1文**（**LLM 動的生成**・**文末テンプレ固定なし**・**全角24〜40字目安**）。組み合わせが組みづらいときの接続は **`今の状態の組み合わせから、`** へ。**🟡 専用の「注意が必要なサインも含まれます。」は使わない**。
+- **風の初期症状**（`PAIN`／`INFECTION`、§詳細条件）：**一時的な〇〇**の長い定型句の代わりに、文中で **風の初期症状／風邪／かかりはじめ** のいずれかを自然に1回含める（短く）。事実ゼロは **`これらの症状の組み合わせから、`**（付随の咳等・`isThroatMainSymptom` は従来どおり）。
+- **意味行（②）は LLM 動的生成（本線）**：`buildGreenYellowComboIntegratedParagraphAsync` → `generateGreenYellowStateAboutMeaningLineViaLlm`。組み合わせ＋主症状＋レベル＋windy を入力に **短く簡潔な1文**（最大4リトライ）。固定テンプレの丸写し・一般論は禁止。
+  - **文末**：**固定しない**（「パターンです。」に合わせる必要はない）。自然な1文で句点終わり。長すぎる文（全角48字超）はリトライ。
+  - **トーン（🟢／🟡 共通）**：安心寄り・短く。煽り・断定・「注意が必要なサイン」等は禁止。🟡 でも意味文の型は 🟢 と同じ（緊急度の差は **③ 👉 2行**）。
+  - **風の初期症状例外（windy）**：文中に **「風の初期症状」「風邪」「かかりはじめ」** のいずれかを1回含める（含まれないときはリトライ）。
+  - **キャッシュ**：`buildStateAboutMeaningCacheKey({ level, mainSymptom, parts, windy })` で同一文を再利用。
+  - **フォールバック**：API 未設定／リトライ失敗時は `greenYellowMeaningLineFallback`（短い固定文。例：`一時的な〇〇として、よくある初期の組み合わせです。`／`風の初期症状として見られやすい組み合わせです。`）。
 - **RED抑制＋超短経過**のとき、**2語**に**せざるを得ない**旧例外は残しうるが、**第三語**として痛み強度**等**を**足して3語**に**できる**なら**3語**を**出す**。**2語**にしたとき**のみ**、短経過1語に**一時的の可能性**を含め、**それ以外**に経過語を**二重**に並べない。
 
 ##### ② 状態の意味（同一段落に内包）
@@ -681,19 +681,19 @@ slot_status = {
 ##### 完成例（🟢・パターン A のとき）
 ```
 「中程度の頭痛＋微熱＋急変なし」このことから、
-一時的な体調不良としてよく見られるパターンです。
+一時的な頭痛として、よくある初期の組み合わせです。
 👉 現時点では、命に関わるような緊急性は低く、ひとまず落ち着いて様子を見てください。
 👉 無理に動かず休息を優先することが、今いちばん正しい対応です。
 ```
 ##### 完成例（🟡・パターン A のとき）
 ```
 「中程度の頭痛＋微熱＋急変なし」このことから、
-一時的な頭痛としてよく見られるパターンです。
+一時的な頭痛として、よくある初期の組み合わせです。
 👉 現時点では、緊急性は低いため、病院に行く必要はありません。
 👉 今日は無理せず休んで体を回復させてください。
 ```
-※② 意味行は 🟢 と**同型**（LLM・文末「パターンです。」）。例の主症状ラベルは実際の `getSyncedMainSymptomDisplayLabel` に合わせる。  
-※**風の初期症状**例外：🟢／🟡 共通で **`風の初期症状としてよく見られるパターンです。`**（「一時的な〇〇として〜」は使わない）。
+※② 意味行は 🟢／🟡 共通（LLM・**短め**・文末固定なし）。例はあくまで参考。  
+※**風の初期症状**例外：文中に風の初期症状系の語を短く1回含める。
 #### 📝 Kairoの判断（🔴のみ・箇条書きの直後）
 🟢🟡とは**別構成**。**箇条書き（`stateAboutBulletsCache`／`buildStateFactsBullets`）は本ブロック内で常に少なくとも 2 行**（「・」）とし、足りない場合は `ensureKairoJudgmentHasMinimumFactBullets` 等で補う。箇条書きが揃っていないまとめは `hasAllSummaryBlocks` では不成立（次段へ進まない）。  
 **組み合わせ行**の**〇〇**は、**まとめ用箇条書きに書いた事実**から短い語に落とす（`gatherRedHighComboCandidatesFromBullets` ＋ `supplementRedComboCandidatesFromAllBulletLines` 等）。**まとめ前確認文の文言・生履歴の抜粋は引用しない**（旧実装のスロット生値のみ・`extractFeatures(historyTextForCare+…)` 由来の 〇〇 追加は行わない）。**主症状そのものは〇〇に含めない**（主症状は意味行の LLM 入力として別途渡す）。

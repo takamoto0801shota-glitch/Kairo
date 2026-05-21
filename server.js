@@ -11,6 +11,8 @@ const PORT = process.env.PORT || 3000;
 const IS_DEBUG = false;
 /** フォールバックを廃止。LLM で必ず成功するようリトライ・工夫する。失敗時は最大5回までリトライ。 */
 const LLM_RETRY_COUNT = 5;
+/** 確認・まとめ箇条書きの文体整形 LLM：全量再送の上限 */
+const BULLET_LLM_POLISH_MAX_ATTEMPTS = 2;
 
 // Middleware
 app.use(cors());
@@ -92,7 +94,7 @@ AI：「頭が痛いのはつらいですよね。
 	・	締め付けられる感じ」
 
 【絶対に守ること】
-- 初回画面専用の「体調の不安、1分で安心に変えます」「今どうするべきか、Kairoが一緒に判断していきます」は、会話中には絶対に表示しない
+- 初回画面専用の「体調の不安、1分で安心に変えます」「なんでも気になることを教えてください」は、会話中には絶対に表示しない
 - これらはクライアント初回バナーのみ。AIの返答には絶対に含めない
 - messages.length === 2 の場合のみ「症状入力後の最初の返答」として扱う
 - それ以外の会話（messages.length > 2）では、通常の質問を続ける
@@ -898,6 +900,13 @@ function initConversationState(input = {}) {
     safetyIntroMainSymptomLabel: null,
     /** 箇条書き LLM 整形が成功した直前の `computeBulletLlmPrePolishFingerprint`（同一なら重複呼び出しを省略） */
     bulletLlmPolishedSourceFingerprint: null,
+    /** 確認文返却後の箇条書き LLM 整形（非同期） */
+    bulletPolishPromise: null,
+    bulletPolishFingerprint: null,
+    bulletPolishReady: false,
+    /** 🤝 共感・判断ブロック LLM の結果キャッシュ（二重呼び出し防止） */
+    cachedStateAboutLineKey: null,
+    cachedStateAboutLineBody: null,
     /** 🟢🟡③ `pickGreenYellowDecisionCoreLines` の A/B。初回のみランダム決定し会話中は固定 */
     greenYellowDecisionCorePattern: null,
     /** 🟡弱/🟡強の内销（表示は 🟡 のまま）。まとめ直前に痛みスコアで同期 */
@@ -1680,7 +1689,7 @@ async function enforceSummaryStructureStrict(text, level, history, state) {
   }
   const lastHdr = level === "🔴" ? "💬 最後に" : "🌱 最後に";
   const lastBody = findLastBlockSectionInSummary(result, level);
-  if (!lastBody.found || !lastBody.body || lastBody.body.length < 20) {
+  if (!lastBody.found || !isSubstantiveLastBlockBody(lastBody.body)) {
     result = await ensureLastBlock(result, level, state);
   }
   return result;
@@ -5035,7 +5044,7 @@ async function replaceStateAboutBlockOnly(summaryText, state, historyText = "") 
   }
   const level = finalizeRiskLevel(state);
   if (level !== "🟢" && level !== "🟡") return summaryText;
-  let aboutLine = await buildStateAboutLineAsync(state, level);
+  let aboutLine = await getCachedOrBuildStateAboutLineAsync(state, level);
   if (!String(aboutLine || "").trim()) {
     aboutLine = buildGreenYellowStateAboutBlock(state, level);
   }
@@ -5079,15 +5088,60 @@ async function replaceImmediateActionsBlockOnly(summaryText, state, historyText 
   }
 }
 
-/**
- * 先行まとめ（GET /api/summary-progress）用の部分セクション。
- * 「Kairoの判断」は箇条書き・共感・判断・網羅検証まで含めた**完全形**をまとめ本線で組み立てるため、ここでは出さない（箇条書きだけが先行すると不完全表示になる）。
- */
+/** 先行表示用：🤝 ブロック（同期フォールバックの👉まで。後から LLM 版に差し替え可） */
+function buildEarlyHandshakeSectionText(state) {
+  if (!state) return null;
+  const level = finalizeRiskLevel(state);
+  if (level === "🔴") {
+    ensureKairoJudgmentHasMinimumFactBullets(state, MIN_KAIRO_JUDGMENT_FACT_BULLETS);
+    const bullets = getKairoJudgmentFactBullets(state, { forSummary: true }).join("\n");
+    const empathy = buildRedStateAboutEmpathyBlock(state);
+    return ["📝 Kairoの判断", bullets, empathy ? "" : null, empathy].filter((x) => x !== null).join("\n");
+  }
+  if (level !== "🟢" && level !== "🟡") return null;
+  const aboutSync = buildGreenYellowStateAboutBlock(state, level);
+  const body = buildGreenYellowHandshakeBlockBodySync(state, aboutSync);
+  return ["🤝 Kairoの判断", body].join("\n");
+}
+
 function buildSummaryPartialSectionsBeforeLlm(state) {
   if (!state) return [];
   const level = finalizeRiskLevel(state);
   const intro = `${level} ここまでの情報を整理します\n${buildSummaryIntroTemplate()}`;
-  return [intro];
+  const sections = [intro];
+  const earlyHandshake = buildEarlyHandshakeSectionText(state);
+  if (earlyHandshake) sections.push(earlyHandshake);
+  return sections;
+}
+
+function refreshSummaryPartialSectionsAfterBulletsOrHandshake(state) {
+  if (!state?.summaryGenerating) return;
+  state.summaryPartialSections = buildSummaryPartialSectionsBeforeLlm(state);
+}
+
+function refreshSummaryPartialSectionsAfterHandshakeLlm(state, aboutLine, level) {
+  if (!state?.summaryGenerating) return;
+  const lv = level === "🟢" || level === "🟡" ? level : finalizeRiskLevel(state);
+  const intro = `${lv} ここまでの情報を整理します\n${buildSummaryIntroTemplate()}`;
+  const body = buildGreenYellowHandshakeBlockBodySync(state, aboutLine);
+  const handshake = ["🤝 Kairoの判断", body].join("\n");
+  state.summaryPartialSections = [intro, handshake];
+}
+
+/** 整形済み箇条書き＋🤝 LLM 完了後、生成中の summaryText の 🤝 ブロックだけ差し替え */
+async function upgradeSummaryTextHandshakeIfGenerating(conversationId) {
+  const state = conversationState[conversationId];
+  if (!state?.summaryGenerating || !state.summaryText) return;
+  const level = finalizeRiskLevel(state);
+  if (level !== "🟢" && level !== "🟡") return;
+  if (!textIncludesHandshakeAboutHeader(state.summaryText)) return;
+  try {
+    const aboutLine = await getCachedOrBuildStateAboutLineAsync(state, level);
+    state.summaryText = await replaceStateAboutBlockOnly(state.summaryText, state, state.historyTextForCare || "");
+    refreshSummaryPartialSectionsAfterHandshakeLlm(state, aboutLine, level);
+  } catch (_) {
+    /* ignore */
+  }
 }
 
 function setSummaryPartialSectionsFromFinalText(state, text, level) {
@@ -5140,19 +5194,32 @@ function truncateLastBlockBodyToMaxSentences(body, maxSentences = 2) {
   return cutAt >= 0 ? trimmed.slice(0, cutAt + 1).trim() : trimmed;
 }
 
+function isSubstantiveLastBlockBody(body) {
+  const stripped = String(body || "")
+    .replace(/⸻/g, "")
+    .replace(/\s+/g, "")
+    .trim();
+  return stripped.length >= 20;
+}
+
 function findLastBlockSectionInSummary(text, level) {
   const header = level === "🔴" ? "💬 最後に" : "🌱 最後に";
   const altHeader = level === "🔴" ? "🌱 最後に" : "💬 最後に";
   const lines = String(text || "").split("\n");
-  const idx = lines.findIndex(
-    (l) => lineMatchesSummaryHeaderFlex(l, header) || lineMatchesSummaryHeaderFlex(l, altHeader)
-  );
-  if (idx === -1) return { found: false, body: "", foundHeader: null };
-  const foundHeader = lineMatchesSummaryHeaderFlex(lines[idx], header) ? header : altHeader;
-  const next = lines.findIndex((l, i) => i > idx && /^(🟢|🟡|🔴|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(l));
-  const end = next === -1 ? lines.length : next;
-  const body = lines.slice(idx + 1, end).join("\n").trim();
-  return { found: true, body, foundHeader };
+  let best = { found: false, body: "", foundHeader: null };
+  for (let idx = 0; idx < lines.length; idx++) {
+    const line = lines[idx];
+    if (!lineMatchesSummaryHeaderFlex(line, header) && !lineMatchesSummaryHeaderFlex(line, altHeader)) {
+      continue;
+    }
+    const foundHeader = lineMatchesSummaryHeaderFlex(line, header) ? header : altHeader;
+    const next = lines.findIndex((l, i) => i > idx && /^(🟢|🟡|🔴|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(l));
+    const end = next === -1 ? lines.length : next;
+    const body = lines.slice(idx + 1, end).join("\n").trim();
+    best = { found: true, body, foundHeader };
+    if (isSubstantiveLastBlockBody(body)) break;
+  }
+  return best;
 }
 
 /** 🌱/💬 最後にブロック：LLM生成を優先。既存ブロックに十分な内容があればそのまま。欠落時はLLMで生成。本文は2文以内。 */
@@ -5161,7 +5228,7 @@ async function ensureLastBlock(text, level, state = null, contextText = "") {
   const header = level === "🔴" ? "💬 最後に" : "🌱 最後に";
   const altHeader = level === "🔴" ? "🌱 最後に" : "💬 最後に";
   const { found, body, foundHeader } = findLastBlockSectionInSummary(text, level);
-  if (found && body && body.length >= 20) {
+  if (found && isSubstantiveLastBlockBody(body)) {
     const truncated = truncateLastBlockBodyToMaxSentences(body, 2);
     if (truncated !== body) {
       const block = `${foundHeader}\n${truncated}`;
@@ -12386,13 +12453,13 @@ function buildTriageQuestionAnswerTranscriptForBullets(state) {
 
 /**
  * 箇条書き全体を1回の LLM で読みやすい日本語に整える。元はスロット組み立てでかなりぎこちないため、文体の磨き上げが主目的。
- * 事実の追加・病名推測・数値の捏造は禁止。JSON の bullets のみを返す。
- * `OPENAI_API_KEY` は必須。失敗時は最大 `LLM_RETRY_COUNT` 回再試行し、成功時に `bulletLlmPolishedSourceFingerprint` を記録する。
+ * 失敗時は最大 `BULLET_LLM_POLISH_MAX_ATTEMPTS` 回まで全量再送し、それでも網羅不足ならヒューリスティックで確定（throw しない）。
  */
 async function polishConfirmationBulletsWithLlm(state) {
   if (!state) return;
   if (!process.env.OPENAI_API_KEY) {
-    throw new Error("KAIRO: OPENAI_API_KEY is required for confirmation/summary bullet LLM polish.");
+    finalizeStateAboutBulletsCacheForSummary(state);
+    return;
   }
   const preStash = Array.isArray(state.stateAboutBulletsCache) ? state.stateAboutBulletsCache.slice() : [];
   if (preStash.length === 0) return;
@@ -12444,7 +12511,16 @@ async function polishConfirmationBulletsWithLlm(state) {
     "",
     `【自動生成ドラフト（参考・必ずそのまま従わない）】\n${bulletText.slice(0, 7500)}`,
   ].join("\n");
-  for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
+  const applyMergedBullets = (preferredLlm, merged) => {
+    state.bulletLlmPreferredLines = preferredLlm.slice();
+    state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
+      sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(merged), state).slice(0, maxBullets),
+      state
+    );
+    state.bulletLlmPolishedSourceFingerprint = sourceFp;
+  };
+
+  for (let attempt = 0; attempt < BULLET_LLM_POLISH_MAX_ATTEMPTS; attempt++) {
     state.stateAboutBulletsCache = preStash.slice();
     try {
       const completion = await openai.chat.completions.create({
@@ -12478,13 +12554,20 @@ async function polishConfirmationBulletsWithLlm(state) {
       merged = reconcileBulletCoverageGaps(state, merged, { maxOut: maxBullets });
       const cov = validateCompleteBulletCoverage(state, merged);
       if (cov.ok) {
-        state.bulletLlmPreferredLines = preferredLlm.slice();
-        state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
-          sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(merged), state).slice(0, maxBullets),
-          state
-        );
-        state.bulletLlmPolishedSourceFingerprint = sourceFp;
+        applyMergedBullets(preferredLlm, merged);
         return;
+      }
+      if (attempt === BULLET_LLM_POLISH_MAX_ATTEMPTS - 1 && (cov.missing || []).length > 0) {
+        const fixed = await polishConfirmationBulletsIncrementalCoverageFix(
+          state,
+          merged,
+          cov.missing,
+          maxBullets
+        );
+        if (fixed) {
+          applyMergedBullets(preferredLlm, fixed);
+          return;
+        }
       }
       console.warn("[KAIRO] polishConfirmationBulletsWithLlm: coverage not ok, retrying", {
         attempt,
@@ -12495,12 +12578,54 @@ async function polishConfirmationBulletsWithLlm(state) {
       console.warn("[KAIRO] polishConfirmationBulletsWithLlm attempt", attempt, e?.message || e);
     }
   }
+  let fallback = sanitizeBulletPoints(preStash, state);
+  fallback = reconcileBulletCoverageGaps(state, fallback, { maxOut: maxBullets });
   state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
-    sanitizeBulletPoints(preStash, state),
+    sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(fallback), state).slice(0, maxBullets),
     state
   );
   state.bulletLlmPolishedSourceFingerprint = null;
-  throw new Error("KAIRO: polishConfirmationBulletsWithLlm failed after all retries (coverage or API).");
+  finalizeStateAboutBulletsCacheForSummary(state);
+}
+
+/** 網羅不足時のみ：不足スロット追記用の短い LLM（1回）。失敗時は null。 */
+async function polishConfirmationBulletsIncrementalCoverageFix(state, merged, missing, maxBullets) {
+  if (!state || !process.env.OPENAI_API_KEY || !Array.isArray(missing) || missing.length === 0) {
+    return null;
+  }
+  const existing = (merged || []).join("\n");
+  const missingText = missing.slice(0, 8).join("\n");
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content:
+            '医療チャットの箇条書き編集。既存の「・」行は維持し、不足した事実だけを追加する。JSONのみ: {"bullets":["・..."]}。敬語禁止。新事実の捏造禁止。',
+        },
+        {
+          role: "user",
+          content: `【既存】\n${existing.slice(0, 4000)}\n\n【不足（必ず「・」行で追記）】\n${missingText}`,
+        },
+      ],
+      temperature: 0.15,
+      max_tokens: 500,
+    });
+    const parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
+    if (!parsed?.bullets?.length) return null;
+    const add = parsed.bullets
+      .map((s) => {
+        const inner = String(s || "").replace(/^・\s*/, "").trim();
+        return inner ? `・${inner}` : null;
+      })
+      .filter(Boolean);
+    let out = dedupeBulletsPreferPreferredWhenSimilar([...(merged || []), ...add], merged || []);
+    out = reconcileBulletCoverageGaps(state, sanitizeBulletPoints(out, state), { maxOut: maxBullets });
+    return validateCompleteBulletCoverage(state, out).ok ? out : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 /**
@@ -12537,6 +12662,98 @@ async function buildStateFactsBulletsTwoStage(state, opts = {}) {
   if (!state) return null;
   syncHistoryTextForCareFromConversation(state);
   return enforceConfirmationBulletsCompleteness(state, opts);
+}
+
+/** 確認文即時返却用：同期下書きのみ（箇条書き LLM は含まない） */
+async function buildConfirmationBulletsDraftSync(state, opts = {}) {
+  if (!state) return [];
+  syncHistoryTextForCareFromConversation(state);
+  enforceConfirmationBulletsCompletenessCore(state);
+  if (opts?.mergeExtraFacts) {
+    mergeConfirmationExtraFactsIntoStateBulletsCache(state);
+  }
+  await supplementStateBulletsFromUncoveredUserUtterances(state);
+  finalizeStateAboutBulletsCacheForSummary(state);
+  return (state.stateAboutBulletsCache || []).slice(0, resolveConfirmationBulletsMaxForState(state));
+}
+
+function stateAboutLineCacheKey(state, level) {
+  const bullets = Array.isArray(state.stateAboutBulletsCache)
+    ? state.stateAboutBulletsCache.join("\x1e")
+    : "";
+  return `${level}|${bullets}|${state.bulletLlmPolishedSourceFingerprint || ""}|${state.bulletPolishReady ? "1" : "0"}`;
+}
+
+/** 🤝 共感・判断（🟢/🟡）を1会話1キーでキャッシュ */
+async function getCachedOrBuildStateAboutLineAsync(state, level) {
+  const lv = level === "🟢" || level === "🟡" ? level : finalizeRiskLevel(state);
+  if (lv !== "🟢" && lv !== "🟡") {
+    return buildStateAboutEmpathyAndJudgmentAsync(state, lv);
+  }
+  const key = stateAboutLineCacheKey(state, lv);
+  if (state.cachedStateAboutLineKey === key && String(state.cachedStateAboutLineBody || "").trim()) {
+    return state.cachedStateAboutLineBody;
+  }
+  let aboutLine = await buildGreenYellowStateAboutBlockAsync(state, lv);
+  if (!String(aboutLine || "").trim()) {
+    aboutLine = buildGreenYellowStateAboutBlock(state, lv);
+  }
+  state.cachedStateAboutLineKey = key;
+  state.cachedStateAboutLineBody = aboutLine;
+  return aboutLine;
+}
+
+function invalidateStateAboutLineCache(state) {
+  if (!state) return;
+  state.cachedStateAboutLineKey = null;
+  state.cachedStateAboutLineBody = null;
+}
+
+/** 確認文返却後：箇条書き LLM をバックグラウンド実行しスナップショットを更新 */
+function startBackgroundBulletPolish(conversationId) {
+  const state = conversationState[conversationId];
+  if (!state) return Promise.resolve();
+  const fp = computeBulletLlmPrePolishFingerprint(state);
+  if (
+    state.bulletPolishPromise &&
+    state.bulletPolishFingerprint === fp &&
+    state.bulletPolishReady
+  ) {
+    return state.bulletPolishPromise;
+  }
+  if (state.bulletPolishPromise && state.bulletPolishFingerprint === fp) {
+    return state.bulletPolishPromise;
+  }
+  state.bulletPolishFingerprint = fp;
+  state.bulletPolishReady = false;
+  state.bulletPolishPromise = (async () => {
+    try {
+      const prePolishFp = computeBulletLlmPrePolishFingerprint(state);
+      if (state.bulletLlmPolishedSourceFingerprint !== prePolishFp) {
+        await polishConfirmationBulletsWithLlm(state);
+      }
+      finalizeStateAboutBulletsCacheForSummary(state);
+      snapshotConfirmationBulletsForSummary(state);
+      state.bulletPolishReady = true;
+      invalidateStateAboutLineCache(state);
+      refreshSummaryPartialSectionsAfterBulletsOrHandshake(state);
+      upgradeSummaryTextHandshakeIfGenerating(conversationId);
+    } catch (e) {
+      console.error("[KAIRO] startBackgroundBulletPolish", e?.message || e);
+      snapshotConfirmationBulletsForSummary(state);
+      state.bulletPolishReady = true;
+    }
+  })();
+  return state.bulletPolishPromise;
+}
+
+async function awaitBulletPolishForSummary(state) {
+  if (!state?.bulletPolishPromise) return;
+  try {
+    await state.bulletPolishPromise;
+  } catch (_) {
+    /* 下書きのまま続行 */
+  }
 }
 
 function hasConfirmationBulletsSnapshot(state) {
@@ -13518,7 +13735,7 @@ function collectGreenYellowLowMediumCombinationParts(state) {
 
 /**
  * PAIN/INFECTION・4問目付随で咳・鼻詰まり等が回答に含まれるか（複合「発熱と咳」も含む）。
- * KAIRO_SPEC：②の意味文を「風の初期症状としてよく見られるパターンです」に固定する条件の一部。
+ * KAIRO_SPEC：②の意味文で windy 例外（風の初期症状系の語を短い1文に含める）の判定の一部。
  */
 function associatedSymptomsImpliesCoughOrNasalForWindPattern(state) {
   const raw = String(state?.slotAnswers?.associated_symptoms || "").trim();
@@ -13537,7 +13754,7 @@ function associatedSymptomsImpliesCoughOrNasalForWindPattern(state) {
 }
 
 /**
- * 🤝🟢🟡 ②「一時的な〇〇として〜」の代わりに「風の初期症状としてよく見られるパターンです」を使うか。
+ * 🤝🟢🟡 ② windy 時は「一時的な〇〇」定型の代わりに風の初期症状系の語を含めるか。
  * PAIN/INFECTION かつ（喉主症状、または4問目で咳・鼻詰まり等）。
  */
 function shouldUseWindyColdOnsetPatternForStateAbout(state) {
@@ -13640,19 +13857,35 @@ function buildGreenYellowComboIntegratedParagraph(state, level, parts, causeShor
   const windy = shouldUseWindyColdOnsetPatternForStateAbout(state);
   const clause = buildGreenYellowComboPlusClause(state, parts, causeShortOverride);
 
-  if (windy) {
-    const lead = clause ? `${clause}このことから、` : `これらの症状の組み合わせから、`;
-    return `${lead}\n風の初期症状としてよく見られるパターンです。`;
-  }
+  const lead = clause
+    ? `${clause}このことから、`
+    : windy
+      ? `これらの症状の組み合わせから、`
+      : `今の状態の組み合わせから、`;
+  return `${lead}\n${greenYellowMeaningLineFallback(state, windy)}`;
+}
 
-  const noun = greenYellowPatternNounForTemporary(state);
-  const lead = clause ? `${clause}このことから、` : `今の状態の組み合わせから、`;
-  return `${lead}\n一時的な${noun}としてよく見られるパターンです。`;
+/** 🟢/🟡 ②意味行の同期フォールバック（短め・文末固定なし） */
+function greenYellowMeaningLineFallback(state, windy = false) {
+  const noun = greenYellowPatternNounForTemporary(state) || "体調不良";
+  if (windy) return "風の初期症状として見られやすい組み合わせです。";
+  return `一時的な${noun}として、よくある初期の組み合わせです。`;
+}
+
+/** 🟢/🟡 ②意味行：LLM 1文の検証（短さ・禁止語。文末テンプレ固定はしない） */
+function isAcceptableGreenYellowMeaningLineFromLlm(text, options = {}) {
+  const t = String(text || "").trim();
+  if (!t || t.length < 6) return false;
+  if (t.length > 48) return false;
+  if (!/[。．]$/.test(t)) return false;
+  if (/注意が必要なサイン|すぐ受診|危ない|あなたの場合|あなたには/.test(t)) return false;
+  if (options.windy && !/(風の初期|風邪|かかりはじめ)/.test(t)) return false;
+  return true;
 }
 
 /**
  * 同上の **async 版（本線）**：意味行（②）を `generateGreenYellowStateAboutMeaningLineViaLlm` で
- * 組み合わせ＋主症状から LLM 動的生成する。文末は 🟢／🟡 共通で「パターンです。」。
+ * 組み合わせ＋主症状から LLM 動的生成する（短め・文末固定なし）。
  * 風の初期症状例外時は LLM プロンプトにヒントを渡して語を含めさせる。
  */
 async function buildGreenYellowComboIntegratedParagraphAsync(state, level, parts, causeShortOverride) {
@@ -13876,6 +14109,11 @@ function buildGreenYellowStateAboutBlock(state, level) {
 
 /** 🤝🟢🟡 同上。組み合わせ「〇〇」は LLM で削ぎ落とし（KAIRO_SPEC 605）。意味行（②）も LLM で動的生成（KAIRO_SPEC §🤝🟢🟡 ②）。 */
 async function buildGreenYellowStateAboutBlockAsync(state, level) {
+  const lv = level === "🟡" || level === "🟢" ? level : finalizeRiskLevel(state);
+  const cacheKey = stateAboutLineCacheKey(state, lv);
+  if (state.cachedStateAboutLineKey === cacheKey && String(state.cachedStateAboutLineBody || "").trim()) {
+    return state.cachedStateAboutLineBody;
+  }
   const rawParts = collectGreenYellowLowMediumCombinationParts(state);
   const finalized = await finalizeCombinationPartsWithLlm(state, rawParts);
   const guarded = applyGreenYellowComboUserWordGuards(
@@ -13886,10 +14124,13 @@ async function buildGreenYellowStateAboutBlockAsync(state, level) {
   if (parts.length < 2) {
     parts = finalized.map((p) => String(p || "").trim()).filter(Boolean);
   }
-  const causeShort = await buildCauseComboShortLabelAsync(state);
-  const integrated = await buildGreenYellowComboIntegratedParagraphAsync(state, level, parts, causeShort);
+  const causeShort = buildCauseComboShortLabelSync(state);
+  const integrated = await buildGreenYellowComboIntegratedParagraphAsync(state, lv, parts, causeShort);
   const core = pickGreenYellowDecisionCoreLines(state);
-  return [integrated, ...core].join("\n");
+  const body = [integrated, ...core].join("\n");
+  state.cachedStateAboutLineKey = cacheKey;
+  state.cachedStateAboutLineBody = body;
+  return body;
 }
 
 /** 🔴「📝 Kairoの判断」：slotNormalized の HIGH のみを短語にし、＋でつなぐ（KAIRO_SPEC・LLM禁止） */
@@ -14366,9 +14607,8 @@ ${mainSymptom}
 
 /**
  * 🟢/🟡「意味」1行：組み合わせ＋主症状から LLM 生成（最大4リトライ）。会話キャッシュあり。
- * 文末は 🟢／🟡 共通で「パターンです。」（🟡専用の「注意が必要なサインも含まれます。」は使わない）。
- * 風の初期症状例外時は LLM プロンプトに「風の初期症状として見られる」旨をヒントとして渡す（語の挿入を要求）。
- * 失敗時のみ従来固定文にフォールバック。
+ * **短め・簡潔**。文末テンプレ（「パターンです。」等）の固定はしない。
+ * 風の初期症状例外時はプロンプトで「風の初期症状」系の語を1回含める。
  */
 async function generateGreenYellowStateAboutMeaningLineViaLlm(state, level, parts, options = {}) {
   const lv = level === "🟡" ? "🟡" : "🟢";
@@ -14376,7 +14616,6 @@ async function generateGreenYellowStateAboutMeaningLineViaLlm(state, level, part
   const noun = greenYellowPatternNounForTemporary(state) || "体調不良";
   const joined = (parts || []).map((p) => String(p || "").trim()).filter(Boolean).join("＋");
 
-  const exactTail = "パターンです。";
   const cacheKey = buildStateAboutMeaningCacheKey({
     level: lv,
     mainSymptom: noun,
@@ -14386,32 +14625,25 @@ async function generateGreenYellowStateAboutMeaningLineViaLlm(state, level, part
   const cached = getCachedStateAboutMeaningLine(state, cacheKey);
   if (cached) return cached;
 
-  const pickFallback = () => {
-    if (windy) {
-      return `風の初期症状としてよく見られるパターンです。`;
-    }
-    return `一時的な${noun}としてよく見られるパターンです。`;
-  };
-
   if (!process.env.OPENAI_API_KEY || !joined) {
-    const f = pickFallback();
+    const f = greenYellowMeaningLineFallback(state, windy);
     setCachedStateAboutMeaningLine(state, cacheKey, f);
     return f;
   }
 
   const lvDescription =
     lv === "🟡"
-      ? "中等度（🟡）。意味文の書き方・文末は 🟢 と同一（「よく見られるパターンです。」）。トーンは安心寄り：「よく見られる」「一時的」「自然な範囲」など。不安を煽らない。断定・恐怖喚起は禁止。"
-      : "緊急性は低い側（🟢）。トーンは安心寄り：「よく見られる」「一時的」「自然な範囲」などの語感を使い、不安を煽らない。断定・恐怖喚起は禁止。";
+      ? "中等度（🟡）。🟢 と同じく短く安心寄り。不安を煽らない。断定・恐怖喚起は禁止。"
+      : "緊急性は低い側（🟢）。短く安心寄り。断定・恐怖喚起は禁止。";
 
   const windyHint = windy
-    ? "この組み合わせは『風の初期症状（風邪のかかりはじめ）として見られるパターン』に当てはまる。文中にその趣旨が伝わる語（例：『風の初期症状』『風邪のかかりはじめ』など）を必ず1回だけ自然に含めること。"
-    : `主症状（${noun}）に触れる、または「一時的な${noun}」のような語を1回含めること（過度に繰り返さない）。`;
+    ? "風の初期症状（風邪のかかりはじめ）として見られやすい趣旨を、短い1文に含める（「風の初期症状」「風邪」「かかりはじめ」のいずれか1回）。"
+    : `主症状（${noun}）に軽く触れるか「一時的な${noun}」のニュアンスを含める（冗長に繰り返さない）。`;
 
   const systemPrompt = [
     "あなたは医療判断を補助する説明生成AIです。",
-    "「症状の組み合わせ＋主症状」から、組み合わせ全体としての意味を1文で示してください。固定テンプレ・一般論ではなく、「この組み合わせ・この主症状」だからこそ言える具体的な意味を出すこと。",
-    "🟢 でも 🟡 でも、意味文の型は同じ（文末は必ず「パターンです。」）。🟡 用の「注意が必要なサインも含まれます」など別文末は禁止。",
+    "「症状の組み合わせ＋主症状」から、この組み合わせ全体の意味を**短く簡潔な1文**で示す。固定テンプレの言い回しをそのまま並べない。",
+    "🟢 でも 🟡 でも同じルール。「注意が必要なサインも含まれます」など煽り・受診急ぎの語尾は禁止。",
     "",
     `【症状の組み合わせ】${joined}`,
     `【主症状】${noun}`,
@@ -14419,13 +14651,12 @@ async function generateGreenYellowStateAboutMeaningLineViaLlm(state, level, part
     `【文脈ヒント】${windyHint}`,
     "",
     "【ルール】",
-    "・必ず1文（改行なし）。",
-    `・文末は必ず「${exactTail}」で終える（句点まで含めて出力。「${exactTail}」以外の語尾は禁止）。`,
-    "・安心を阻害する語（例：「危険」「危ない」「すぐ受診」「注意が必要なサインも含まれます」など）は禁止。",
-    "・「あなたの場合」「あなたには」などの個別化フレーズは禁止。",
-    "・抽象語（「状態」「出方」「感じ」など）の単独使用は避ける。",
-    "・組み合わせ全体としての意味を述べる。単一症状の説明は禁止。",
-    "・本文の1文だけを出力する（見出し・前置きは不要・引用括弧は付けない）。",
+    "・必ず1文のみ（改行なし）。**全角24〜40字程度**を目安に短く（長い説明・二重表現は禁止）。",
+    "・文末は**固定しない**（「パターンです。」に合わせる必要はない）。自然な句点で終える。",
+    "・「としてよく見られるパターンです」のような長い定型句は避け、言い切りを短くする。",
+    "・安心を阻害する語（危険・すぐ受診・注意が必要なサイン等）は禁止。",
+    "・「あなたの場合」等の個別化は禁止。組み合わせ全体の意味を述べる。",
+    "・本文の1文だけ出力（見出し・引用括弧なし）。",
   ].join("\n");
 
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -14434,10 +14665,10 @@ async function generateGreenYellowStateAboutMeaningLineViaLlm(state, level, part
         model: "gpt-4o-mini",
         messages: [
           { role: "system", content: systemPrompt },
-          { role: "user", content: "上記に従い、ルール通りの1文だけを出力してください。" },
+          { role: "user", content: "上記に従い、短い1文だけを出力してください。" },
         ],
         temperature: 0.3 + attempt * 0.08,
-        max_tokens: 240,
+        max_tokens: 96,
       });
       let text = String(completion?.choices?.[0]?.message?.content || "").trim();
       text = text
@@ -14445,16 +14676,14 @@ async function generateGreenYellowStateAboutMeaningLineViaLlm(state, level, part
         .replace(/\n+/g, " ")
         .replace(/[」』]$/g, "")
         .trim();
-      if (!text) continue;
-      if (!text.endsWith(exactTail)) continue;
-      if (windy && !/(風の初期|風邪|かかりはじめ)/.test(text)) continue;
+      if (!isAcceptableGreenYellowMeaningLineFromLlm(text, { windy })) continue;
       setCachedStateAboutMeaningLine(state, cacheKey, text);
       return text;
     } catch (_) {
       /* retry */
     }
   }
-  const f = pickFallback();
+  const f = greenYellowMeaningLineFallback(state, windy);
   setCachedStateAboutMeaningLine(state, cacheKey, f);
   return f;
 }
@@ -14628,6 +14857,9 @@ async function buildStateAboutLineAsync(state, level) {
     level === "🟢" || level === "🟡" || level === "🔴"
       ? level
       : "🟡";
+  if (lv === "🟢" || lv === "🟡") {
+    return getCachedOrBuildStateAboutLineAsync(state, lv);
+  }
   return buildStateAboutEmpathyAndJudgmentAsync(state, lv);
 }
 
@@ -18170,28 +18402,16 @@ function buildGreenYellowHandshakeBlockBodySync(state, aboutLine) {
   return lines.join("\n");
 }
 
+/** @deprecated ブロック組み立て本線では未使用（🤝 は buildSummaryByBlocksPipelineAsync で一度だけ組み立て） */
 async function normalizeStateBlockForGreenYellowAsync(text, state) {
   if (!text) return text;
-  const lines = text.split("\n");
-  const start = lines.findIndex((line) => isHandshakeStateAboutHeaderLine(line));
-  if (start === -1) return text;
-  const end = lines.findIndex(
-    (line, idx) =>
-      idx > start && /^\s*(✅|⏳|🚨|💊|🌱|🏥|💬)\s/.test(line)
-  );
-  const sliceEnd = end >= 0 ? end : lines.length;
   const level = finalizeRiskLevel(state);
   if (level !== "🟢" && level !== "🟡") return text;
-  if (!applyConfirmationBulletsSnapshotToCache(state)) {
-    finalizeStateAboutBulletsCacheForSummary(state);
+  if (!textIncludesHandshakeAboutHeader(text)) return text;
+  if (!handshakeStateBlockNeedsEmpathy(text) && summaryJudgmentBulletsCoverFilledSlots(text, state)) {
+    return text;
   }
-  let aboutLine = await buildStateAboutLineAsync(state, level);
-  if (!String(aboutLine || "").trim()) {
-    aboutLine = buildGreenYellowStateAboutBlock(state, level);
-  }
-  const body = buildGreenYellowHandshakeBlockBodySync(state, aboutLine);
-  const newBlock = ["🤝 Kairoの判断", body];
-  return [...lines.slice(0, start), ...newBlock, ...lines.slice(sliceEnd)].join("\n");
+  return replaceStateAboutBlockOnly(text, state, state?.historyTextForCare || "");
 }
 
 async function buildLocalSummaryFallback(level, history, state) {
@@ -19150,7 +19370,179 @@ function getOrInitConversationState(conversationId) {
   return conversationState[conversationId];
 }
 
-/** 確認文表示と同時に先行してまとめを生成。箇条書きは確認文返却前に twoStage 済み想定（同一内容なら本関数内の twoStage で箇条書き LLM はスキップ）。失敗時は buildLocalSummaryFallback。 */
+/**
+ * まとめ全文 LLM を使わずブロック単位で組み立て（✅・⏳・🌱 は並列、🤝 はキャッシュ付き1回）。
+ */
+async function buildSummaryByBlocksPipelineAsync(level, history, state, historyTextForOtc, opts = {}) {
+  const { epochAtStart } = opts;
+  await awaitBulletPolishForSummary(state);
+  if (state.summaryGenerationEpoch !== epochAtStart) return null;
+
+  if (!applyConfirmationBulletsSnapshotToCache(state)) {
+    finalizeStateAboutBulletsCacheForSummary(state);
+  }
+  state.summaryPartialSections = buildSummaryPartialSectionsBeforeLlm(state);
+
+  if (level === "🔴") {
+    state.decisionLevel = "🔴";
+    const locationContext = state.locationContext || {};
+    const hospitalRec = buildHospitalRecommendationDetail(
+      state,
+      locationContext,
+      state.clinicCandidates,
+      state.hospitalCandidates
+    );
+    state.hospitalRecommendation = hospitalRec;
+    const [memoJudgment, redActions, closing] = await Promise.all([
+      (async () => {
+        ensureKairoJudgmentHasMinimumFactBullets(state, MIN_KAIRO_JUDGMENT_FACT_BULLETS);
+        return [
+          "📝 Kairoの判断",
+          getKairoJudgmentFactBullets(state, { forSummary: true }).join("\n"),
+          "",
+          await buildStateAboutEmpathyAndJudgmentAsync(state, "🔴"),
+        ].join("\n");
+      })(),
+      Promise.resolve(buildRedImmediateActionsBlock(state, historyTextForOtc)),
+      generateLastBlockWithLlm("🔴", state, historyTextForOtc),
+    ]);
+    if (state.summaryGenerationEpoch !== epochAtStart) return null;
+    const hospitalBlock = buildHospitalBlock(state, historyTextForOtc, hospitalRec);
+    return sanitizeSummaryBullets(
+      [
+        `🔴 ここまでの情報を整理します\n${buildSummaryIntroTemplate()}`,
+        "",
+        memoJudgment,
+        redActions,
+        "🏥 受診先の候補",
+        hospitalBlock.replace(/^🏥 受診先の候補\n/, ""),
+        closing,
+      ].join("\n"),
+      state
+    );
+  }
+
+  const aboutPromise = getCachedOrBuildStateAboutLineAsync(state, level).then((aboutLine) => {
+    if (state.summaryGenerationEpoch === epochAtStart) {
+      refreshSummaryPartialSectionsAfterHandshakeLlm(state, aboutLine, level);
+    }
+    return aboutLine;
+  });
+
+  const [aboutLine, immediateBlock, outlookBlock, closing] = await Promise.all([
+    aboutPromise,
+    buildImmediateActionsBlock(level, state, historyTextForOtc, null),
+    (async () => (await buildOutlookBlockWithLlm(state).catch(() => null)) || buildOutlookBlock(state))(),
+    generateLastBlockWithLlm(level, state, historyTextForOtc),
+  ]);
+
+  if (state.summaryGenerationEpoch !== epochAtStart) return null;
+
+  const handshakeBody = buildGreenYellowHandshakeBlockBodySync(state, aboutLine);
+  let text = [
+    `${level} ここまでの情報を整理します`,
+    buildSummaryIntroTemplate(),
+    "",
+    "🤝 Kairoの判断",
+    handshakeBody,
+    "",
+    immediateBlock,
+    "",
+    outlookBlock,
+    "",
+    closing,
+  ]
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n");
+
+  if (level === "🟡") {
+    text = ensurePainInfectionYellowFirstAction(text, level, state);
+  }
+  return sanitizeSummaryBullets(text, state);
+}
+
+/** ブロック組み立て後の正規化・OTC・最後に等（🤝・✅ の再 LLM は省略可） */
+async function applySummaryPostProcessChain(
+  aiResponse,
+  level,
+  state,
+  history,
+  historyTextForOtc,
+  options = {}
+) {
+  const {
+    otcCategory = "pain_fever",
+    otcWarningIndex = 0,
+    skipHandshakeEnsure = false,
+    skipImmediateReensure = false,
+    immediateActionPlan = null,
+  } = options;
+  let text = aiResponse;
+  text = normalizeSummaryLevel(text, level);
+  text = ensureYellowOtcBlock(
+    text,
+    level,
+    otcCategory,
+    otcWarningIndex,
+    state.pharmacyRecommendation,
+    state.otcExamples,
+    state.pharmacyRecommendation?.preface
+  );
+  text = ensureGreenHeaderForYellow(text, level);
+  if (!skipImmediateReensure && (level === "🟢" || level === "🟡")) {
+    text = await ensureImmediateActionsBlock(text, level, state, historyTextForOtc, immediateActionPlan);
+  }
+  text = enforceYellowOtcPositionStrict(text, level);
+  if (level === "🔴") {
+    text = await ensureHospitalMemoBlock(text, state, historyTextForOtc);
+    text = await ensureRedImmediateActionsBlock(text, state, historyTextForOtc, immediateActionPlan);
+    text = ensureHospitalBlock(text, state, historyTextForOtc);
+  }
+  if (
+    level === "🔴" &&
+    state.hospitalRecommendation?.name &&
+    (!text.includes(state.hospitalRecommendation.name) ||
+      !text.includes("タイプ：") ||
+      !text.includes("理由："))
+  ) {
+    text = await buildLocalSummaryFallback(level, history, state);
+  }
+  if (!validateSummaryAgainstNormalized(text, state)) {
+    text = await buildLocalSummaryFallback(level, history, state);
+  }
+  text = ensureGreenHeaderForYellow(text, level);
+  if (!hasAllSummaryBlocks(text)) {
+    text = await buildLocalSummaryFallback(level, history, state);
+  }
+  text = ensureRestMcDecisionBlock(text, level, state);
+  text = sanitizeGeneralPhrases(text);
+  text = stripStateAboutIntroOutro(text);
+  text = sanitizeSummaryQuestions(text);
+  text = stripForbiddenFollowUpMessage(text);
+  text = simplifyPossibilityPhrases(text);
+  text = correctKanjiAndTypos(text);
+  text = enforceSummaryIntroTemplate(text);
+  text = await enforceSummaryStructureStrict(text, level, history, state);
+  if (!skipHandshakeEnsure && (level === "🟢" || level === "🟡")) {
+    text = await ensureHandshakeStateBlockFull(text, state, historyTextForOtc);
+  }
+  if (level === "🔴") {
+    text = await ensureHospitalMemoBlock(text, state, historyTextForOtc);
+  }
+  text = stripInfectionOnlineClinicGuidance(text, state);
+  text = stripHospitalMapLinks(text);
+  text = stripMcForRed(text, level);
+  text = ensureGreenHeaderForYellow(text, level);
+  text = await ensureLastBlock(text, level, state, historyTextForOtc || text);
+  text = dedupeSummaryBlocksByCanonicalOrder(text, level);
+  text = await ensureLastBlock(text, level, state, historyTextForOtc || text);
+  if (level === "🔴" && !summaryJudgmentBulletsCoverFilledSlots(text, state)) {
+    text = await replaceStateAboutBlockOnly(text, state, historyTextForOtc);
+  }
+  return text;
+}
+
+/** 確認文表示と同時に先行してまとめを生成（ブロック組み立て本線。箇条書き LLM はバックグラウンド完了を待つか下書きで先行）。 */
 async function generateSummaryForConfirmation(conversationId) {
   const state = conversationState[conversationId];
   const history = conversationHistory[conversationId];
@@ -19245,122 +19637,24 @@ async function generateSummaryForConfirmation(conversationId) {
   state.otcExamples = otcExamples;
   const hospitalRec = buildHospitalRecommendationDetail(state, locationContext, state.clinicCandidates, state.hospitalCandidates);
   state.hospitalRecommendation = hospitalRec;
-  const hospitalListSource = (state.hospitalCandidates || []).length > 0 ? state.hospitalCandidates : state.clinicCandidates || [];
-  const clinicList = hospitalListSource.map((item) => `・${item.name}`).join("\n");
-  const clinicHint = clinicList ? `\n以下の候補から具体名を1つ選んで提示してください。\n${clinicList}\n` : "\n具体名がない場合は、近いGP/クリニックの具体名を提示してください。\n";
-  const pharmacyHint = pharmacyRec?.name
-    ? `\n薬局名は「${pharmacyRec.name}」を優先してください。\n薬名は例示で2〜3件、一般名＋商品名で示し、末尾に「最終判断は薬剤師に相談してください。これは一般的に現地で使われる選択肢です。」を入れてください。\n`
-    : "\n薬局名は国・都市レベルで具体名を1件提示し、薬名は例示で2〜3件、一般名＋商品名で示してください。\n末尾に「最終判断は薬剤師に相談してください。これは一般的に現地で使われる選択肢です。」を入れてください。\n";
-  const summaryContextMessages = buildStructuredConversationForLlm(history, state);
-  const summaryOnlyMessages = [
-    { role: "system", content: buildRepairPrompt(level, state) },
-    { role: "system", content: clinicHint },
-    { role: "system", content: pharmacyHint },
-    ...summaryContextMessages,
-  ];
-  let aiResponse = "";
-  for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
-    try {
-      aiResponse = (await openai.chat.completions.create({ model: "gpt-4o-mini", messages: summaryOnlyMessages, temperature: 0.5 + attempt * 0.05, max_tokens: 1000 })).choices?.[0]?.message?.content ?? "";
-      if (aiResponse && hasAllSummaryBlocks(aiResponse)) break;
-      if (attempt < LLM_RETRY_COUNT - 1) {
-        const strict = await openai.chat.completions.create({
-          model: "gpt-4o-mini",
-          messages: [{ role: "system", content: buildRepairPrompt(level, state) + "\n\n不足ブロックがある場合は必ず補完して、全ブロックを完成させてください。" }, ...summaryContextMessages],
-          temperature: 0.5 + (attempt + 1) * 0.05,
-          max_tokens: 1000,
-        });
-        aiResponse = strict.choices?.[0]?.message?.content ?? aiResponse ?? "";
-        if (aiResponse && hasAllSummaryBlocks(aiResponse)) break;
-      }
-    } catch (_) {
-      /* retry */
-    }
+  let aiResponse = await buildSummaryByBlocksPipelineAsync(level, history, state, historyTextForOtc, {
+    epochAtStart,
+    otcCategory,
+    otcWarningIndex,
+  });
+  if (state.summaryGenerationEpoch !== epochAtStart) {
+    state.summaryGenerating = false;
+    return { message: state.summaryText || "", followUpQuestion: null, followUpMessage: null };
   }
-  if (level !== "🔴" && isHospitalFlow(aiResponse)) {
-    const repair = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "system", content: buildRepairPrompt(level, state) }, ...summaryContextMessages],
-      temperature: 0.7,
-      max_tokens: 1000,
-    });
-    aiResponse = repair.choices?.[0]?.message?.content ?? aiResponse ?? "";
-  }
-  aiResponse = normalizeSummaryLevel(aiResponse, level);
-  aiResponse = ensureYellowOtcBlock(aiResponse, level, otcCategory, otcWarningIndex, state.pharmacyRecommendation, state.otcExamples, state.pharmacyRecommendation?.preface);
-  aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
-  let immediateActionPlan = null;
-  if (level === "🟢" || level === "🟡") {
-    try {
-      immediateActionPlan = await buildImmediateActionHypothesisPlan(state, historyTextForOtc, aiResponse);
-    } catch (e) {
-      immediateActionPlan = await buildImmediateActionFallbackPlanFromState(state);
-    }
-    aiResponse = await normalizeStateBlockForGreenYellowAsync(aiResponse, state);
-    aiResponse = await ensureImmediateActionsBlock(aiResponse, level, state, historyTextForOtc, immediateActionPlan);
-  }
-  if (level === "🔴") {
-    state.decisionLevel = "🔴";
-    for (let attempt = 0; attempt < 10; attempt++) {
-      try {
-        immediateActionPlan = await buildImmediateActionHypothesisPlan(state, historyTextForOtc, aiResponse);
-        if (immediateActionPlan) break;
-      } catch (_) {
-        if (attempt >= 9) immediateActionPlan = null;
-      }
-    }
-  }
-  aiResponse = await ensureOutlookBlockAsync(aiResponse, state);
-  aiResponse = enforceYellowOtcPositionStrict(aiResponse, level);
-  if (level === "🔴") {
-    aiResponse = await ensureHospitalMemoBlock(aiResponse, state, historyTextForOtc);
-    aiResponse = await ensureRedImmediateActionsBlock(aiResponse, state, historyTextForOtc, immediateActionPlan);
-    aiResponse = ensureHospitalBlock(aiResponse, state, historyTextForOtc);
-  }
-  if (level === "🔴" && state.hospitalRecommendation?.name && (!aiResponse.includes(state.hospitalRecommendation.name) || !aiResponse.includes("タイプ：") || !aiResponse.includes("理由："))) {
+  if (!aiResponse) {
     aiResponse = await buildLocalSummaryFallback(level, history, state);
   }
-  if (!validateSummaryAgainstNormalized(aiResponse, state)) {
-    aiResponse = await buildLocalSummaryFallback(level, history, state);
-  }
-  aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
-  if (!hasAllSummaryBlocks(aiResponse)) {
-    aiResponse = await buildLocalSummaryFallback(level, history, state);
-  }
-  aiResponse = ensureRestMcDecisionBlock(aiResponse, level, state);
-  aiResponse = sanitizeGeneralPhrases(aiResponse);
-  aiResponse = stripStateAboutIntroOutro(aiResponse);
-  aiResponse = sanitizeSummaryQuestions(aiResponse);
-  aiResponse = stripForbiddenFollowUpMessage(aiResponse);
-  aiResponse = simplifyPossibilityPhrases(aiResponse);
-  aiResponse = correctKanjiAndTypos(aiResponse);
-  aiResponse = enforceSummaryIntroTemplate(aiResponse);
-  aiResponse = await enforceSummaryStructureStrict(aiResponse, level, history, state);
-  if (level === "🟢" || level === "🟡") {
-    aiResponse = await ensureHandshakeStateBlockFull(aiResponse, state, historyTextForOtc);
-  }
-  if (level === "🟢" || level === "🟡") {
-    aiResponse = await ensureImmediateActionsBlock(
-      aiResponse,
-      level,
-      state,
-      historyTextForOtc,
-      immediateActionPlan
-    );
-  }
-  if (level === "🔴") {
-    aiResponse = await ensureHospitalMemoBlock(aiResponse, state, historyTextForOtc);
-  }
-  aiResponse = stripInfectionOnlineClinicGuidance(aiResponse, state);
-  aiResponse = stripHospitalMapLinks(aiResponse);
-  aiResponse = stripMcForRed(aiResponse, level);
-  aiResponse = ensureGreenHeaderForYellow(aiResponse, level);
-  aiResponse = await ensureLastBlock(aiResponse, level, state, historyTextForOtc || aiResponse);
-  aiResponse = dedupeSummaryBlocksByCanonicalOrder(aiResponse, level);
-  aiResponse = await ensureLastBlock(aiResponse, level, state, historyTextForOtc || aiResponse);
-  if (level === "🔴" && !summaryJudgmentBulletsCoverFilledSlots(aiResponse, state)) {
-    aiResponse = await replaceStateAboutBlockOnly(aiResponse, state, historyTextForOtc);
-  }
+  aiResponse = await applySummaryPostProcessChain(aiResponse, level, state, history, historyTextForOtc, {
+    otcCategory,
+    otcWarningIndex,
+    skipHandshakeEnsure: true,
+    skipImmediateReensure: true,
+  });
   const decisionType = level === "🔴" ? "A_HOSPITAL" : "C_WATCHFUL_WAITING";
   // まとめ「返却済み」は確認応答で HTTP レスを返すときのみ立てる（markSummaryDeliveredAndFollowUpPhase）。
   // ここで立てると summaryShown が先に true になり、確認応答分岐（!summaryShown）に入らずまとめが出ない。
@@ -19754,8 +20048,13 @@ app.post("/api/chat", async (req, res) => {
         conversationState[conversationId].confirmationBulletsSnapshot = null;
         conversationState[conversationId].bulletLlmPolishedSourceFingerprint = null;
         conversationState[conversationId].bulletLlmPreferredLines = null;
+        conversationState[conversationId].bulletPolishPromise = null;
+        conversationState[conversationId].bulletPolishReady = false;
+        conversationState[conversationId].bulletPolishFingerprint = null;
+        invalidateStateAboutLineCache(conversationState[conversationId]);
       } else {
         applyConfirmationBulletsSnapshotToCache(conversationState[conversationId]);
+        await awaitBulletPolishForSummary(conversationState[conversationId]);
       }
       ensureUserUtterancesCapturedBeforeConfirmation(conversationId, conversationState[conversationId]);
       if (shouldRebuildBullets) {
@@ -20458,23 +20757,25 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    // 6スロット完了時: 確認文の箇条書きは twoStage（網羅＋追補＋箇条書き LLM）を **返却前に await** する。まとめ本文は generateSummaryForConfirmation で先行生成（同一内容なら twoStage 内で箇条書き LLM はスキップ）。
+    // 6スロット完了時: 確認文は同期下書き箇条書きで即返却。箇条書き LLM 整形は返却後バックグラウンド。まとめは generateSummaryForConfirmation で先行生成。
     if (shouldJudgeNow && !conversationState[conversationId].confirmationShown && !conversationState[conversationId].summaryShown) {
       ensureUserUtterancesCapturedBeforeConfirmation(conversationId, conversationState[conversationId]);
+      const stConfirm = conversationState[conversationId];
       try {
-        await buildStateFactsBulletsTwoStage(conversationState[conversationId], { mergeExtraFacts: false });
-        snapshotConfirmationBulletsForSummary(conversationState[conversationId]);
+        await buildConfirmationBulletsDraftSync(stConfirm, { mergeExtraFacts: false });
+        snapshotConfirmationBulletsForSummary(stConfirm);
       } catch (e) {
-        console.error("[KAIRO] buildStateFactsBulletsTwoStage before confirmation", e?.message || e);
+        console.error("[KAIRO] buildConfirmationBulletsDraftSync before confirmation", e?.message || e);
         try {
-          enforceConfirmationBulletsCompletenessCore(conversationState[conversationId]);
-          snapshotConfirmationBulletsForSummary(conversationState[conversationId]);
+          enforceConfirmationBulletsCompletenessCore(stConfirm);
+          snapshotConfirmationBulletsForSummary(stConfirm);
         } catch (_) {
           /* best effort */
         }
       }
-      const confirmMsg = buildPreSummaryConfirmationMessage(conversationState[conversationId]);
-      const stForPrefetch = conversationState[conversationId];
+      const confirmMsg = buildPreSummaryConfirmationMessage(stConfirm);
+      startBackgroundBulletPolish(conversationId);
+      const stForPrefetch = stConfirm;
       const prefetchFp = computeSummaryPrefetchFingerprint(stForPrefetch);
       if (!stForPrefetch.summaryGenerationPromise || stForPrefetch.summaryPrefetchFingerprint !== prefetchFp) {
         stForPrefetch.summaryPrefetchFingerprint = prefetchFp;
@@ -21701,7 +22002,26 @@ function sanitizeTextBeforeSummarySectionExtract(text) {
     }
   }
   if (lastTerminal >= 0) {
-    t = lines.slice(0, lastTerminal + 1).join("\n");
+    const out = lines.slice(0, lastTerminal + 1);
+    for (let i = lastTerminal + 1; i < lines.length; i++) {
+      const raw = lines[i];
+      const trimmed = String(raw || "").trimStart();
+      if (
+        /^(🟢|🟡|🔴)[\s\u3000]*ここまでの情報を整理します/.test(trimmed) ||
+        /^🤝\s/.test(trimmed) ||
+        /^✅\s/.test(trimmed) ||
+        /^⏳\s/.test(trimmed) ||
+        /^📝\s/.test(trimmed) ||
+        /^🏥\s/.test(trimmed) ||
+        /^💊\s/.test(trimmed) ||
+        /^🚨\s/.test(trimmed) ||
+        /^(?:🌱\s*最後に|💬\s*最後に)/.test(trimmed)
+      ) {
+        break;
+      }
+      out.push(raw);
+    }
+    t = out.join("\n");
   }
   return t.trim();
 }

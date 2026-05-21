@@ -1644,7 +1644,7 @@ function renderSummary() {
 
 /** 初回画面専用（会話中・サーバー返答には出さない） */
 const INTRO_BANNER_LINE_1 = "体調の不安、1分で安心に変えます";
-const INTRO_BANNER_LINE_2 = "今どうするべきか、\nKairoが一緒に判断していきます";
+const INTRO_BANNER_LINE_2 = "なんでも気になることを教えてください";
 
 // Show initial message
 function showInitialMessage() {
