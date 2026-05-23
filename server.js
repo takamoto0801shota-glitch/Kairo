@@ -11967,23 +11967,59 @@ function validateCompleteBulletCoverage(state, bullets) {
   };
 }
 
-function resolveConfirmationBulletsMaxForState(state) {
-  const required = extractUserUtteranceCoverageSegments(state).length;
+/** スロット raw を分割したときに載せるべき「・」行の最小本数（網羅検証と同じ粒度） */
+function countRequiredBulletChunksFromRawSlots(state) {
+  if (!state) return 0;
   const { raw } = collectRawInputsForStateBullets(state);
-  let rawSlots = 0;
-  if (raw && raw !== "ユーザーの回答がまだありません") {
-    for (const line of raw.split("\n")) {
-      const m = line.match(/^([^:]+):\s*(.+)$/);
-      if (!m) continue;
-      const label = m[1].trim();
-      const value = m[2].trim();
-      if (/^会話内自由記述/.test(label)) continue;
-      if (isRawSlotValueExcludedFromBulletCoverage(label, value)) continue;
-      rawSlots += 1;
+  if (!raw || raw === "ユーザーの回答がまだありません") return 0;
+  let n = 0;
+  for (const line of raw.split("\n")) {
+    const m = line.match(/^([^:]+):\s*(.+)$/);
+    if (!m) continue;
+    const label = m[1].trim();
+    const value = m[2].trim();
+    if (/^会話内自由記述/.test(label)) continue;
+    if (isRawSlotValueExcludedFromBulletCoverage(label, value)) continue;
+    if (isRawValueMainSymptomOnlyEcho(state, value)) continue;
+    for (const chunk of splitSlotAnswerIntoBulletChunks(value)) {
+      if (isRawSlotValueExcludedFromBulletCoverage(label, chunk)) continue;
+      if (isRawValueMainSymptomOnlyEcho(state, chunk)) continue;
+      n += 1;
     }
   }
-  const needed = Math.max(required, rawSlots, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS);
-  return Math.min(Math.max(PRE_SUMMARY_CONFIRMATION_MAX_BULLETS, needed + 1), 24);
+  const extra = Array.isArray(state.confirmationExtraFacts) ? state.confirmationExtraFacts.length : 0;
+  return n + extra;
+}
+
+/** 確認文・まとめで表示してよい箇条書きの上限（必要事実は切らない） */
+const ABSOLUTE_MAX_CONFIRMATION_BULLETS = 32;
+
+function resolveConfirmationBulletsMaxForState(state) {
+  if (!state) return MIN_KAIRO_JUDGMENT_FACT_BULLETS;
+  const fromUtterances = extractUserUtteranceCoverageSegments(state).length;
+  const fromChunks = countRequiredBulletChunksFromRawSlots(state);
+  const cacheLen = Array.isArray(state.stateAboutBulletsCache) ? state.stateAboutBulletsCache.length : 0;
+  const draftLen = Array.isArray(state.bulletLlmPreferredLines) ? state.bulletLlmPreferredLines.length : 0;
+  const needed = Math.max(
+    fromUtterances,
+    fromChunks,
+    cacheLen,
+    draftLen,
+    MIN_KAIRO_JUDGMENT_FACT_BULLETS
+  );
+  return Math.min(needed, ABSOLUTE_MAX_CONFIRMATION_BULLETS);
+}
+
+function effectiveBulletOutputCap(state, bullets, requestedMax) {
+  const req = typeof requestedMax === "number" ? requestedMax : resolveConfirmationBulletsMaxForState(state);
+  const len = Array.isArray(bullets) ? bullets.length : 0;
+  const chunkFloor = countRequiredBulletChunksFromRawSlots(state);
+  return Math.min(Math.max(req, len, chunkFloor, MIN_KAIRO_JUDGMENT_FACT_BULLETS), ABSOLUTE_MAX_CONFIRMATION_BULLETS);
+}
+
+function sliceBulletsForDisplay(state, bullets) {
+  const arr = Array.isArray(bullets) ? bullets : [];
+  return arr.slice(0, effectiveBulletOutputCap(state, arr, resolveConfirmationBulletsMaxForState(state)));
 }
 
 function reconcileBulletCoverageGaps(state, bullets, opts = {}) {
@@ -12012,7 +12048,7 @@ function reconcileBulletCoverageGaps(state, bullets, opts = {}) {
     if (base.length === prevLen && !validateCompleteBulletCoverage(state, base).ok) break;
     iter += 1;
   }
-  return base.slice(0, maxOut);
+  return base.slice(0, effectiveBulletOutputCap(state, base, maxOut));
 }
 
 function heuristicSupplementBulletsFromUserUtterances(bullets, userLines) {
@@ -12057,7 +12093,7 @@ function mergeMissingBulletLinesIntoStateAboutCache(state, base, missingLines) {
     added++;
   }
   state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
-    sanitizeBulletPoints(deduped, state).slice(0, resolveConfirmationBulletsMaxForState(state)),
+    sliceBulletsForDisplay(state, sanitizeBulletPoints(deduped, state)),
     state
   );
   return added;
@@ -12084,7 +12120,7 @@ async function supplementStateBulletsFromUncoveredUserUtterances(state) {
   const added = mergeMissingBulletLinesIntoStateAboutCache(state, base, missing || []);
   const repaired = reconcileBulletCoverageGaps(state, state.stateAboutBulletsCache || base);
   state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
-    sanitizeBulletPoints(repaired, state).slice(0, resolveConfirmationBulletsMaxForState(state)),
+    sliceBulletsForDisplay(state, sanitizeBulletPoints(repaired, state)),
     state
   );
   console.log("[KAIRO] supplementStateBulletsFromUncoveredUserUtterances", {
@@ -12149,11 +12185,12 @@ function getDurationTextForBullets(state) {
 
 /**
  * レガシー生成が経過・悪化傾向を落とした場合の補完。スロットに実回答がある限り箇条書きに載せる。
- * @param {{ maxOut?: number }} [opts] maxOut 省略時は 8（確認文まわりでは 14 などに拡げる）
+ * @param {{ maxOut?: number }} [opts] maxOut 省略時は resolveConfirmationBulletsMaxForState
  */
 function injectMissingSlotBulletsFromState(bullets, state, category, opts = {}) {
   if (!state || !Array.isArray(bullets)) return bullets;
-  const maxOut = typeof opts.maxOut === "number" ? opts.maxOut : 8;
+  const maxOut =
+    typeof opts.maxOut === "number" ? opts.maxOut : resolveConfirmationBulletsMaxForState(state);
   const answers = state.slotAnswers || {};
   const val = (statusKey, fallback = "") => getSlotStatusValue(state, statusKey, fallback);
   const out = [...bullets];
@@ -12266,7 +12303,7 @@ function appendMissingRawValuesAsBullets(bullets, missingValues, state) {
 
 /**
  * まとめ返却・🤝/📝 差し替え直前：既存キャッシュを起点に、埋まっているスロット raw がすべて「・」行に載るまで追記する。
- * LLM 整形は行わない（内容は増やすのみ）。末尾で PRE_SUMMARY_CONFIRMATION_MAX_BULLETS に丸める。
+ * LLM 整形は行わない（内容は増やすのみ）。末尾は網羅に必要な行数まで保持する。
  */
 function finalizeStateAboutBulletsCacheForSummary(state) {
   if (!state) return;
@@ -12288,10 +12325,8 @@ function finalizeStateAboutBulletsCacheForSummary(state) {
     base = sanitizeBulletPoints(base, state);
     base = reconcileBulletCoverageGaps(state, base, { maxOut: maxBullets });
   }
-  state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
-    base.slice(0, maxBullets),
-    state
-  );
+  const cap = effectiveBulletOutputCap(state, base, maxBullets);
+  state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(base.slice(0, cap), state);
 }
 
 /** まとめ本文中の 🤝 / 📝 ブロックから「・」行だけを取り出す（網羅検証用） */
@@ -12336,8 +12371,9 @@ function enforceConfirmationBulletsCompletenessCore(state) {
   base = mergeRawSlotInputsIntoBullets(state, base);
   base = sanitizeBulletPoints(base, state);
   base = reconcileBulletCoverageGaps(state, base, { maxOut: maxBullets });
+  const capBeforeFinalize = effectiveBulletOutputCap(state, base, maxBullets);
   state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
-    sanitizeBulletPoints(base, state).slice(0, maxBullets),
+    sanitizeBulletPoints(base, state).slice(0, capBeforeFinalize),
     state
   );
   finalizeStateAboutBulletsCacheForSummary(state);
@@ -12352,7 +12388,10 @@ function enforceConfirmationBulletsCompletenessCore(state) {
     finalizeStateAboutBulletLinesForSpec(state.stateAboutBulletsCache),
     state
   );
-  return state.stateAboutBulletsCache.slice(0, maxBullets);
+  return state.stateAboutBulletsCache.slice(
+    0,
+    effectiveBulletOutputCap(state, state.stateAboutBulletsCache, maxBullets)
+  );
 }
 
 function hashStringFnv1a32Hex(str) {
@@ -12494,7 +12533,7 @@ async function polishConfirmationBulletsWithLlm(state) {
     "【重複禁止】2文字同連続に相当する**同趣旨**の行を複数出さない。近い言い回し（包含・重なり）があるときは**短い1行**に圧し、**冗長に長い行は捨てる**（事実の数は落とさないが、同じ事実の二重表現は出さない）。",
     "【重複禁止・類似行】**似た箇条書きを並べない**。同じスロット・同じ症状軸・同じ経過・同じきっかけを、言い換え・言い直し・部分だけの別行で二重に書かない。例：**「悪化している可能性がある」**と**「経過の様子は悪化してる」**、**「症状は2日前から」**と**「痛みの経過は2日前」**、**「寒いことがきっかけの可能性」**と**「最近寒い」**は1行にまとめるか、情報が増える方だけ残す。",
     "【禁止・繰り返し】ほかの行ですでに述べている事実・同じ症状軸を、言い換えや局所だけの別行で足さない。例：**頭痛**の強さ・経過を書いたあとに、**目の奥の重さ**だけの行を増やさない。**吐き気**を具体的に書いたあとに「**吐き気が伴っている**」だけの行を増やさない。ユーザーが頭部・目を別項目で語っていれば維持。",
-    "【形式】各行は「・」で始まる1行。行数は入力と同程度（最大14行）。行の統合は上記の**同趣旨重複の除去**に限る。",
+    `【形式】各行は「・」で始まる1行。下書き（${preStash.length}行）未満に行数を減らしてはならない。必要な事実はすべて残す（最大${maxBullets}行）。行の統合は上記の**同趣旨重複の除去**に限る。`,
     "【必須】主症状の言い換えだけの行は出さない（痛み・部位の繰り返しは省き、経過・付随・きっかけなどの情報だけを書く）。",
     "【必須】各行の文末を途中で切らない（語の半端・「続いてい」で終わる等は禁止）。",
     '厳密なJSON: {"bullets":["・...","・...",...]} のみ。説明文は禁止。',
@@ -12513,8 +12552,9 @@ async function polishConfirmationBulletsWithLlm(state) {
   ].join("\n");
   const applyMergedBullets = (preferredLlm, merged) => {
     state.bulletLlmPreferredLines = preferredLlm.slice();
+    const cap = effectiveBulletOutputCap(state, merged, maxBullets);
     state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
-      sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(merged), state).slice(0, maxBullets),
+      sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(merged), state).slice(0, cap),
       state
     );
     state.bulletLlmPolishedSourceFingerprint = sourceFp;
@@ -12580,8 +12620,9 @@ async function polishConfirmationBulletsWithLlm(state) {
   }
   let fallback = sanitizeBulletPoints(preStash, state);
   fallback = reconcileBulletCoverageGaps(state, fallback, { maxOut: maxBullets });
+  const fallbackCap = effectiveBulletOutputCap(state, fallback, maxBullets);
   state.stateAboutBulletsCache = injectDisplayOnlyNoOtherSymptomsBullet(
-    sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(fallback), state).slice(0, maxBullets),
+    sanitizeBulletPoints(finalizeStateAboutBulletLinesForSpec(fallback), state).slice(0, fallbackCap),
     state
   );
   state.bulletLlmPolishedSourceFingerprint = null;
@@ -12651,7 +12692,7 @@ async function enforceConfirmationBulletsCompleteness(state, opts = {}) {
     await polishConfirmationBulletsWithLlm(state);
   }
   finalizeStateAboutBulletsCacheForSummary(state);
-  return (state.stateAboutBulletsCache || []).slice(0, resolveConfirmationBulletsMaxForState(state));
+  return sliceBulletsForDisplay(state, state.stateAboutBulletsCache || []);
 }
 
 /**
@@ -12674,7 +12715,7 @@ async function buildConfirmationBulletsDraftSync(state, opts = {}) {
   }
   await supplementStateBulletsFromUncoveredUserUtterances(state);
   finalizeStateAboutBulletsCacheForSummary(state);
-  return (state.stateAboutBulletsCache || []).slice(0, resolveConfirmationBulletsMaxForState(state));
+  return sliceBulletsForDisplay(state, state.stateAboutBulletsCache || []);
 }
 
 function stateAboutLineCacheKey(state, level) {
@@ -12769,8 +12810,9 @@ function shouldReuseConfirmationBulletsSnapshot(state) {
 
 function snapshotConfirmationBulletsForSummary(state) {
   if (!state) return;
-  const maxBullets = resolveConfirmationBulletsMaxForState(state);
-  const lines = sanitizeBulletPoints((state.stateAboutBulletsCache || []).slice(), state).slice(0, maxBullets);
+  const cached = sanitizeBulletPoints((state.stateAboutBulletsCache || []).slice(), state);
+  const cap = effectiveBulletOutputCap(state, cached, resolveConfirmationBulletsMaxForState(state));
+  const lines = cached.slice(0, cap);
   if (lines.length > 0) state.confirmationBulletsSnapshot = lines.slice();
 }
 
@@ -12783,14 +12825,17 @@ function applyConfirmationBulletsSnapshotToCache(state) {
 /** 確認文・まとめ「Kairoの判断」で共通の「・」行（LLM 整形済みキャッシュ／確認スナップショット） */
 function getKairoJudgmentFactBullets(state, opts = {}) {
   if (!state) return [];
-  const max = resolveConfirmationBulletsMaxForState(state);
+  const requestedMax = resolveConfirmationBulletsMaxForState(state);
   if (opts?.forSummary !== false && shouldReuseConfirmationBulletsSnapshot(state)) {
-    return state.confirmationBulletsSnapshot.slice(0, max);
+    const snap = state.confirmationBulletsSnapshot.slice();
+    return snap.slice(0, effectiveBulletOutputCap(state, snap, requestedMax));
   }
   if (state.stateAboutBulletsCache?.length > 0) {
-    return sanitizeBulletPoints(state.stateAboutBulletsCache, state).slice(0, max);
+    const cached = sanitizeBulletPoints(state.stateAboutBulletsCache, state);
+    return cached.slice(0, effectiveBulletOutputCap(state, cached, requestedMax));
   }
-  return sanitizeBulletPoints(buildStateFactsBulletsLegacy(state, { forSummary: true }) || [], state).slice(0, max);
+  const legacy = sanitizeBulletPoints(buildStateFactsBulletsLegacy(state, { forSummary: true }) || [], state);
+  return legacy.slice(0, effectiveBulletOutputCap(state, legacy, requestedMax));
 }
 
 /** 情報整理ブロック：キャッシュがあればそれを優先。なければ従来ロジック。forSummary: true のときは箇条書きのみ。 */
@@ -13190,65 +13235,161 @@ function finalizeComboLabelForCombinationLine(label) {
   return out;
 }
 
+/** LLM 出力の組み合わせ短語：省略除去と上限のみ（ヒューリスティック再圧縮で具体性を落とさない） */
+function finalizeComboLabelFromLlmOutput(label, fallbackRaw) {
+  let t = stripComboLabelEllipsisCharacters(String(label || "").trim());
+  if (!t) return finalizeComboLabelForCombinationLine(fallbackRaw);
+  if (/^奥に/.test(t) && !/目の奥/.test(t)) {
+    return finalizeComboLabelForCombinationLine(fallbackRaw);
+  }
+  if (t.length > KAIRO_COMBO_SHORT_LABEL_MAX_CHARS) {
+    t = hardCapComboLabelCharsNoEllipsis(t) || t.slice(0, KAIRO_COMBO_SHORT_LABEL_MAX_CHARS);
+  }
+  if (t.length < 2) return finalizeComboLabelForCombinationLine(fallbackRaw);
+  return t;
+}
+
+/** 組み合わせ短語が候補・原文の肝心な事実を落としていないか */
+function comboLabelPreservesCriticalFacts(label, sourceRaw) {
+  const lab = String(label || "").trim();
+  const src = String(sourceRaw || "").trim();
+  if (!lab || lab.length < 2) return false;
+  if (lab.length > KAIRO_COMBO_SHORT_LABEL_MAX_CHARS) return false;
+  if (/^(経過|痛みの経過|症状|不調|ある|ない)$/.test(lab)) return false;
+  if (/^(経過は|症状は|痛みは)/.test(lab)) return false;
+  if (comboGreenYellowShortLabelContainsForbiddenNai(lab)) return false;
+  const hedgeMatches = src.match(new RegExp(BULLET_DEGREE_HEDGE_PATTERN.source, "g"));
+  if (hedgeMatches) {
+    for (const h of hedgeMatches) {
+      const hn = String(h).replace(/\s/g, "");
+      if (hn && !lab.replace(/\s/g, "").includes(hn)) return false;
+    }
+  }
+  if (/(日前|昨日|一昨日|さっき|数時間|数十分|週間|時間前)/.test(src)) {
+    if (!/(日前|昨日|一昨日|さっき|数時間|数十分|週|時間|から)/.test(lab)) return false;
+  }
+  const causeCues = ["日差し", "紫外線", "寝不足", "睡眠不足", "画面", "ストレス", "運動", "食べ"];
+  for (const cue of causeCues) {
+    if (src.includes(cue) && !lab.includes(cue.slice(0, Math.min(2, cue.length)))) return false;
+  }
+  if (/\d+\s*\/\s*10/.test(src) && !/\d/.test(lab) && !/強|弱|程度|前後/.test(lab)) return false;
+  return true;
+}
+
+function validateComboLabelsFromLlm(labels, sourceItems) {
+  if (!Array.isArray(labels) || labels.length !== sourceItems.length) {
+    return { ok: false, reason: "count" };
+  }
+  const seen = new Set();
+  for (let i = 0; i < labels.length; i++) {
+    const lab = String(labels[i] || "").trim();
+    if (!comboLabelPreservesCriticalFacts(lab, sourceItems[i])) {
+      return { ok: false, reason: `item_${i}`, label: lab, source: sourceItems[i] };
+    }
+    if (seen.has(lab)) return { ok: false, reason: "duplicate" };
+    seen.add(lab);
+  }
+  return { ok: true };
+}
+
+const COMBO_LABEL_LLM_MAX_ATTEMPTS = 4;
+
 /**
- * 組み合わせ「〇〇」候補を LLM で削ぎ落とす（KAIRO_SPEC：各短語**目安 3〜7 文字**・厳守上限は `KAIRO_COMBO_SHORT_LABEL_MAX_CHARS`。**「…」「...」での省略・切り捨て禁止**）。1回の API で複数ラベルをまとめて処理。
- * 失敗時は null（呼び出し側でヒューリスティック finalize にフォールバック）。
+ * 組み合わせ「〇〇」候補を LLM で削ぎ落とす（🌱 最後にと同型：Kairo・fullRules・リトライ・検証）。
+ * 各短語 3〜7 字・上限 7 字。具体性（程度・時間軸・きっかけ語）を落とした雑な短語はリトライ。
  */
 async function shortenComboLabelsForCombinationLineWithLlm(state, rawParts) {
   if (!process.env.OPENAI_API_KEY || !state || !Array.isArray(rawParts) || rawParts.length === 0) return null;
   const items = rawParts.map((p) => String(p || "").trim()).filter(Boolean);
   if (items.length === 0) return null;
-  const bulletHint = (buildStateFactsBullets(state, { forSummary: true }) || []).slice(0, 10).join("\n");
+  const bulletHint = (buildStateFactsBullets(state, { forSummary: true }) || []).slice(0, 12).join("\n");
   const rawUserCtx = buildComboLabelLlmRawUserContext(state);
-  try {
-    const systemPrompt = [
-      "あなたは医療チャット「Kairoの判断」の**組み合わせ行**用ラベル編集者です。出力はJSONのみ。",
-      "各要素は、箇条書きやスロットから**機械的につながれた長い語**で、元から**かなりぎこちない**ことが多いです。",
-      "だからこそ、**事実・数値・意味は変えずに**、組み合わせ行に並べる**短い名詞句**へそれぞれ削ぎ落としてください（例：ズキズキする痛み→ズキズキ、やや強いズキズキする頭痛→やや強い頭痛）。",
-      "【最優先・抽出の出どころ】**【ユーザー原文・スロット生値】**には、箇条書き整形**前**の言い回しが載っています。**肝心の事実（いつから・どのくらい・波があるか等）は、そちらを読んで候補より優先して短語に反映**してください。まとめ箇条書きだけでは抽象的になりがちです。",
-      "【経過・時間】「痛みの経過」「経過は」などの**ラベル語は短語に使わない**。**ユーザーが言った時間軸**だけを抜く（例：2日前から／昨日から／さっきから／数時間前）。",
-      "【推移・波】「悪化傾向」「経過の変化」などの**枠の名前は使わず**、内容だけ（例：波が一定しない／読み取りにくい→**波の推移** など）。",
-      "【きっかけ】「〜の可能性」「がきっかけの可能性」などの**定型語尾は短語に含めない**。**ユーザーが述べた負荷・要因の語だけ**を3〜7文字程度の名詞句にする（例：寝不足がきっかけの可能性→寝不足、画面を長時間見た→画面見過ぎ）。新語の捏造は禁止。",
-      `【文字数】各ラベルは**目安 ${KAIRO_COMBO_SHORT_LABEL_TARGET_MIN_CHARS}〜${KAIRO_COMBO_SHORT_LABEL_TARGET_MAX_CHARS}文字**（意味が通る最短の名詞句）。1〜2文字だけの出力は避ける。**絶対上限 ${KAIRO_COMBO_SHORT_LABEL_MAX_CHARS} 文字**まで（超過禁止）。オーバーは**言い換え・単語削除**で守る。**「…」「...」「⋯」や句点での省略・切り捨て禁止**。（機械側でも省略記号は除去されます）`,
-      "【禁止】新しい症状・病名推測・入力にない事実の追加。",
-      "【重複禁止】まとめ箇条書きに**すでに書いた事実**を、組み合わせ行で**言い換えて繰り返さない**。**頭痛／ズキズキ／重さ・「重くてズキ」のような質**を**別々のラベルに並べず**（同じ痛みの出方・言い換えは**1つの短語**にまとめる。きっかけ・時間軸・スコア短縮とは別次元）。**labels 内で**2文字以上の同一部分列に相当する同趣旨がある場合も**1語**に。**冗長で長い方を捨てる**（新事実の推測はしない）。",
-      `【形式】厳密なJSON: {"labels":["..."]} のみ。labels の要素数は必ず ${items.length} 個（上の候補と同じ順序）。`,
-    ].join("\n");
-    const userContent = [
-      rawUserCtx ? `【ユーザー原文・スロット生値（整形前・最優先）】\n${rawUserCtx}` : "",
-      "",
-      "【参考：まとめ箇条書き（整形後）】",
-      bulletHint || "（なし）",
-      "",
-      "【削ぎ落とす各候補（順序固定・上の原文と照合してよい）】",
-      items.map((s, i) => `${i + 1}. ${s}`).join("\n"),
-    ]
-      .filter((block) => String(block || "").trim().length > 0)
-      .join("\n");
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userContent.slice(0, 12000) },
-      ],
-      temperature: 0.25,
-      max_tokens: 400,
-    });
-    const text = completion?.choices?.[0]?.message?.content || "";
-    const parsed = parseJsonObjectFromText(text);
-    if (!parsed || !Array.isArray(parsed.labels) || parsed.labels.length !== items.length) return null;
-    return parsed.labels.map((s, i) => {
-      const t = String(s ?? "").trim();
-      const fb = finalizeComboLabelForCombinationLine(items[i]);
-      if (!t) return fb;
-      let out = finalizeComboLabelForCombinationLine(t);
-      if (!out) out = fb;
-      return out || fb;
-    });
-  } catch (e) {
-    console.warn("[KAIRO] shortenComboLabelsForCombinationLineWithLlm", e?.message || e);
-    return null;
+  const n = items.length;
+
+  const fullRules = [
+    `組み合わせ行「「A＋B＋C」このことから、」の **A,B,C 各1語**（合計 ${n} 語）を生成する。出力は JSON の labels のみ。`,
+    "**中心軸**：ユーザーが実際に言った**具体の事実**を短く残す。抽象語・枠の名前だけにしない。",
+    `【文字数】各語は全角 **${KAIRO_COMBO_SHORT_LABEL_TARGET_MIN_CHARS}〜${KAIRO_COMBO_SHORT_LABEL_TARGET_MAX_CHARS} 字**（上限 ${KAIRO_COMBO_SHORT_LABEL_MAX_CHARS} 字）。「…」での省略禁止。`,
+    "【経過・時間】「経過は」「痛みの経過」は禁止。**時間軸だけ**（例：3日前から、昨日から、さっきから）。",
+    "【程度】原文の やや・少し・かなり 等は**必ず残す**（例：やや強い痛み）。",
+    "【きっかけ】「〜の可能性」は付けず要因の語だけ（例：日差しの刺激、寝不足、画面見過ぎ）。",
+    "【痛み】ズキズキする痛み→ズキズキ、6/10→6/10程度 など。同じ痛みの出方を2語に分けない。",
+    "【OK例】「やや強い痛み」「日差しの刺激」「3日前から」／「ズキズキ」「他症状なし」「6/10程度」",
+    "【NG例】「経過は」「症状」「不調」「痛みの経過」「ある」",
+    "【禁止】新症状の捏造、病名断定、主症状ラベル単独の繰り返し。",
+    `厳密なJSON: {"labels":["...","...",...]} 要素数は必ず ${n} 個、候補と同じ順序。`,
+  ].join("\n");
+
+  const userContentBase = [
+    rawUserCtx ? `【ユーザー原文・スロット（最優先）】\n${rawUserCtx}` : "",
+    "",
+    "【まとめ箇条書き（参考）】",
+    bulletHint || "（なし）",
+    "",
+    "【各候補を短語に（順序固定）】",
+    items.map((s, i) => `${i + 1}. ${s}`).join("\n"),
+  ]
+    .filter((block) => String(block || "").trim().length > 0)
+    .join("\n");
+
+  const fullPrompt = `あなたはKairoです。以下の会話・状態を踏まえ、🤝 Kairoの判断の組み合わせ行に並べる短語だけを生成してください。
+${fullRules}`;
+
+  const mapParsedLabels = (parsed) => {
+    if (!parsed?.labels || parsed.labels.length !== items.length) return null;
+    return parsed.labels.map((s, i) => finalizeComboLabelFromLlmOutput(s, items[i]));
+  };
+
+  for (let attempt = 0; attempt < COMBO_LABEL_LLM_MAX_ATTEMPTS; attempt++) {
+    try {
+      const useSimple = attempt >= 2;
+      let completion;
+      if (useSimple) {
+        const hints = items
+          .map((s, i) => {
+            const fb = finalizeComboLabelForCombinationLine(s);
+            return `${i + 1}. 元:${s.slice(0, 40)} → 目安:${fb || "（短語）"}`;
+          })
+          .join("\n");
+        completion = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: [
+            {
+              role: "system",
+              content: `各候補を3〜7字の短語に。JSONのみ {"labels":[...]} 要素${n}個。具体性を落とさない。OK例: やや強い痛み, 日差しの刺激, 3日前から`,
+            },
+            { role: "user", content: hints },
+          ],
+          temperature: 0.15,
+          max_tokens: 220,
+        });
+      } else {
+        completion = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: [
+            { role: "system", content: fullPrompt },
+            { role: "user", content: userContentBase.slice(0, 12000) },
+          ],
+          temperature: 0.2 + attempt * 0.05,
+          max_tokens: 450,
+        });
+      }
+      const parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
+      const mapped = mapParsedLabels(parsed);
+      if (!mapped) continue;
+      const cov = validateComboLabelsFromLlm(mapped, items);
+      if (cov.ok) return mapped;
+      console.warn("[KAIRO] shortenComboLabelsForCombinationLineWithLlm: validation failed", {
+        attempt,
+        reason: cov.reason,
+        sample: cov.label || mapped[0],
+      });
+    } catch (e) {
+      console.warn("[KAIRO] shortenComboLabelsForCombinationLineWithLlm attempt", attempt, e?.message || e);
+    }
   }
+
+  return null;
 }
 
 /** 組み合わせパーツを LLM で短縮（各ラベル目安 3〜7 文字）、失敗時は `finalizeComboLabelForCombinationLine` のみ */
@@ -14120,11 +14261,14 @@ async function buildGreenYellowStateAboutBlockAsync(state, level) {
     state,
     finalized.map((p) => String(p || "").trim()).filter(Boolean)
   );
-  let parts = guarded.map((p) => finalizeComboLabelForCombinationLine(p)).filter(Boolean);
+  let parts = guarded
+    .map((p, i) => finalizeComboLabelFromLlmOutput(p, finalized[i] || rawParts[i]))
+    .filter(Boolean);
   if (parts.length < 2) {
     parts = finalized.map((p) => String(p || "").trim()).filter(Boolean);
   }
-  const causeShort = buildCauseComboShortLabelSync(state);
+  const causeShort =
+    (await buildCauseComboShortLabelAsync(state)) || buildCauseComboShortLabelSync(state);
   const integrated = await buildGreenYellowComboIntegratedParagraphAsync(state, lv, parts, causeShort);
   const core = pickGreenYellowDecisionCoreLines(state);
   const body = [integrated, ...core].join("\n");
@@ -14606,9 +14750,8 @@ ${mainSymptom}
 }
 
 /**
- * 🟢/🟡「意味」1行：組み合わせ＋主症状から LLM 生成（最大4リトライ）。会話キャッシュあり。
- * **短め・簡潔**。文末テンプレ（「パターンです。」等）の固定はしない。
- * 風の初期症状例外時はプロンプトで「風の初期症状」系の語を1回含める。
+ * 🟢/🟡「意味」1行：組み合わせ＋主症状から LLM 生成（`generateLastBlockWithLLM` と同型プロンプト）。
+ * 文末テンプレ固定なし。風の初期症状例外時は文中に語彙を1回含める。
  */
 async function generateGreenYellowStateAboutMeaningLineViaLlm(state, level, parts, options = {}) {
   const lv = level === "🟡" ? "🟡" : "🟢";
@@ -14631,57 +14774,97 @@ async function generateGreenYellowStateAboutMeaningLineViaLlm(state, level, part
     return f;
   }
 
+  const category = state ? state.triageCategory || resolveQuestionCategoryFromState(state) : "PAIN";
+  const categoryHint = (() => {
+    const hints = {
+      PAIN: `痛み系：一時的な${noun}としてよくある組み合わせであることが短く伝わるように。大きな心配は不要なニュアンス。`,
+      SKIN: `皮膚粘膜系：刺激を避けて休めば落ち着きやすい組み合わせであることが短く伝わるように。`,
+      GI: `消化器系：消化を休めれば落ち着きやすい初期の組み合わせであることが短く伝わるように。`,
+      INFECTION: `発熱感染系：休養で落ち着きやすい初期の組み合わせであることが短く伝わるように。休むことへの許可と安心。`,
+      TIRED: `疲労・だるさ系：無理を減らせば回復しやすい組み合わせであることが短く伝わるように。`,
+    };
+    return hints[category] || hints.PAIN;
+  })();
+
   const lvDescription =
     lv === "🟡"
-      ? "中等度（🟡）。🟢 と同じく短く安心寄り。不安を煽らない。断定・恐怖喚起は禁止。"
-      : "緊急性は低い側（🟢）。短く安心寄り。断定・恐怖喚起は禁止。";
+      ? "中等度（🟡）。🟢 と同じく短く安心寄り。意味行に「注意が必要なサイン」は書かない。"
+      : "緊急性は低い側（🟢）。短く安心寄り。";
 
-  const windyHint = windy
-    ? "風の初期症状（風邪のかかりはじめ）として見られやすい趣旨を、短い1文に含める（「風の初期症状」「風邪」「かかりはじめ」のいずれか1回）。"
-    : `主症状（${noun}）に軽く触れるか「一時的な${noun}」のニュアンスを含める（冗長に繰り返さない）。`;
+  const windyRule = windy
+    ? "①文中に「風の初期症状」「風邪」「かかりはじめ」のいずれかを**自然に1回**含める（短く）。"
+    : `①主症状（${noun}）に軽く触れるか「一時的な${noun}」のニュアンスを含める（冗長に繰り返さない）。`;
 
-  const systemPrompt = [
-    "あなたは医療判断を補助する説明生成AIです。",
-    "「症状の組み合わせ＋主症状」から、この組み合わせ全体の意味を**短く簡潔な1文**で示す。固定テンプレの言い回しをそのまま並べない。",
-    "🟢 でも 🟡 でも同じルール。「注意が必要なサインも含まれます」など煽り・受診急ぎの語尾は禁止。",
-    "",
-    `【症状の組み合わせ】${joined}`,
-    `【主症状】${noun}`,
-    `【リスクレベル】${lvDescription}`,
-    `【文脈ヒント】${windyHint}`,
-    "",
-    "【ルール】",
-    "・必ず1文のみ（改行なし）。**全角24〜40字程度**を目安に短く（長い説明・二重表現は禁止）。",
-    "・文末は**固定しない**（「パターンです。」に合わせる必要はない）。自然な句点で終える。",
-    "・「としてよく見られるパターンです」のような長い定型句は避け、言い切りを短くする。",
-    "・安心を阻害する語（危険・すぐ受診・注意が必要なサイン等）は禁止。",
-    "・「あなたの場合」等の個別化は禁止。組み合わせ全体の意味を述べる。",
-    "・本文の1文だけ出力（見出し・引用括弧なし）。",
-  ].join("\n");
+  const fullRules = `🤝 Kairoの判断の「② 意味」1文のみを生成する（「このことから、」の直後に置く文）。
+**1文のみ**（改行なし）。**全角24〜40字程度**を目安に短く（「。」は1つ）。
+**中心軸**（🌱 最後にと同様）：**安心して休める**前提で、今の情報なら大きな心配は不要であることが伝わること。煽り・受診急ぎは禁止。
+**必須**：
+${windyRule}
+②組み合わせ「${joined}」全体の意味を述べる（単一症状の説明だけは禁止）。
+③カテゴリに合わせる：${categoryHint}
+**禁止**：文末テンプレの丸写し（「としてよく見られるパターンです」等の長い定型）、「注意が必要なサインも含まれます」、危険・すぐ受診・あなたの場合、病名断定、抽象的な励ましだけ。
+【入力】組み合わせ：${joined}／主症状：${noun}／レベル：${lvDescription}`;
+  const simplePrompt = windy
+    ? `「風の初期症状として見られやすい組み合わせです。」を組み合わせ「${joined}」・主症状「${noun}」に合わせて**1文**で言い換えてください。見出しは出さず意味の1文のみ。短く。`
+    : `「一時的な${noun}として、よくある初期の組み合わせです。」を組み合わせ「${joined}」に合わせて**1文**で言い換えてください。見出しは出さず意味の1文のみ。短く安心寄り。`;
+  const userContent =
+    (state ? buildStateFactsBullets(state, { forSummary: true }).join("\n") : "") ||
+    state?.historyTextForCare ||
+    "症状の状態を確認しました。";
+  const fullPrompt = `あなたはKairoです。以下の会話・状態を踏まえ、🤝 Kairoの判断ブロックの「② 意味」となる**本文1文のみ**を生成してください。
+${fullRules}
+【厳守】1文のみ。シンプルで短く。見出し・「このことから」・引用括弧は出力しない。意味の1文だけ。`;
 
-  for (let attempt = 0; attempt < 4; attempt++) {
+  const normalizeMeaningLine = (raw) =>
+    String(raw || "")
+      .trim()
+      .replace(/^[\s・\-*「『]+/g, "")
+      .replace(/\n+/g, " ")
+      .replace(/[」』]$/g, "")
+      .replace(/^このことから[、,]?\s*/g, "")
+      .trim();
+
+  for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
     try {
+      const useSimple = attempt >= 3;
+      const prompt = useSimple ? simplePrompt : fullPrompt;
       const completion = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: "上記に従い、短い1文だけを出力してください。" },
+          { role: "system", content: prompt },
+          { role: "user", content: useSimple ? `組み合わせ：${joined}` : userContent },
         ],
-        temperature: 0.3 + attempt * 0.08,
+        temperature: 0.2 + Math.min(attempt, 6) * 0.04,
         max_tokens: 96,
       });
-      let text = String(completion?.choices?.[0]?.message?.content || "").trim();
-      text = text
-        .replace(/^[\s・\-*「『]+/g, "")
-        .replace(/\n+/g, " ")
-        .replace(/[」』]$/g, "")
-        .trim();
-      if (!isAcceptableGreenYellowMeaningLineFromLlm(text, { windy })) continue;
-      setCachedStateAboutMeaningLine(state, cacheKey, text);
-      return text;
+      let text = normalizeMeaningLine(completion?.choices?.[0]?.message?.content || "");
+      if (!text.endsWith("。") && !text.endsWith("．")) text += "。";
+      if (isAcceptableGreenYellowMeaningLineFromLlm(text, { windy })) {
+        setCachedStateAboutMeaningLine(state, cacheKey, text);
+        return text;
+      }
     } catch (_) {
       /* retry */
     }
+  }
+  const copyPrompt = windy
+    ? "「風の初期症状として見られやすい組み合わせです。」をそのまま返してください。"
+    : `「一時的な${noun}として、よくある初期の組み合わせです。」をそのまま返してください。`;
+  try {
+    const last = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: copyPrompt }],
+      temperature: 0,
+      max_tokens: 80,
+    });
+    let text = normalizeMeaningLine(last?.choices?.[0]?.message?.content || "");
+    if (!text.endsWith("。")) text += "。";
+    if (isAcceptableGreenYellowMeaningLineFromLlm(text, { windy })) {
+      setCachedStateAboutMeaningLine(state, cacheKey, text);
+      return text;
+    }
+  } catch (_) {
+    /* static fallback */
   }
   const f = greenYellowMeaningLineFallback(state, windy);
   setCachedStateAboutMeaningLine(state, cacheKey, f);
@@ -14743,8 +14926,6 @@ async function buildStateAboutEmpathyAndJudgmentAsync(state, level) {
   return buildGreenYellowStateAboutBlockAsync(state, level);
 }
 
-const PRE_SUMMARY_CONFIRMATION_MAX_BULLETS = 14;
-
 /** 確認文直後レスポンス用：LLM なし・箇条書きキャッシュから「Kairoの判断」簡易版のみ（1秒以内目標） */
 function buildSummaryQuickPreviewFromState(state) {
   if (!state) return "";
@@ -14797,7 +14978,6 @@ function buildPreSummaryConfirmationMessage(state) {
     ensureKairoJudgmentHasMinimumFactBullets(state, MIN_KAIRO_JUDGMENT_FACT_BULLETS);
     bullets = getKairoJudgmentFactBullets(state, { forSummary: true });
   }
-  bullets = bullets.slice(0, PRE_SUMMARY_CONFIRMATION_MAX_BULLETS);
   const phrase = PRE_SUMMARY_CONFIRMATION_PHRASES[
     Math.floor(Math.random() * PRE_SUMMARY_CONFIRMATION_PHRASES.length)
   ];
