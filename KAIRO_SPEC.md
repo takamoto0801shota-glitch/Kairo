@@ -657,50 +657,25 @@ slot_status = {
 - **痛み方（`worsening`）**は1文字でも入力があれば**必ず**先に確保（スコア不問と整合）。**きっかけ**は `polishCausePhraseToWrittenJapanese` で整え**短語化**し、**`＋`列の先頭**（`buildCauseComboShortLabelAsync`／同期 `buildCauseComboShortLabelSync`、ユーザー語の核を残す）。短語候補の逆優先では後回しでも**事実文に別途**入れ得る。並び優先：**痛み方**は常に先、**きっかけ**は他に十分候補があると**短語列では後**（足りなければ繰り上げ）。
 - **出どころ**：**主症状ラベルは入れない**、まとめ箇条書き（`stateAboutBulletsCache` / `buildStateFactsBullets`）と**同系**でよい（キャッシュ優先可）。`comboSlotAllowsGreenYellowCombo`＋**風の初期**（咳・鼻づまり＋`isThroatMainSymptom`）は従来どおり。
 - **🔴**（`📝 Kairoの判断` の組み合わせ行）：`pickRedComboPartsInCandidateOrder` により、**高リスク候補を先**、**足りなければ中リスク**の順に寄せる（`redComboTier`＋`inv` 順）。`gatherRedHighComboCandidatesFromBullets`／`collectRedHighRiskCombinationLabels`。
-- **🟢／🟡 共通（② 意味行）**：`「…」このことから、` の直後に **意味1文**（LLM 生成）。組み合わせが組みづらいときの接続は **`今の状態の組み合わせから、`**。**🟡 専用の「注意が必要なサインも含まれます。」は使わない**（緊急度の差は **③ 👉**）。
+- **🟢／🟡 共通（② 意味行）**：`「…」このことから、` の直後に **意味文**（LLM 生成）。**🌱 最後にと同一実装**（`generateLastBlockBodyWithLLM`）。組み合わせが組みづらいときの接続は **`今の状態の組み合わせから、`**。**🟡 専用の「注意が必要なサインも含まれます。」は使わない**（緊急度の差は **③ 👉**）。
 
-##### ② 意味行（🟢/🟡）— LLM 生成（`generateGreenYellowStateAboutMeaningLineViaLlm`）
+##### ② 意味行（🟢/🟡）— LLM 生成（`generateLastBlockBodyWithLLM`＝🌱 最後にと同一）
 
-**適用範囲**：`🤝 Kairoの判断` の一体段落内、組み合わせ行（`「〇〇＋…」このことから、`）の直後の **1 行目**。
+**適用範囲**：`🤝 Kairoの判断` の一体段落内、組み合わせ行（`「〇〇＋…」このことから、`）の直後。
 
-**目的**：組み合わせ全体が「どういう見立てか」を、ユーザーが**安心して休める**前提で**短く**伝える（🌱 最後にと同様、**行動・受診を急がせない**）。
+**目的**：🌱 最後にと**同じプロンプト・リトライ・フォールバック**で、安心して休める前提の文を出す（見出し「🌱 最後に」は付けない。本文のみ）。
 
-**共通ルール**（🌱 最後にのプロンプト構成に準拠）：
-- **1 文のみ**（改行なし）。**全角 24〜40 字程度**を目安に短く（**48 字超**はリトライ）。
-- **文末テンプレは固定しない**（「パターンです。」に合わせる必要はない）。自然な句点で終える。
-- 見出し・引用括弧・「このことから」は**出力しない**（意味の 1 文だけ）。
-- テンプレート丸写し・一般論・長い定型句（例：「としてよく見られるパターンです」）は禁止。
+**実装**：
+- 本線：`buildGreenYellowComboIntegratedParagraphAsync` → `generateLastBlockBodyWithLLM(level, state, contextText)`
+- **入力**：`buildStateFactsBullets`／`historyTextForCare`（🌱 最後にと同じ）
+- **出力**：最大 **2 文**（`truncateLastBlockBodyToMaxSentences(..., 2)`）。休息・安心・再訪の案内。
+- **同期フォールバック**：`greenYellowMeaningLineFallback`（🌱 最後にの静的文と同一）
 
-**生成の中心軸**（🌱 と同型）：**安心寄り**で、今の情報なら**大きな心配は不要**であることが伝わること。🟢 でも 🟡 でも**同じトーン**（🟡 でも「注意が必要なサイン」「すぐ受診」等は**意味行に書かない**）。
-
-**必須要素**（**1 文に収める**）：
-1. **組み合わせ全体の意味**（入力の `〇〇＋〇〇` と主症状に即した言い切り。単一症状の説明だけは禁止）
-2. **カテゴリに沿ったニュアンス**（サーバが渡すカテゴリヒントに従う。例：PAIN＝一時的な痛みとしてよくある組み合わせ、INFECTION＝休養で落ち着きやすい初期の組み合わせ、など**短く**）
-
-**風の初期症状例外（`windy`）**（`PAIN`／`INFECTION`、§詳細条件）：**一時的な〇〇**の長い定型の代わりに、文中で **風の初期症状／風邪／かかりはじめ** のいずれかを**自然に 1 回**含める（短く）。事実ゼロの接続は **`これらの症状の組み合わせから、`**（付随の咳等・`isThroatMainSymptom` は従来どおり）。
-
-**トーン**：優しく、はっきり。**煽り・恐怖・受診急ぎ・「あなたの場合」**は禁止。
-
-**禁止**：抽象語だけの文、病名断定、救急断定、🟡 専用の「注意が必要なサインも含まれます」、汎用の励ましだけ。
-
-**実装**（`generateLastBlockWithLLM` と同型）：
-- 本線：`buildGreenYellowComboIntegratedParagraphAsync` → `generateGreenYellowStateAboutMeaningLineViaLlm`
-- **入力**：組み合わせ短語列、主症状（`greenYellowPatternNounForTemporary`）、リスクレベル（🟢/🟡）、`windy` ヒント、**会話・箇条書き**（`buildStateFactsBullets`）
-- **プロンプト**：`あなたはKairoです` ＋ **fullRules**（中心軸・必須・禁止・カテゴリヒント）＋ **user** に状態文脈。リトライ時は **simplePrompt**、最終は **コピー fallback**（`greenYellowMeaningLineFallback` 相当の短句）
-- **検証**：`isAcceptableGreenYellowMeaningLineFromLlm`（長さ・禁止語・`windy` 時の語彙）
-- **キャッシュ**：`buildStateAboutMeaningCacheKey({ level, mainSymptom, parts, windy })`
-
-**出力例**（参考。実際は会話・組み合わせに応じて毎回生成）：
+**出力例**（参考）：
 
 ```
-「中程度の頭痛＋微熱＋急変なし」このことから、
-一時的な頭痛として、よくある初期の組み合わせです。
-```
-
-風の初期症状例外：
-```
-「咳＋鼻づまり＋微熱」このことから、
-風の初期症状として見られやすい組み合わせです。
+「激しい運動＋奥のズキ＋悪化」このことから、
+今の情報なら安心して休んで大丈夫です。まずは休息を優先してください。不安になったらまたここで確認してください。
 ```
 - **RED抑制＋超短経過**のとき、**2語**に**せざるを得ない**旧例外は残しうるが、**第三語**として痛み強度**等**を**足して3語**に**できる**なら**3語**を**出す**。**2語**にしたとき**のみ**、短経過1語に**一時的の可能性**を含め、**それ以外**に経過語を**二重**に並べない。
 
@@ -729,7 +704,7 @@ slot_status = {
 👉 現時点では、緊急性は低いため、病院に行く必要はありません。
 👉 今日は無理せず休んで体を回復させてください。
 ```
-※② 意味行は 🟢／🟡 共通（`generateGreenYellowStateAboutMeaningLineViaLlm`・🌱 最後にと同型プロンプト・**短め**・文末固定なし）。例は参考。  
+※② 意味行は 🟢／🟡 共通（`generateLastBlockBodyWithLLM`＝🌱 最後にと同一・最大2文）。例は参考。  
 ※**風の初期症状**例外：文中に風の初期症状系の語を短く1回含める。
 #### 📝 Kairoの判断（🔴のみ・箇条書きの直後）
 🟢🟡とは**別構成**。**箇条書き（`stateAboutBulletsCache`／`buildStateFactsBullets`）は本ブロック内で常に少なくとも 2 行**（「・」）とし、足りない場合は `ensureKairoJudgmentHasMinimumFactBullets` 等で補う。箇条書きが揃っていないまとめは `hasAllSummaryBlocks` では不成立（次段へ進まない）。  

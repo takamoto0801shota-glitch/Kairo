@@ -1687,6 +1687,9 @@ async function enforceSummaryStructureStrict(text, level, history, state) {
   if (level === "🟡" && state) {
     result = ensurePainInfectionYellowFirstAction(result, level, state);
   }
+  if (level === "🟢" || level === "🟡") {
+    result = ensureImmediateActionsClosingLine(result, level);
+  }
   const lastHdr = level === "🔴" ? "💬 最後に" : "🌱 最後に";
   const lastBody = findLastBlockSectionInSummary(result, level);
   if (!lastBody.found || !isSubstantiveLastBlockBody(lastBody.body)) {
@@ -4182,7 +4185,7 @@ async function buildOutlookBlockWithLlm(state) {
   const main = String(getSyncedMainSymptomDisplayLabel(state) || state?.primarySymptom || "症状").trim();
   const category = state?.triageCategory || resolveQuestionCategoryFromState(state);
   const level = state?.decisionLevel || finalizeRiskLevel(state);
-  const painScore = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
+  const painScore = resolvePainScoreNumeric(state);
   const bulletHints = (buildStateFactsBullets(state, { forSummary: true }) || []).slice(0, 10).join("\n");
   const seedRe = buildOutlookReassuranceBullets(state);
   const seedCourse = buildOutlookGreenYellowWeakCourseLine(state);
@@ -5099,9 +5102,8 @@ function buildEarlyHandshakeSectionText(state) {
     return ["📝 Kairoの判断", bullets, empathy ? "" : null, empathy].filter((x) => x !== null).join("\n");
   }
   if (level !== "🟢" && level !== "🟡") return null;
-  const aboutSync = buildGreenYellowStateAboutBlock(state, level);
-  const body = buildGreenYellowHandshakeBlockBodySync(state, aboutSync);
-  return ["🤝 Kairoの判断", body].join("\n");
+  const factBullets = getKairoJudgmentFactBullets(state, { forSummary: true });
+  return ["🤝 Kairoの判断", ...factBullets].join("\n");
 }
 
 function buildSummaryPartialSectionsBeforeLlm(state) {
@@ -5942,9 +5944,59 @@ function buildClosingLine() {
   return templates[Math.floor(Math.random() * templates.length)];
 }
 
-/** 🌱/💬 最後にブロックをLLMで生成。フォールバック廃止。リトライ＋簡易プロンプトで必ず成功させる。 */
-async function generateLastBlockWithLLM(level, state, contextText = "") {
-  const header = level === "🔴" ? "💬 最後に" : "🌱 最後に";
+const IMMEDIATE_ACTIONS_BLOCK_HEADER_LINES = [
+  "✅ 今すぐできること",
+  "✅ 今すぐできること（これだけでOK）",
+  "✅ 今すぐやること",
+  "✅ 今すぐやること（これだけでOK）",
+  "✅ あなたの今すぐやること",
+  "✅ あなたの今すぐやること（これだけでOK）",
+  "🟡 今すぐできること",
+  "🟡 今すぐやること",
+  "🟡 あなたの今すぐやること",
+];
+
+/** ✅ ブロック本文に §10.1② の心理的アンカー（締め1文）が既にあるか */
+function immediateActionsBlockBodyHasClosingAnchor(bodyLines) {
+  for (const line of bodyLines || []) {
+    const t = String(line || "").trim();
+    if (!t || /^→/.test(t) || /^[・•\-]/.test(t)) continue;
+    if (/^(今は|まずは|今日は)/.test(t) && /(回復|休息|整える|負担|安心|近道)/.test(t)) return true;
+  }
+  return false;
+}
+
+/** 🟢/🟡 の `✅ 今すぐできること` 末尾に §10.1② 締めの一文を付ける（🔴は仕様どおり除外） */
+function ensureImmediateActionsClosingLine(text, level) {
+  if (!text || level === "🔴") return text;
+  if (level !== "🟢" && level !== "🟡") return text;
+  const lines = String(text || "").split("\n");
+  const headerIdx = lines.findIndex((l) =>
+    IMMEDIATE_ACTIONS_BLOCK_HEADER_LINES.some((p) => String(l || "").trim().startsWith(p))
+  );
+  if (headerIdx === -1) return text;
+  const nextHeaderIdx = lines.findIndex(
+    (l, idx) =>
+      idx > headerIdx &&
+      /^(🟢|🟡|🔴|🤝|✅|⏳|🚨|💊|🌱|📝|⚠️|🏥|💬|🧾)\s/.test(String(l || "").trim())
+  );
+  const blockEnd = nextHeaderIdx >= 0 ? nextHeaderIdx : lines.length;
+  const body = lines.slice(headerIdx + 1, blockEnd);
+  if (immediateActionsBlockBodyHasClosingAnchor(body)) return text;
+  const closing = buildClosingLine();
+  const trimmedBody = body.slice();
+  while (trimmedBody.length > 0 && !String(trimmedBody[trimmedBody.length - 1] || "").trim()) {
+    trimmedBody.pop();
+  }
+  const insertAt = headerIdx + 1 + trimmedBody.length;
+  const prefix = lines.slice(0, insertAt);
+  const suffix = lines.slice(blockEnd);
+  const needsBlank = prefix.length > 0 && String(prefix[prefix.length - 1] || "").trim();
+  return [...prefix, ...(needsBlank ? [""] : []), closing, ...suffix].join("\n");
+}
+
+/** 🌱/💬 最後にブロック**本文**をLLMで生成（見出しなし）。リトライ＋簡易プロンプトで必ず成功させる。 */
+async function generateLastBlockBodyWithLLM(level, state, contextText = "") {
   const category = state ? (state.triageCategory || resolveQuestionCategoryFromState(state)) : "PAIN";
   const mainSymptom = state?.primarySymptom || "";
   const categoryHint = (() => {
@@ -5976,7 +6028,7 @@ async function generateLastBlockWithLLM(level, state, contextText = "") {
       ? `「今の状況で受診を選ぶのは適切な判断です。無理に我慢せず、一度確認してもらうと安心です。」を主症状「${mainSymptom || "症状"}」に合わせて1〜2文で言い換えてください。見出しは出さず本文のみ。`
       : `主症状「${mainSymptom || "症状"}」に合わせ、**安心して休めること**を核に、休息を勧める**1文**を書いてください（長い場合のみ最大2文）。今の情報なら休んでよいことが伝わるように。「〜してください」で終える。見出しは出さず本文のみ。`;
   const userContent = contextText || (state ? buildStateFactsBullets(state, { forSummary: true }).join("\n") : "") || "症状の状態を確認しました。";
-  const fullPrompt = `あなたはKairoです。以下の会話・状態を踏まえ、「${header}」ブロックの本文のみを生成してください。
+  const fullPrompt = `あなたはKairoです。以下の会話・状態を踏まえ、「${level === "🔴" ? "💬 最後に" : "🌱 最後に"}」ブロックの本文のみを生成してください。
 ${fullRules}
 【厳守】本文は2文以内（「。」が2つ以内）。シンプルで短く。行動につながる内容のみ。見出し行は出力しない。本文のみ。`;
   for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
@@ -5994,8 +6046,7 @@ ${fullRules}
       });
       const rawBody = (completion?.choices?.[0]?.message?.content || "").trim().replace(/^[🌱💬]\s*最後に\s*\n?/i, "");
       if (rawBody && rawBody.length > 5) {
-        const body = truncateLastBlockBodyToMaxSentences(rawBody, 2);
-        return `${header}\n${body}`;
+        return truncateLastBlockBodyToMaxSentences(rawBody, 2);
       }
     } catch (_) {
       /* retry */
@@ -6014,7 +6065,7 @@ ${fullRules}
     });
     const body = (last?.choices?.[0]?.message?.content || "").trim().replace(/^[🌱💬]\s*最後に\s*\n?/i, "");
     if (body && body.length > 5) {
-      return `${header}\n${truncateLastBlockBodyToMaxSentences(body, 2)}`;
+      return truncateLastBlockBodyToMaxSentences(body, 2);
     }
   } catch (_) {
     /* static fallback below */
@@ -6029,15 +6080,20 @@ ${fullRules}
       });
       const r = (retry?.choices?.[0]?.message?.content || "").trim();
       if (r && r.length > 3) {
-        return `${header}\n${truncateLastBlockBodyToMaxSentences(r, 2)}`;
+        return truncateLastBlockBodyToMaxSentences(r, 2);
       }
     } catch (_) {}
   }
-  return `${header}\n${
-    level === "🔴"
-      ? "今の状況で受診を選ぶのは適切な判断です。無理に我慢せず、一度確認してもらうと安心です。"
-      : "今の情報なら安心して休んで大丈夫です。まずは休息を優先してください。不安になったらまたここで確認してください。"
-  }`;
+  return level === "🔴"
+    ? "今の状況で受診を選ぶのは適切な判断です。無理に我慢せず、一度確認してもらうと安心です。"
+    : "今の情報なら安心して休んで大丈夫です。まずは休息を優先してください。不安になったらまたここで確認してください。";
+}
+
+/** 🌱/💬 最後にブロックをLLMで生成。フォールバック廃止。リトライ＋簡易プロンプトで必ず成功させる。 */
+async function generateLastBlockWithLLM(level, state, contextText = "") {
+  const header = level === "🔴" ? "💬 最後に" : "🌱 最後に";
+  const body = await generateLastBlockBodyWithLLM(level, state, contextText);
+  return `${header}\n${body}`;
 }
 
 /** 本文用：モーダルと同じ LLM リファイン＋buildDoActionsFromPlan を使用し、①②の枠（常に2箇条書き）で出力 */
@@ -6287,7 +6343,7 @@ async function ensureImmediateActionsBlock(text, level, state, historyText = "",
   // 夜間（20:00〜02:59）は就寝文が1件目。ベッド休息固定より優先。
   result = ensureNightSleepFirstActionForGreenYellow(result, level, state);
   result = ensurePainInfectionYellowFirstAction(result, level, state);
-  return result;
+  return ensureImmediateActionsClosingLine(result, level);
 }
 
 async function generateMinimalActionsLastResort(context) {
@@ -8916,6 +8972,127 @@ function setSlotFromSpontaneous(state, slotKey, payload = {}) {
   return true;
 }
 
+/**
+ * 固定質問への回答をスロットへ反映（選択肢マッチ／自由記述の両方）。
+ * きっかけ等、選択肢に当てはまらない自由記述でも slotAnswers に載せる。
+ */
+function applyExplicitQuestionResponseSlotFill(state, slotType, message, ctx = {}) {
+  if (!state || !slotType || !SLOT_KEYS.includes(slotType) || slotType === "pain_score") {
+    return { filled: false, selectedIndex: null };
+  }
+  const trimmedMessage = String(message || "").trim();
+  if (trimmedMessage.length < 2) return { filled: false, selectedIndex: null };
+  if (isConfirmationOnlyAnswer(trimmedMessage) || isRejectionOnlyAnswer(trimmedMessage)) {
+    return { filled: false, selectedIndex: null };
+  }
+
+  const lastOptionsSnapshot = Array.isArray(ctx.lastOptions)
+    ? ctx.lastOptions
+    : Array.isArray(state.lastOptions)
+      ? state.lastOptions
+      : [];
+  const classified =
+    ctx.classified ||
+    (lastOptionsSnapshot.length >= 2
+      ? classifyAnswerToOption(trimmedMessage, lastOptionsSnapshot, slotType)
+      : { index: null, usedFreeText: false, useCanonicalSlotText: false });
+  let selectedIndex = classified.index;
+  if (selectedIndex === null && lastOptionsSnapshot.length >= 2) {
+    selectedIndex = mapFreeTextToOptionIndex(trimmedMessage, lastOptionsSnapshot, slotType);
+  }
+  const fallbackOptions =
+    lastOptionsSnapshot.length > 0
+      ? lastOptionsSnapshot
+      : FIXED_QUESTIONS[slotType]?.options || [];
+  const effectiveIndex =
+    selectedIndex !== null && selectedIndex !== undefined
+      ? selectedIndex
+      : mapFreeTextToOptionIndex(trimmedMessage, fallbackOptions, slotType);
+
+  if (!state.slotFilled[slotType]) {
+    state.slotFilled[slotType] = true;
+  }
+  const measuredTemp = extractBodyTemperatureCelsius(trimmedMessage);
+  if (measuredTemp != null) {
+    state.extractedBodyTemperatureC = measuredTemp;
+  }
+  const valueForDisplay =
+    trimmedMessage ||
+    (effectiveIndex !== null &&
+    effectiveIndex !== undefined &&
+    lastOptionsSnapshot[effectiveIndex]
+      ? lastOptionsSnapshot[effectiveIndex]
+      : trimmedMessage);
+  state.slotAnswers[slotType] = valueForDisplay;
+
+  if (slotType === "duration" && effectiveIndex !== null && effectiveIndex !== undefined) {
+    state.durationMeta = {
+      selectedIndex: effectiveIndex,
+      raw_text: valueForDisplay || "",
+      normalized: effectiveIndex === 2 ? "day_or_more" : effectiveIndex === 1 ? "hours" : "short",
+    };
+  }
+
+  const idxForNorm =
+    effectiveIndex !== null && effectiveIndex !== undefined
+      ? effectiveIndex
+      : fallbackOptions.length >= 3
+        ? 1
+        : 0;
+  let normalized = buildNormalizedAnswer(slotType, valueForDisplay, idxForNorm);
+  if (!normalized) {
+    normalized = { slotId: slotType, rawAnswer: valueForDisplay, riskLevel: RISK_LEVELS.MEDIUM };
+  }
+  state.slotNormalized[slotType] = normalized;
+  state.lastNormalizedAnswer = normalized;
+  markSlotStatus(state, slotType, "question_response", valueForDisplay);
+
+  if (slotType === "cause_category" && hasConcreteCauseDetail(trimmedMessage)) {
+    state.causeDetailText = trimmedMessage;
+  }
+  if (slotType === "associated_symptoms" && effectiveIndex !== null && lastOptionsSnapshot[effectiveIndex]) {
+    const selectedOpt = lastOptionsSnapshot[effectiveIndex] || valueForDisplay || "";
+    const answerCombined = (valueForDisplay || selectedOpt || "").trim();
+    const selectedIsFeverOption = lastOptionsSnapshot[effectiveIndex] === "発熱がある";
+    const isFeverAnswerForInfectionShift =
+      selectedIsFeverOption || textImpliesFeverForInfectionTriage(answerCombined);
+    if (isFeverAnswerForInfectionShift) {
+      state.triageCategory = "INFECTION";
+    }
+  }
+
+  state.confidence = computeConfidenceFromSlots(state.slotFilled, state);
+  return { filled: true, selectedIndex: effectiveIndex };
+}
+
+/** きっかけ質問への直近回答がスロットに載っていなければ、会話末尾から補完する */
+function backfillCauseSlotFromRecentUserTurn(conversationId, state) {
+  if (!state || !conversationId) return false;
+  if (getCauseRawSlotsAnswer(state)) return false;
+  if (!state.askedSlots?.cause_category) return false;
+  const hist = conversationHistory[conversationId];
+  if (!hist || !Array.isArray(hist)) return false;
+  const userMsgs = hist.filter((m) => m.role === "user").map((m) => String(m.content ?? "").trim()).filter(Boolean);
+  const lastUser = userMsgs[userMsgs.length - 1];
+  if (!lastUser || isConfirmationOnlyAnswer(lastUser) || isRejectionOnlyAnswer(lastUser)) return false;
+  const extracted = extractCauseCategory(lastUser);
+  const raw = extracted?.raw || lastUser;
+  if (!raw || isAbsentOrUnknownSlotBulletAnswer(raw)) return false;
+  if (
+    !setSlotFromSpontaneous(state, "cause_category", {
+      rawAnswer: raw,
+      selectedIndex: extracted?.selectedIndex ?? 1,
+      allowOverwrite: true,
+    })
+  ) {
+    return false;
+  }
+  if (hasConcreteCauseDetail(lastUser)) {
+    state.causeDetailText = lastUser;
+  }
+  return true;
+}
+
 function applySpontaneousSlotFill(state, message, opts = {}) {
   if (!state) return 0;
   const { isFirstMessage = false } = opts;
@@ -9072,10 +9249,65 @@ function updatePainScoreState(state, rawScore, weight, rawAnswer) {
   markSlotStatus(state, "pain_score", "question_response", rawAnswer ?? String(rawScore));
 }
 
-/** 痛みの強さは未回答のまま lastPainScore を立てない（finalize 用のダミー埋めはしない） */
+/** 痛みスコア（1–10）を state から解決。lastPainScore → スロット回答 → 箇条書きの順で参照 */
+function resolvePainScoreNumeric(state) {
+  if (!state) return null;
+  if (Number.isFinite(state.lastPainScore)) return state.lastPainScore;
+  const answers = state?.slotAnswers || {};
+  const raw = String(getSlotStatusValue(state, "severity", answers.pain_score) || "").trim();
+  if (raw) {
+    const slash = raw.match(/(\d{1,2})\s*\/\s*10/);
+    if (slash) {
+      const n = Number(slash[1]);
+      if (Number.isFinite(n) && n >= 1 && n <= 10) return n;
+    }
+    const parsed = normalizePainScoreInput(raw);
+    if (parsed !== null) return parsed;
+    const lone = raw.match(/(?:^|[^\d])(10|[1-9])(?:$|[^\d])/);
+    if (lone) {
+      const n = Number(lone[1]);
+      if (Number.isFinite(n) && n >= 1 && n <= 10) return n;
+    }
+  }
+  const cache = state.stateAboutBulletsCache;
+  if (Array.isArray(cache)) {
+    for (const line of cache) {
+      const s = String(line || "");
+      const paren = s.match(/痛みは[^（]*[（(](\d{1,2})\s*\/\s*10[）)]/);
+      if (paren) {
+        const n = Number(paren[1]);
+        if (Number.isFinite(n) && n >= 1 && n <= 10) return n;
+      }
+      const plain = s.match(/痛みは\s*(\d{1,2})\s*\/\s*10/);
+      if (plain) {
+        const n = Number(plain[1]);
+        if (Number.isFinite(n) && n >= 1 && n <= 10) return n;
+      }
+    }
+  }
+  return null;
+}
+
+/** lastPainScore 未設定時、スロット回答等から同期（🟡弱/🟡強の判定用） */
 function ensurePainScoreFallback(state) {
   if (!state) return;
   if (Number.isFinite(state.lastPainScore)) return;
+  const n = resolvePainScoreNumeric(state);
+  if (!Number.isFinite(n)) return;
+  state.lastPainScore = n;
+  state.lastPainWeight = n >= 7 ? 2.0 : n >= 5 ? 1.5 : 1.0;
+  if (!state.slotFilled?.pain_score) {
+    state.slotFilled = state.slotFilled || {};
+    state.slotFilled.pain_score = true;
+  }
+  if (!state.slotAnswers?.pain_score) {
+    state.slotAnswers = state.slotAnswers || {};
+    state.slotAnswers.pain_score = String(n);
+  }
+  if (!state.slotNormalized?.pain_score) {
+    state.slotNormalized = state.slotNormalized || {};
+    state.slotNormalized.pain_score = buildNormalizedAnswer("pain_score", String(n), 0, n);
+  }
 }
 
 /**
@@ -9089,7 +9321,8 @@ function syncYellowTierBeforeSummary(state) {
     state.yellowTier = null;
     return;
   }
-  const score = Number.isFinite(state.lastPainScore) ? state.lastPainScore : null;
+  ensurePainScoreFallback(state);
+  const score = resolvePainScoreNumeric(state);
   state.yellowTier = Number.isFinite(score) && score >= 8 ? "strong" : "weak";
 }
 
@@ -11644,7 +11877,7 @@ function comboCauseBulletInnerToShortLabel(rawLine) {
   if (!inner) return "";
   const written = polishCausePhraseToWrittenJapanese(inner);
   if (!written) return "";
-  const sq = squeezeCausePhraseToComboShortLabel(written);
+  const sq = semanticRemapComboLabelFromSource(written) || squeezeCausePhraseToComboShortLabel(written);
   return finalizeComboLabelForCombinationLine(sq) || sq;
 }
 
@@ -11655,7 +11888,7 @@ function buildCauseComboShortLabelSync(state) {
   if (!raw) return "";
   const written = polishCausePhraseToWrittenJapanese(raw);
   if (!written) return "";
-  const sq = squeezeCausePhraseToComboShortLabel(written);
+  const sq = semanticRemapComboLabelFromSource(written) || squeezeCausePhraseToComboShortLabel(written);
   return finalizeComboLabelForCombinationLine(sq) || sq;
 }
 
@@ -11682,7 +11915,7 @@ function buildRedCauseComboShortLabelForState(state) {
   if (!cr || /^(ない|なし|思い当たらない|わからない|不明)/.test(cr)) return "";
   const written = polishCausePhraseToWrittenJapanese(cr.replace(/です$|ます$/, "").slice(0, 120));
   if (!written) return "";
-  const sq = squeezeCausePhraseToComboShortLabel(written);
+  const sq = semanticRemapComboLabelFromSource(written) || squeezeCausePhraseToComboShortLabel(written);
   return finalizeComboLabelForCombinationLine(sq) || sq;
 }
 
@@ -11704,12 +11937,7 @@ function buildPainStrengthBulletLine(state) {
     /^(ない|なし|特にない|特になし|これ以外は特にない|わからない|分からない|不明|思い当たらない|特に思い当たらない)$/i.test(
       String(text || "").trim()
     );
-  const painScore = Number.isFinite(state?.lastPainScore)
-    ? state.lastPainScore
-    : (() => {
-        const m = String(val("severity", answers.pain_score)).match(/(\d{1,2})/);
-        return m ? Number(m[1]) : null;
-      })();
+  const painScore = resolvePainScoreNumeric(state);
   if (Number.isFinite(painScore)) {
     const level =
       painScore <= 3 ? "軽め" : painScore <= 6 ? "中程度" : painScore <= 8 ? "やや強め" : "強め";
@@ -11741,7 +11969,7 @@ function collectRawInputsForStateBullets(state) {
   };
   const category = state?.triageCategory || resolveQuestionCategoryFromState(state) || "PAIN";
   if (category === "PAIN") {
-    const painScore = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
+    const painScore = resolvePainScoreNumeric(state);
     if (painScore !== null) push("痛みの強さ", `${painScore}/10`);
     else push("痛みの強さ", val("severity", answers.pain_score));
   }
@@ -11801,6 +12029,9 @@ function ensureUserUtterancesCapturedBeforeConfirmation(conversationId, state) {
   }
   if (joined.trim()) {
     spontaneousAdds += applySpontaneousSlotFill(state, joined, { isFirstMessage: false });
+  }
+  if (backfillCauseSlotFromRecentUserTurn(conversationId, state)) {
+    spontaneousAdds += 1;
   }
   ensureSlotFilledConsistency(state);
   if (htcChanged || spontaneousAdds > 0) {
@@ -12213,6 +12444,15 @@ function injectMissingSlotBulletsFromState(bullets, state, category, opts = {}) 
           toInsert.push(`・${polishUserSlotForBulletLine(chunk)}`);
         }
       }
+    }
+  }
+  const causeRaw = getCauseRawSlotsAnswer(state);
+  if (!isAbsentOrUnknownSlotBulletAnswer(causeRaw)) {
+    for (const chunk of splitSlotAnswerIntoBulletChunks(causeRaw)) {
+      if (isAbsentOrUnknownSlotBulletAnswer(chunk)) continue;
+      if (bulletLinesCoverSlotText(out, chunk)) continue;
+      const polished = polishCausePhraseToWrittenJapanese(String(chunk).trim());
+      toInsert.push(polished ? `・${polished}` : `・${polishUserSlotForBulletLine(chunk)}`);
     }
   }
   if (toInsert.length === 0) return out;
@@ -12719,10 +12959,12 @@ async function buildConfirmationBulletsDraftSync(state, opts = {}) {
 }
 
 function stateAboutLineCacheKey(state, level) {
+  if (level === "🟡") syncYellowTierBeforeSummary(state);
   const bullets = Array.isArray(state.stateAboutBulletsCache)
     ? state.stateAboutBulletsCache.join("\x1e")
     : "";
-  return `${level}|${bullets}|${state.bulletLlmPolishedSourceFingerprint || ""}|${state.bulletPolishReady ? "1" : "0"}`;
+  const yt = level === "🟡" ? state.yellowTier || "weak" : "";
+  return `${level}|${yt}|${bullets}|${state.bulletLlmPolishedSourceFingerprint || ""}|${state.bulletPolishReady ? "1" : "0"}`;
 }
 
 /** 🤝 共感・判断（🟢/🟡）を1会話1キーでキャッシュ */
@@ -13088,7 +13330,57 @@ function stripBulletLead(line) {
   return String(line || "").replace(/^・\s*/, "").trim();
 }
 
-/** 組み合わせ「〇〇」1つあたりの最大文字数。「…」での切り捨て省略はせず、`hardCapComboLabelCharsNoEllipsis` で言い換え／圧縮で収める */
+/**
+ * 7字上限で機械切り詰めする前に、意味が通る短語へ言い換える（LLM失敗時の本線ヒューリスティック）。
+ */
+function semanticRemapComboLabelFromSource(raw) {
+  let t = stripBulletLead(String(raw || ""))
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!t) return "";
+  const dur = shrinkDurationLineForComboShortLabel(t);
+  if (dur) return dur;
+  if (/運動/.test(t)) {
+    if (/かなり|激|多|ハード|かなり/.test(t)) return "激しい運動";
+    return "運動";
+  }
+  if (/目の奥/.test(t) && /ズキ|ジン|重|痛|締|ヒリ/.test(t)) return "奥のズキ";
+  if (/目の奥/.test(t)) return "目の奥";
+  const onoM = t.match(/(ズキズキ|キリキリ|ヒリヒリ|ジンジン|チクチク|ドクドク)/);
+  if (onoM) return onoM[1];
+  if (/悪化/.test(t)) return "悪化";
+  if (/回復|マシ|良くな/.test(t)) return "回復";
+  if (/吐き気|嘔吐/.test(t)) return "吐き気";
+  if (/発熱|熱が/.test(t)) return "発熱";
+  if (/日差|紫外/.test(t)) return "日差し";
+  if (/寝不足|睡眠/.test(t)) return "寝不足";
+  if (/画面|スマホ|パソコン|PC/.test(t)) return "画面";
+  if (/ストレス|緊張/.test(t)) return "ストレス";
+  if (/^痛みは/.test(t) || /\d+\s*\/\s*10/.test(t)) {
+    const m = t.match(/(\d+)\s*\/\s*10/);
+    if (m) {
+      const n = Number(m[1]);
+      if (n >= 8) return "強い痛み";
+      if (n >= 5) return "やや強い";
+      return "軽い痛み";
+    }
+  }
+  if (/寒|冷え/.test(t)) return "寒さ";
+  return "";
+}
+
+/** 7字機械切り詰めで語の途中で切れた短語か */
+function isLikelyTruncatedComboLabel(label) {
+  const t = String(label || "").trim();
+  if (!t) return false;
+  if (/かなりし$|特に[ズキヒジ]$|をかなり$|が特に$|なりし$/.test(t)) return true;
+  if (t.length >= KAIRO_COMBO_SHORT_LABEL_MAX_CHARS && /[しずをがにでて]$/.test(t)) return true;
+  return false;
+}
+
+/**
+ * 組み合わせ「〇〇」1つあたりの最大文字数。「…」での切り捨て省略はせず、`hardCapComboLabelCharsNoEllipsis` で言い換え／圧縮で収める
+ */
 const KAIRO_COMBO_SHORT_LABEL_MAX_CHARS = 7;
 /** LLM 短縮の目安（KAIRO_SPEC：各短語 3〜7 文字）。最終行は `applyKairoSpec647ComboShortLabelFilter` で上限 MAX まで整える */
 const KAIRO_COMBO_SHORT_LABEL_TARGET_MIN_CHARS = 3;
@@ -13214,7 +13506,16 @@ function applyKairoSpec647ComboShortLabelFilter(raw) {
     new RegExp(`^(${ono})(?:する)?(頭痛|腹痛|歯痛|腰痛|のど|喉|咽頭|痛み)$`),
     "$1"
   );
-  s = hardCapComboLabelCharsNoEllipsis(s);
+  const semanticFirst = semanticRemapComboLabelFromSource(s || raw);
+  if (semanticFirst && semanticFirst.length <= KAIRO_COMBO_SHORT_LABEL_MAX_CHARS) {
+    s = semanticFirst;
+  } else {
+    s = hardCapComboLabelCharsNoEllipsis(s);
+    if (isLikelyTruncatedComboLabel(s)) {
+      const alt = semanticRemapComboLabelFromSource(raw);
+      if (alt && alt.length <= KAIRO_COMBO_SHORT_LABEL_MAX_CHARS) s = alt;
+    }
+  }
   if (/^奥に/.test(s) && !/目の奥/.test(s)) return "";
   if (s === "にある" || /^にある…?$/.test(s)) return "";
   return s.trim();
@@ -13260,9 +13561,13 @@ function comboLabelPreservesCriticalFacts(label, sourceRaw) {
   if (comboGreenYellowShortLabelContainsForbiddenNai(lab)) return false;
   const hedgeMatches = src.match(new RegExp(BULLET_DEGREE_HEDGE_PATTERN.source, "g"));
   if (hedgeMatches) {
-    for (const h of hedgeMatches) {
-      const hn = String(h).replace(/\s/g, "");
-      if (hn && !lab.replace(/\s/g, "").includes(hn)) return false;
+    const labNorm = lab.replace(/\s/g, "");
+    const strongInSrc = hedgeMatches.some((h) =>
+      /^(かなり|相当|非常に|ひどく|だいぶ)$/.test(String(h).replace(/\s/g, ""))
+    );
+    const strongInLab = /(かなり|相当|非常|ひど|だいぶ|激し|強い|強め)/.test(labNorm);
+    if (strongInSrc && !strongInLab && !/(運動|激|強|痛|ズキ|悪化)/.test(labNorm)) {
+      return false;
     }
   }
   if (/(日前|昨日|一昨日|さっき|数時間|数十分|週間|時間前)/.test(src)) {
@@ -13292,6 +13597,29 @@ function validateComboLabelsFromLlm(labels, sourceItems) {
   return { ok: true };
 }
 
+function validateComboLabelsFromLlmRelaxed(labels, sourceItems) {
+  if (!Array.isArray(labels) || labels.length !== sourceItems.length) {
+    return { ok: false, reason: "count" };
+  }
+  const seen = new Set();
+  for (let i = 0; i < labels.length; i++) {
+    const lab = String(labels[i] || "").trim();
+    if (!lab || lab.length < 2 || lab.length > KAIRO_COMBO_SHORT_LABEL_MAX_CHARS) {
+      return { ok: false, reason: `item_${i}_len` };
+    }
+    if (/^(経過|痛みの経過|症状|不調|ある|ない)$/.test(lab)) {
+      return { ok: false, reason: `item_${i}_generic` };
+    }
+    if (isLikelyTruncatedComboLabel(lab)) return { ok: false, reason: `item_${i}_trunc` };
+    if (comboGreenYellowShortLabelContainsForbiddenNai(lab)) {
+      return { ok: false, reason: `item_${i}_nai` };
+    }
+    if (seen.has(lab)) return { ok: false, reason: "duplicate" };
+    seen.add(lab);
+  }
+  return { ok: true };
+}
+
 const COMBO_LABEL_LLM_MAX_ATTEMPTS = 4;
 
 /**
@@ -13311,7 +13639,7 @@ async function shortenComboLabelsForCombinationLineWithLlm(state, rawParts) {
     "**中心軸**：ユーザーが実際に言った**具体の事実**を短く残す。抽象語・枠の名前だけにしない。",
     `【文字数】各語は全角 **${KAIRO_COMBO_SHORT_LABEL_TARGET_MIN_CHARS}〜${KAIRO_COMBO_SHORT_LABEL_TARGET_MAX_CHARS} 字**（上限 ${KAIRO_COMBO_SHORT_LABEL_MAX_CHARS} 字）。「…」での省略禁止。`,
     "【経過・時間】「経過は」「痛みの経過」は禁止。**時間軸だけ**（例：3日前から、昨日から、さっきから）。",
-    "【程度】原文の やや・少し・かなり 等は**必ず残す**（例：やや強い痛み）。",
+    "【程度】原文の やや・少し・かなり 等は**核を残して**短く（例：かなり運動→激しい運動、特にズキ→奥のズキ）。語の途中で切らない。",
     "【きっかけ】「〜の可能性」は付けず要因の語だけ（例：日差しの刺激、寝不足、画面見過ぎ）。",
     "【痛み】ズキズキする痛み→ズキズキ、6/10→6/10程度 など。同じ痛みの出方を2語に分けない。",
     "【OK例】「やや強い痛み」「日差しの刺激」「3日前から」／「ズキズキ」「他症状なし」「6/10程度」",
@@ -13340,6 +13668,7 @@ ${fullRules}`;
     return parsed.labels.map((s, i) => finalizeComboLabelFromLlmOutput(s, items[i]));
   };
 
+  let lastMapped = null;
   for (let attempt = 0; attempt < COMBO_LABEL_LLM_MAX_ATTEMPTS; attempt++) {
     try {
       const useSimple = attempt >= 2;
@@ -13347,7 +13676,9 @@ ${fullRules}`;
       if (useSimple) {
         const hints = items
           .map((s, i) => {
-            const fb = finalizeComboLabelForCombinationLine(s);
+            const fb =
+              semanticRemapComboLabelFromSource(s) ||
+              finalizeComboLabelForCombinationLine(s);
             return `${i + 1}. 元:${s.slice(0, 40)} → 目安:${fb || "（短語）"}`;
           })
           .join("\n");
@@ -13356,7 +13687,7 @@ ${fullRules}`;
           messages: [
             {
               role: "system",
-              content: `各候補を3〜7字の短語に。JSONのみ {"labels":[...]} 要素${n}個。具体性を落とさない。OK例: やや強い痛み, 日差しの刺激, 3日前から`,
+              content: `各候補を3〜7字の短語に。JSONのみ {"labels":[...]} 要素${n}個。語の途中で切らない。OK例: 激しい運動, 奥のズキ, 悪化`,
             },
             { role: "user", content: hints },
           ],
@@ -13377,8 +13708,13 @@ ${fullRules}`;
       const parsed = parseJsonObjectFromText(completion?.choices?.[0]?.message?.content || "");
       const mapped = mapParsedLabels(parsed);
       if (!mapped) continue;
+      lastMapped = mapped;
       const cov = validateComboLabelsFromLlm(mapped, items);
       if (cov.ok) return mapped;
+      if (attempt >= COMBO_LABEL_LLM_MAX_ATTEMPTS - 1) {
+        const relaxed = validateComboLabelsFromLlmRelaxed(mapped, items);
+        if (relaxed.ok) return mapped;
+      }
       console.warn("[KAIRO] shortenComboLabelsForCombinationLineWithLlm: validation failed", {
         attempt,
         reason: cov.reason,
@@ -13389,21 +13725,45 @@ ${fullRules}`;
     }
   }
 
+  if (lastMapped && validateComboLabelsFromLlmRelaxed(lastMapped, items).ok) {
+    return lastMapped;
+  }
   return null;
 }
 
-/** 組み合わせパーツを LLM で短縮（各ラベル目安 3〜7 文字）、失敗時は `finalizeComboLabelForCombinationLine` のみ */
+function buildSmartComboLabelsHeuristic(rawParts) {
+  if (!Array.isArray(rawParts)) return [];
+  return rawParts
+    .map((p) => {
+      const src = String(p || "").trim();
+      if (!src) return "";
+      const sem = semanticRemapComboLabelFromSource(src);
+      if (sem) {
+        const out = finalizeComboLabelFromLlmOutput(sem, src);
+        if (out && !isLikelyTruncatedComboLabel(out)) return out;
+      }
+      const fin = finalizeComboLabelForCombinationLine(src);
+      if (fin && !isLikelyTruncatedComboLabel(fin)) return fin;
+      const fallback = semanticRemapComboLabelFromSource(src);
+      return fallback || fin || "";
+    })
+    .filter(Boolean);
+}
+
+/** 組み合わせパーツを LLM で短縮（各ラベル目安 3〜7 文字）、失敗時は意味の通るヒューリスティック */
 async function finalizeCombinationPartsWithLlm(state, rawParts) {
   if (!Array.isArray(rawParts) || rawParts.length === 0) return [];
-  const heuristic = rawParts.map((p) => finalizeComboLabelForCombinationLine(p)).filter(Boolean);
+  const smartHeuristic = buildSmartComboLabelsHeuristic(rawParts);
   const llm = await shortenComboLabelsForCombinationLineWithLlm(state, rawParts);
   if (llm && llm.length === rawParts.length) {
     return llm.map((x, i) => {
       const t = String(x || "").trim();
-      return t || heuristic[i] || finalizeComboLabelForCombinationLine(rawParts[i]);
+      return t || smartHeuristic[i] || finalizeComboLabelForCombinationLine(rawParts[i]);
     });
   }
-  return heuristic;
+  return smartHeuristic.length > 0
+    ? smartHeuristic
+    : rawParts.map((p) => finalizeComboLabelForCombinationLine(p)).filter(Boolean);
 }
 
 /** 組み合わせ行の逆優先度（🟢🟡の候補並び用）：きっかけはなるべく後回し。**痛み方②は `pickGreenYellowComboPartsReservingPainManner` で必ず先に確保**（数値が高いほど先に採用するのは痛み方以外）。🔴は `pickRedComboPartsInCandidateOrder` で逆優先度を使わない。※きっかけ本文は `buildGreenYellowComboPlusClause` で先頭項として注入も可 */
@@ -13990,8 +14350,8 @@ function buildGreenYellowComboPlusClause(state, parts, causeShortOverride) {
 /**
  * 🤝🟢🟡 ①の「〇〇＋〇〇」列挙と②パターン文を1段落に統合（KAIRO_SPEC・「…」このことから、一時的な〇〇として…）。
  * @param {string} [causeShortOverride] - `buildCauseComboShortLabelAsync` 結果を渡す（省略時は同期短語）。
- * **同期版**：OPENAI_API_KEY なし・LLM 失敗時のフォールバック用。意味行は固定テンプレ。
- * **本線**は `buildGreenYellowComboIntegratedParagraphAsync`（意味行を LLM 動的生成）。
+ * **同期版**：OPENAI_API_KEY なし・LLM 失敗時のフォールバック用。意味行は 🌱 最後にと同一の静的文。
+ * **本線**は `buildGreenYellowComboIntegratedParagraphAsync`（意味行は `generateLastBlockBodyWithLLM`＝🌱 最後にと同一）。
  */
 function buildGreenYellowComboIntegratedParagraph(state, level, parts, causeShortOverride) {
   const lv = level === "🟡" || level === "🟢" ? level : finalizeRiskLevel(state);
@@ -14003,42 +14363,32 @@ function buildGreenYellowComboIntegratedParagraph(state, level, parts, causeShor
     : windy
       ? `これらの症状の組み合わせから、`
       : `今の状態の組み合わせから、`;
-  return `${lead}\n${greenYellowMeaningLineFallback(state, windy)}`;
+  return `${lead}\n${greenYellowMeaningLineFallback(state)}`;
 }
 
-/** 🟢/🟡 ②意味行の同期フォールバック（短め・文末固定なし） */
-function greenYellowMeaningLineFallback(state, windy = false) {
-  const noun = greenYellowPatternNounForTemporary(state) || "体調不良";
-  if (windy) return "風の初期症状として見られやすい組み合わせです。";
-  return `一時的な${noun}として、よくある初期の組み合わせです。`;
-}
-
-/** 🟢/🟡 ②意味行：LLM 1文の検証（短さ・禁止語。文末テンプレ固定はしない） */
-function isAcceptableGreenYellowMeaningLineFromLlm(text, options = {}) {
-  const t = String(text || "").trim();
-  if (!t || t.length < 6) return false;
-  if (t.length > 48) return false;
-  if (!/[。．]$/.test(t)) return false;
-  if (/注意が必要なサイン|すぐ受診|危ない|あなたの場合|あなたには/.test(t)) return false;
-  if (options.windy && !/(風の初期|風邪|かかりはじめ)/.test(t)) return false;
-  return true;
+/** 🟢/🟡 ②意味行の同期フォールバック（🌱 最後にと同一の静的文） */
+function greenYellowMeaningLineFallback(state, _windy = false) {
+  void state;
+  return "今の情報なら安心して休んで大丈夫です。まずは休息を優先してください。不安になったらまたここで確認してください。";
 }
 
 /**
- * 同上の **async 版（本線）**：意味行（②）を `generateGreenYellowStateAboutMeaningLineViaLlm` で
- * 組み合わせ＋主症状から LLM 動的生成する（短め・文末固定なし）。
- * 風の初期症状例外時は LLM プロンプトにヒントを渡して語を含めさせる。
+ * 同上の **async 版（本線）**：意味行（②）は `generateLastBlockBodyWithLLM`（🌱 最後にと同一実装）をそのまま使う。
  */
 async function buildGreenYellowComboIntegratedParagraphAsync(state, level, parts, causeShortOverride) {
   const lv = level === "🟡" || level === "🟢" ? level : finalizeRiskLevel(state);
-  const windy = shouldUseWindyColdOnsetPatternForStateAbout(state);
   const clause = buildGreenYellowComboPlusClause(state, parts, causeShortOverride);
+  const windy = shouldUseWindyColdOnsetPatternForStateAbout(state);
   const lead = clause
     ? `${clause}このことから、`
     : windy
       ? `これらの症状の組み合わせから、`
       : `今の状態の組み合わせから、`;
-  const tail = await generateGreenYellowStateAboutMeaningLineViaLlm(state, lv, parts, { windy });
+  const contextText =
+    (state ? buildStateFactsBullets(state, { forSummary: true }).join("\n") : "") ||
+    state?.historyTextForCare ||
+    "";
+  const tail = await generateLastBlockBodyWithLLM(lv, state, contextText);
   return `${lead}\n${tail}`;
 }
 
@@ -14749,128 +15099,6 @@ ${mainSymptom}
   return f;
 }
 
-/**
- * 🟢/🟡「意味」1行：組み合わせ＋主症状から LLM 生成（`generateLastBlockWithLLM` と同型プロンプト）。
- * 文末テンプレ固定なし。風の初期症状例外時は文中に語彙を1回含める。
- */
-async function generateGreenYellowStateAboutMeaningLineViaLlm(state, level, parts, options = {}) {
-  const lv = level === "🟡" ? "🟡" : "🟢";
-  const windy = !!options.windy;
-  const noun = greenYellowPatternNounForTemporary(state) || "体調不良";
-  const joined = (parts || []).map((p) => String(p || "").trim()).filter(Boolean).join("＋");
-
-  const cacheKey = buildStateAboutMeaningCacheKey({
-    level: lv,
-    mainSymptom: noun,
-    parts,
-    windy,
-  });
-  const cached = getCachedStateAboutMeaningLine(state, cacheKey);
-  if (cached) return cached;
-
-  if (!process.env.OPENAI_API_KEY || !joined) {
-    const f = greenYellowMeaningLineFallback(state, windy);
-    setCachedStateAboutMeaningLine(state, cacheKey, f);
-    return f;
-  }
-
-  const category = state ? state.triageCategory || resolveQuestionCategoryFromState(state) : "PAIN";
-  const categoryHint = (() => {
-    const hints = {
-      PAIN: `痛み系：一時的な${noun}としてよくある組み合わせであることが短く伝わるように。大きな心配は不要なニュアンス。`,
-      SKIN: `皮膚粘膜系：刺激を避けて休めば落ち着きやすい組み合わせであることが短く伝わるように。`,
-      GI: `消化器系：消化を休めれば落ち着きやすい初期の組み合わせであることが短く伝わるように。`,
-      INFECTION: `発熱感染系：休養で落ち着きやすい初期の組み合わせであることが短く伝わるように。休むことへの許可と安心。`,
-      TIRED: `疲労・だるさ系：無理を減らせば回復しやすい組み合わせであることが短く伝わるように。`,
-    };
-    return hints[category] || hints.PAIN;
-  })();
-
-  const lvDescription =
-    lv === "🟡"
-      ? "中等度（🟡）。🟢 と同じく短く安心寄り。意味行に「注意が必要なサイン」は書かない。"
-      : "緊急性は低い側（🟢）。短く安心寄り。";
-
-  const windyRule = windy
-    ? "①文中に「風の初期症状」「風邪」「かかりはじめ」のいずれかを**自然に1回**含める（短く）。"
-    : `①主症状（${noun}）に軽く触れるか「一時的な${noun}」のニュアンスを含める（冗長に繰り返さない）。`;
-
-  const fullRules = `🤝 Kairoの判断の「② 意味」1文のみを生成する（「このことから、」の直後に置く文）。
-**1文のみ**（改行なし）。**全角24〜40字程度**を目安に短く（「。」は1つ）。
-**中心軸**（🌱 最後にと同様）：**安心して休める**前提で、今の情報なら大きな心配は不要であることが伝わること。煽り・受診急ぎは禁止。
-**必須**：
-${windyRule}
-②組み合わせ「${joined}」全体の意味を述べる（単一症状の説明だけは禁止）。
-③カテゴリに合わせる：${categoryHint}
-**禁止**：文末テンプレの丸写し（「としてよく見られるパターンです」等の長い定型）、「注意が必要なサインも含まれます」、危険・すぐ受診・あなたの場合、病名断定、抽象的な励ましだけ。
-【入力】組み合わせ：${joined}／主症状：${noun}／レベル：${lvDescription}`;
-  const simplePrompt = windy
-    ? `「風の初期症状として見られやすい組み合わせです。」を組み合わせ「${joined}」・主症状「${noun}」に合わせて**1文**で言い換えてください。見出しは出さず意味の1文のみ。短く。`
-    : `「一時的な${noun}として、よくある初期の組み合わせです。」を組み合わせ「${joined}」に合わせて**1文**で言い換えてください。見出しは出さず意味の1文のみ。短く安心寄り。`;
-  const userContent =
-    (state ? buildStateFactsBullets(state, { forSummary: true }).join("\n") : "") ||
-    state?.historyTextForCare ||
-    "症状の状態を確認しました。";
-  const fullPrompt = `あなたはKairoです。以下の会話・状態を踏まえ、🤝 Kairoの判断ブロックの「② 意味」となる**本文1文のみ**を生成してください。
-${fullRules}
-【厳守】1文のみ。シンプルで短く。見出し・「このことから」・引用括弧は出力しない。意味の1文だけ。`;
-
-  const normalizeMeaningLine = (raw) =>
-    String(raw || "")
-      .trim()
-      .replace(/^[\s・\-*「『]+/g, "")
-      .replace(/\n+/g, " ")
-      .replace(/[」』]$/g, "")
-      .replace(/^このことから[、,]?\s*/g, "")
-      .trim();
-
-  for (let attempt = 0; attempt < LLM_RETRY_COUNT; attempt++) {
-    try {
-      const useSimple = attempt >= 3;
-      const prompt = useSimple ? simplePrompt : fullPrompt;
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: prompt },
-          { role: "user", content: useSimple ? `組み合わせ：${joined}` : userContent },
-        ],
-        temperature: 0.2 + Math.min(attempt, 6) * 0.04,
-        max_tokens: 96,
-      });
-      let text = normalizeMeaningLine(completion?.choices?.[0]?.message?.content || "");
-      if (!text.endsWith("。") && !text.endsWith("．")) text += "。";
-      if (isAcceptableGreenYellowMeaningLineFromLlm(text, { windy })) {
-        setCachedStateAboutMeaningLine(state, cacheKey, text);
-        return text;
-      }
-    } catch (_) {
-      /* retry */
-    }
-  }
-  const copyPrompt = windy
-    ? "「風の初期症状として見られやすい組み合わせです。」をそのまま返してください。"
-    : `「一時的な${noun}として、よくある初期の組み合わせです。」をそのまま返してください。`;
-  try {
-    const last = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: copyPrompt }],
-      temperature: 0,
-      max_tokens: 80,
-    });
-    let text = normalizeMeaningLine(last?.choices?.[0]?.message?.content || "");
-    if (!text.endsWith("。")) text += "。";
-    if (isAcceptableGreenYellowMeaningLineFromLlm(text, { windy })) {
-      setCachedStateAboutMeaningLine(state, cacheKey, text);
-      return text;
-    }
-  } catch (_) {
-    /* static fallback */
-  }
-  const f = greenYellowMeaningLineFallback(state, windy);
-  setCachedStateAboutMeaningLine(state, cacheKey, f);
-  return f;
-}
-
 /** 🔴専用：箇条書きの直後。意味行は同期フォールバック（APIキーなし・非async経路用） */
 function buildRedStateAboutEmpathyBlock(state) {
   const rawParts = collectRedHighRiskCombinationLabels(state);
@@ -15201,7 +15429,7 @@ function buildReassuranceBulletsForPatterns(state) {
   if (!associated || /(特にない|なし|これ以外は特にない)/.test(associated)) {
     bullets.push("・強い付随症状の目立ち → 今のところ限定的に見えやすい");
   }
-  const painScore = Number.isFinite(state?.lastPainScore) ? state.lastPainScore : null;
+  const painScore = resolvePainScoreNumeric(state);
   if (Number.isFinite(painScore) && painScore <= 6) {
     bullets.push("・痛みの置き方 → 極端な高値だけが前面に出にくい");
   }
@@ -15591,7 +15819,8 @@ function slotRiskIsMediumOrHighForYellowCaution(rl) {
 function getPainScoreRiskLevelForYellowCaution(state) {
   const fromNorm = state?.slotNormalized?.pain_score?.riskLevel;
   if (fromNorm) return fromNorm;
-  if (Number.isFinite(state?.lastPainScore)) return riskFromPainScore(state.lastPainScore);
+  const n = resolvePainScoreNumeric(state);
+  if (Number.isFinite(n)) return riskFromPainScore(n);
   return null;
 }
 
@@ -18681,11 +18910,12 @@ async function buildLocalSummaryFallback(level, history, state) {
       closing,
     ].join("\n");
     fallbackText = ensurePainInfectionYellowFirstAction(fallbackText, level, state);
+    fallbackText = ensureImmediateActionsClosingLine(fallbackText, level);
     return sanitizeSummaryBullets(fallbackText, state);
   }
 
   return sanitizeSummaryBullets(
-    [...baseBlocks, closing].join("\n"),
+    ensureImmediateActionsClosingLine([...baseBlocks, closing].join("\n"), level),
     state
   );
 }
@@ -19557,6 +19787,8 @@ async function buildSummaryByBlocksPipelineAsync(level, history, state, historyT
   const { epochAtStart } = opts;
   await awaitBulletPolishForSummary(state);
   if (state.summaryGenerationEpoch !== epochAtStart) return null;
+  ensurePainScoreFallback(state);
+  if (level === "🟡") syncYellowTierBeforeSummary(state);
 
   if (!applyConfirmationBulletsSnapshotToCache(state)) {
     finalizeStateAboutBulletsCacheForSummary(state);
@@ -19584,7 +19816,7 @@ async function buildSummaryByBlocksPipelineAsync(level, history, state, historyT
         ].join("\n");
       })(),
       Promise.resolve(buildRedImmediateActionsBlock(state, historyTextForOtc)),
-      generateLastBlockWithLlm("🔴", state, historyTextForOtc),
+      generateLastBlockWithLLM("🔴", state, historyTextForOtc),
     ]);
     if (state.summaryGenerationEpoch !== epochAtStart) return null;
     const hospitalBlock = buildHospitalBlock(state, historyTextForOtc, hospitalRec);
@@ -19613,7 +19845,7 @@ async function buildSummaryByBlocksPipelineAsync(level, history, state, historyT
     aboutPromise,
     buildImmediateActionsBlock(level, state, historyTextForOtc, null),
     (async () => (await buildOutlookBlockWithLlm(state).catch(() => null)) || buildOutlookBlock(state))(),
-    generateLastBlockWithLlm(level, state, historyTextForOtc),
+    generateLastBlockWithLLM(level, state, historyTextForOtc),
   ]);
 
   if (state.summaryGenerationEpoch !== epochAtStart) return null;
@@ -19638,6 +19870,7 @@ async function buildSummaryByBlocksPipelineAsync(level, history, state, historyT
   if (level === "🟡") {
     text = ensurePainInfectionYellowFirstAction(text, level, state);
   }
+  text = ensureImmediateActionsClosingLine(text, level);
   return sanitizeSummaryBullets(text, state);
 }
 
@@ -19718,6 +19951,9 @@ async function applySummaryPostProcessChain(
   text = await ensureLastBlock(text, level, state, historyTextForOtc || text);
   if (level === "🔴" && !summaryJudgmentBulletsCoverFilledSlots(text, state)) {
     text = await replaceStateAboutBlockOnly(text, state, historyTextForOtc);
+  }
+  if (level === "🟢" || level === "🟡") {
+    text = ensureImmediateActionsClosingLine(text, level);
   }
   return text;
 }
@@ -20388,6 +20624,7 @@ app.post("/api/chat", async (req, res) => {
       }
       const slotsFilledCount = countFilledSlots(state.slotFilled, state);
       const decisionAllowed = slotsFilledCount >= getRequiredSlotCount(state);
+      syncYellowTierBeforeSummary(state);
       return res.json({
         message: summaryMsg,
         response: summaryMsg,
@@ -20401,8 +20638,9 @@ app.post("/api/chat", async (req, res) => {
           questionCount: state.questionCount,
           summaryLine: extractSummaryLine(summaryMsg),
           questionType: null,
-          rawScore: state.lastPainScore,
+          rawScore: resolvePainScoreNumeric(state),
           painScoreRatio: state.lastPainWeight,
+          yellowTier: finalRisk === "🟡" ? state.yellowTier || "weak" : null,
         },
         triage: { judgement: finalRisk, confidence: state.confidence, ratio: state.decisionRatio ?? 0, shouldJudge: true },
         triage_state: buildTriageState(true, finalRisk, slotsFilledCount),
@@ -20636,6 +20874,12 @@ app.post("/api/chat", async (req, res) => {
       const type = conversationState[conversationId].lastQuestionType;
       const classified = classifyAnswerToOption(message, lastOptionsSnapshot, type);
       const selectedIndex = classified.index;
+      const trimmedForSlot = String(message || "").trim();
+      const isSubstantiveSlotAnswer =
+        trimmedForSlot.length >= 2 &&
+        !isConfirmationOnlyAnswer(trimmedForSlot) &&
+        !isRejectionOnlyAnswer(trimmedForSlot);
+
       if (selectedIndex !== null) {
         const optionCount = lastOptionsSnapshot.length;
         const score =
@@ -20650,65 +20894,48 @@ app.post("/api/chat", async (req, res) => {
                 : 1.5;
         conversationState[conversationId].questionCount += 1;
         conversationState[conversationId].totalScore += score;
+      } else if (isSubstantiveSlotAnswer && type && SLOT_KEYS.includes(type)) {
+        conversationState[conversationId].questionCount += 1;
+        conversationState[conversationId].totalScore += 1.5;
       }
 
-      // 判断スロットの更新（埋まったスロットを記録）※有効な選択時のみ埋める
-      if (type && SLOT_KEYS.includes(type) && selectedIndex !== null && lastOptionsSnapshot[selectedIndex]) {
-        if (!conversationState[conversationId].slotFilled[type]) {
-          conversationState[conversationId].slotFilled[type] = true;
-        }
-        const measuredTemp = extractBodyTemperatureCelsius(String(message || ""));
-        if (measuredTemp != null) {
-          conversationState[conversationId].extractedBodyTemperatureC = measuredTemp;
-        }
-        /** 確認文・まとめはユーザーの言葉を優先。選択肢へのスナップは緊急度（score・slotNormalized の index）のみに使い、表示用 slot には載せない。 */
-        const trimmedMessage = String(message || "").trim();
-        const valueForDisplay = trimmedMessage || lastOptionsSnapshot[selectedIndex];
-        conversationState[conversationId].slotAnswers[type] = valueForDisplay;
-        if (type === "duration" && selectedIndex !== null && selectedIndex !== undefined) {
-          conversationState[conversationId].durationMeta = {
-            selectedIndex,
-            raw_text: valueForDisplay || "",
-            normalized: selectedIndex === 2 ? "day_or_more" : selectedIndex === 1 ? "hours" : "short",
-          };
-        }
-        let normalized = buildNormalizedAnswer(type, valueForDisplay, selectedIndex);
-        if (!normalized) {
-          normalized = { slotId: type, rawAnswer: valueForDisplay, riskLevel: RISK_LEVELS.MEDIUM };
-        }
-        conversationState[conversationId].slotNormalized[type] = normalized;
-        conversationState[conversationId].lastNormalizedAnswer = normalized;
-        markSlotStatus(
-          conversationState[conversationId],
-          type,
-          "question_response",
-          valueForDisplay
-        );
-        if (type === "cause_category") {
-          const freeText = classified.usedFreeText ? message : "";
-          if (classified.usedFreeText && hasConcreteCauseDetail(freeText)) {
-            conversationState[conversationId].causeDetailText = freeText.trim();
-          }
-        }
-        if (type === "associated_symptoms") {
-          const selectedOpt = lastOptionsSnapshot[selectedIndex] || valueForDisplay || "";
-          const answerCombined = (valueForDisplay || selectedOpt || "").trim();
-          const selectedIsFeverOption = lastOptionsSnapshot[selectedIndex] === "発熱がある";
-          const isFeverAnswerForInfectionShift =
-            selectedIsFeverOption || textImpliesFeverForInfectionTriage(answerCombined);
-          if (isFeverAnswerForInfectionShift) {
-            conversationState[conversationId].triageCategory = "INFECTION";
-          }
-        }
-        conversationState[conversationId].confidence = computeConfidenceFromSlots(
-          conversationState[conversationId].slotFilled,
-          conversationState[conversationId]
-        );
-      }
+      const slotFillResult =
+        type && SLOT_KEYS.includes(type) && isSubstantiveSlotAnswer
+          ? applyExplicitQuestionResponseSlotFill(conversationState[conversationId], type, message, {
+              lastOptions: lastOptionsSnapshot,
+              classified,
+            })
+          : { filled: false, selectedIndex: null };
+
       reconcileInfectionDailyImpactFromTemperature(conversationState[conversationId], message);
-      if (selectedIndex !== null) {
+      if (slotFillResult.filled) {
         conversationState[conversationId].lastOptions = [];
         conversationState[conversationId].lastQuestionType = null;
+      }
+    } else {
+      const stAns = conversationState[conversationId];
+      const type = stAns.lastQuestionType;
+      const trimmedForSlot = String(message || "").trim();
+      const isSubstantiveSlotAnswer =
+        trimmedForSlot.length >= 2 &&
+        !isConfirmationOnlyAnswer(trimmedForSlot) &&
+        !isRejectionOnlyAnswer(trimmedForSlot);
+      if (
+        type &&
+        SLOT_KEYS.includes(type) &&
+        type !== "pain_score" &&
+        isSubstantiveSlotAnswer &&
+        stAns.askedSlots?.[type]
+      ) {
+        const slotFillResult = applyExplicitQuestionResponseSlotFill(stAns, type, message, {
+          lastOptions: stAns.lastOptions || [],
+        });
+        if (slotFillResult.filled) {
+          stAns.questionCount += 1;
+          stAns.totalScore += 1.5;
+          stAns.lastOptions = [];
+          stAns.lastQuestionType = null;
+        }
       }
     }
 
@@ -20987,8 +21214,10 @@ app.post("/api/chat", async (req, res) => {
           questionCount: conversationState[conversationId].questionCount,
           summaryLine: null,
           questionType: null,
-          rawScore: conversationState[conversationId].lastPainScore,
+          rawScore: resolvePainScoreNumeric(conversationState[conversationId]),
           painScoreRatio: conversationState[conversationId].lastPainWeight,
+          yellowTier:
+            finalLevel === "🟡" ? conversationState[conversationId].yellowTier || "weak" : null,
         },
         triage_state: buildTriageState(true, finalLevel, slotsFilledCount),
         questionPayload: null,
