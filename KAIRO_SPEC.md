@@ -659,23 +659,10 @@ slot_status = {
 - **🔴**（`📝 Kairoの判断` の組み合わせ行）：`pickRedComboPartsInCandidateOrder` により、**高リスク候補を先**、**足りなければ中リスク**の順に寄せる（`redComboTier`＋`inv` 順）。`gatherRedHighComboCandidatesFromBullets`／`collectRedHighRiskCombinationLabels`。
 - **🟢／🟡 共通（② 意味行）**：`「…」このことから、` の直後に **意味文**（LLM 生成）。**🌱 最後にと同一実装**（`generateLastBlockBodyWithLLM`）。組み合わせが組みづらいときの接続は **`今の状態の組み合わせから、`**。**🟡 専用の「注意が必要なサインも含まれます。」は使わない**（緊急度の差は **③ 👉**）。
 
-##### ② 意味行（🟢/🟡）— LLM 生成（`generateLastBlockBodyWithLLM`＝🌱 最後にと同一）
-
-**適用範囲**：`🤝 Kairoの判断` の一体段落内、組み合わせ行（`「〇〇＋…」このことから、`）の直後。
-
-**目的**：🌱 最後にと**同じプロンプト・リトライ・フォールバック**で、安心して休める前提の文を出す（見出し「🌱 最後に」は付けない。本文のみ）。
-
-**実装**：
-- 本線：`buildGreenYellowComboIntegratedParagraphAsync` → `generateLastBlockBodyWithLLM(level, state, contextText)`
-- **入力**：`buildStateFactsBullets`／`historyTextForCare`（🌱 最後にと同じ）
-- **出力**：最大 **2 文**（`truncateLastBlockBodyToMaxSentences(..., 2)`）。休息・安心・再訪の案内。
-- **同期フォールバック**：`greenYellowMeaningLineFallback`（🌱 最後にの静的文と同一）
-
 **出力例**（参考）：
 
 ```
 「激しい運動＋奥のズキ＋悪化」このことから、
-今の情報なら安心して休んで大丈夫です。まずは休息を優先してください。不安になったらまたここで確認してください。
 ```
 - **RED抑制＋超短経過**のとき、**2語**に**せざるを得ない**旧例外は残しうるが、**第三語**として痛み強度**等**を**足して3語**に**できる**なら**3語**を**出す**。**2語**にしたとき**のみ**、短経過1語に**一時的の可能性**を含め、**それ以外**に経過語を**二重**に並べない。
 

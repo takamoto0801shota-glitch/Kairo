@@ -892,6 +892,8 @@ function initConversationState(input = {}) {
     summaryGenerating: false,
     /** LLM 本生成前〜完了までのブロック単位プレビュー（箇条書き確定後はブロック順に増える） */
     summaryPartialSections: [],
+    /** プレビュー更新の世代（同一長さでも中身差し替えをクライアントが検知） */
+    summaryPartialSectionsRevision: 0,
     /** 確認文直前に supplement 済みのとき true。まとめ生成内の追補を省略可能（キャッシュが消えた場合は再実行） */
     skipSupplementBeforeSummary: false,
     /** クライアントが初回バナー「体調の不安…」を表示したセッション。true の間はまとめ・確認文へ進む前に十分なユーザーターンを要する */
@@ -5091,8 +5093,25 @@ async function replaceImmediateActionsBlockOnly(summaryText, state, historyText 
   }
 }
 
-/** 先行表示用：🤝 ブロック（同期フォールバックの👉まで。後から LLM 版に差し替え可） */
-function buildEarlyHandshakeSectionText(state) {
+function bumpSummaryPartialSectionsRevision(state) {
+  if (!state) return;
+  state.summaryPartialSectionsRevision = (state.summaryPartialSectionsRevision || 0) + 1;
+}
+
+/** 先行まとめの 🤝 用 about 本文（LLM キャッシュ優先、なければ同期フォールバック） */
+function resolvePartialHandshakeAboutLine(state) {
+  if (state && String(state.cachedStateAboutLineBody || "").trim()) {
+    return state.cachedStateAboutLineBody;
+  }
+  const level = finalizeRiskLevel(state);
+  return buildGreenYellowStateAboutBlock(state, level);
+}
+
+/**
+ * 先行表示・プレビュー用 🤝/📝 ブロック（KAIRO_SPEC：箇条書き → 空行 → ①②一体＋③👉）。
+ * 箇条書きだけを出さない（心理的アンカー欠落を防ぐ）。
+ */
+function buildSummaryPartialHandshakeSection(state, aboutLineOverride = undefined) {
   if (!state) return null;
   const level = finalizeRiskLevel(state);
   if (level === "🔴") {
@@ -5102,8 +5121,21 @@ function buildEarlyHandshakeSectionText(state) {
     return ["📝 Kairoの判断", bullets, empathy ? "" : null, empathy].filter((x) => x !== null).join("\n");
   }
   if (level !== "🟢" && level !== "🟡") return null;
-  const factBullets = getKairoJudgmentFactBullets(state, { forSummary: true });
-  return ["🤝 Kairoの判断", ...factBullets].join("\n");
+  const about =
+    aboutLineOverride !== undefined
+      ? String(aboutLineOverride || "").trim() ||
+        buildGreenYellowStateAboutBlock(state, level)
+      : resolvePartialHandshakeAboutLine(state);
+  const body = buildGreenYellowHandshakeBlockBodySync(
+    state,
+    about || "症状の状態を確認しました。"
+  );
+  return ["🤝 Kairoの判断", body].join("\n");
+}
+
+/** 先行表示用：🤝 ブロック（同期フォールバックの👉まで。後から LLM 版に差し替え可） */
+function buildEarlyHandshakeSectionText(state) {
+  return buildSummaryPartialHandshakeSection(state);
 }
 
 function buildSummaryPartialSectionsBeforeLlm(state) {
@@ -5118,16 +5150,21 @@ function buildSummaryPartialSectionsBeforeLlm(state) {
 
 function refreshSummaryPartialSectionsAfterBulletsOrHandshake(state) {
   if (!state?.summaryGenerating) return;
-  state.summaryPartialSections = buildSummaryPartialSectionsBeforeLlm(state);
+  const level = finalizeRiskLevel(state);
+  const intro = `${level} ここまでの情報を整理します\n${buildSummaryIntroTemplate()}`;
+  const handshake = buildSummaryPartialHandshakeSection(state);
+  state.summaryPartialSections = handshake ? [intro, handshake] : buildSummaryPartialSectionsBeforeLlm(state);
+  bumpSummaryPartialSectionsRevision(state);
 }
 
 function refreshSummaryPartialSectionsAfterHandshakeLlm(state, aboutLine, level) {
   if (!state?.summaryGenerating) return;
   const lv = level === "🟢" || level === "🟡" ? level : finalizeRiskLevel(state);
   const intro = `${lv} ここまでの情報を整理します\n${buildSummaryIntroTemplate()}`;
-  const body = buildGreenYellowHandshakeBlockBodySync(state, aboutLine);
-  const handshake = ["🤝 Kairoの判断", body].join("\n");
+  const handshake = buildSummaryPartialHandshakeSection(state, aboutLine);
+  if (!handshake) return;
   state.summaryPartialSections = [intro, handshake];
+  bumpSummaryPartialSectionsRevision(state);
 }
 
 /** 整形済み箇条書き＋🤝 LLM 完了後、生成中の summaryText の 🤝 ブロックだけ差し替え */
@@ -9091,6 +9128,68 @@ function backfillCauseSlotFromRecentUserTurn(conversationId, state) {
     state.causeDetailText = lastUser;
   }
   return true;
+}
+
+function canForceFillSlotFromLatestMessage(slotKey, message) {
+  const text = String(message || "").trim();
+  if (!text || text.length < 2) return false;
+  switch (slotKey) {
+    case "cause_category":
+      return true;
+    case "duration":
+      return !!extractDurationFromText(text);
+    case "worsening":
+      return !!extractWorseningFromText(text);
+    case "worsening_trend":
+      return !!extractWorseningTrendFromText(text);
+    case "daily_impact":
+      return !!(extractImpactFromText(text) || extractTemperatureForDailyImpact(text));
+    case "associated_symptoms":
+      return !!extractAssociatedSymptoms(text);
+    default:
+      return false;
+  }
+}
+
+/**
+ * 最後の質問スロットが取りこぼされたときの最終補完。
+ * - ユーザーが実質回答している
+ * - そのスロットが未充填
+ * の場合のみ、直近メッセージを当該スロットへ反映する。
+ */
+function forceCaptureLatestMissingAskedSlotFromMessage(state, message) {
+  if (!state) return false;
+  const trimmed = String(message || "").trim();
+  if (!trimmed || isConfirmationOnlyAnswer(trimmed) || isRejectionOnlyAnswer(trimmed)) return false;
+  const missing = getMissingSlots(state.slotFilled, state);
+  if (!Array.isArray(missing) || missing.length === 0) return false;
+
+  const pickCandidates = [];
+  if (state.lastQuestionType && missing.includes(state.lastQuestionType)) {
+    pickCandidates.push(state.lastQuestionType);
+  }
+  const recents = Array.isArray(state.recentQuestionTypes) ? state.recentQuestionTypes.slice().reverse() : [];
+  for (const t of recents) {
+    if (!t || pickCandidates.includes(t)) continue;
+    if (missing.includes(t) && state.askedSlots?.[t]) pickCandidates.push(t);
+  }
+  for (const t of getSlotOrderWithConditional(state).slice().reverse()) {
+    if (!t || pickCandidates.includes(t)) continue;
+    if (missing.includes(t) && state.askedSlots?.[t]) pickCandidates.push(t);
+  }
+
+  for (const slotKey of pickCandidates) {
+    if (slotKey === "pain_score") continue;
+    if (!canForceFillSlotFromLatestMessage(slotKey, trimmed)) continue;
+    const before = !!state.slotFilled?.[slotKey];
+    const applied = applyExplicitQuestionResponseSlotFill(state, slotKey, trimmed, {
+      lastOptions: Array.isArray(state.lastOptions) ? state.lastOptions : [],
+    });
+    if (applied?.filled && (!before || state.slotAnswers?.[slotKey])) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function applySpontaneousSlotFill(state, message, opts = {}) {
@@ -14348,10 +14447,8 @@ function buildGreenYellowComboPlusClause(state, parts, causeShortOverride) {
 }
 
 /**
- * 🤝🟢🟡 ①の「〇〇＋〇〇」列挙と②パターン文を1段落に統合（KAIRO_SPEC・「…」このことから、一時的な〇〇として…）。
+ * 🤝🟢🟡 ①の「〇〇＋〇〇」列挙のみを返す（末尾は「このことから、」で③👉へ接続）。
  * @param {string} [causeShortOverride] - `buildCauseComboShortLabelAsync` 結果を渡す（省略時は同期短語）。
- * **同期版**：OPENAI_API_KEY なし・LLM 失敗時のフォールバック用。意味行は 🌱 最後にと同一の静的文。
- * **本線**は `buildGreenYellowComboIntegratedParagraphAsync`（意味行は `generateLastBlockBodyWithLLM`＝🌱 最後にと同一）。
  */
 function buildGreenYellowComboIntegratedParagraph(state, level, parts, causeShortOverride) {
   const lv = level === "🟡" || level === "🟢" ? level : finalizeRiskLevel(state);
@@ -14363,33 +14460,14 @@ function buildGreenYellowComboIntegratedParagraph(state, level, parts, causeShor
     : windy
       ? `これらの症状の組み合わせから、`
       : `今の状態の組み合わせから、`;
-  return `${lead}\n${greenYellowMeaningLineFallback(state)}`;
-}
-
-/** 🟢/🟡 ②意味行の同期フォールバック（🌱 最後にと同一の静的文） */
-function greenYellowMeaningLineFallback(state, _windy = false) {
-  void state;
-  return "今の情報なら安心して休んで大丈夫です。まずは休息を優先してください。不安になったらまたここで確認してください。";
+  return lead;
 }
 
 /**
- * 同上の **async 版（本線）**：意味行（②）は `generateLastBlockBodyWithLLM`（🌱 最後にと同一実装）をそのまま使う。
+ * 同上の async 版。互換のため関数名は維持するが、同期版と同じ結果を返す。
  */
 async function buildGreenYellowComboIntegratedParagraphAsync(state, level, parts, causeShortOverride) {
-  const lv = level === "🟡" || level === "🟢" ? level : finalizeRiskLevel(state);
-  const clause = buildGreenYellowComboPlusClause(state, parts, causeShortOverride);
-  const windy = shouldUseWindyColdOnsetPatternForStateAbout(state);
-  const lead = clause
-    ? `${clause}このことから、`
-    : windy
-      ? `これらの症状の組み合わせから、`
-      : `今の状態の組み合わせから、`;
-  const contextText =
-    (state ? buildStateFactsBullets(state, { forSummary: true }).join("\n") : "") ||
-    state?.historyTextForCare ||
-    "";
-  const tail = await generateLastBlockBodyWithLLM(lv, state, contextText);
-  return `${lead}\n${tail}`;
+  return buildGreenYellowComboIntegratedParagraph(state, level, parts, causeShortOverride);
 }
 
 /** 🟢 ③判断の確定（A／B・`pickGreenYellowDecisionCoreLines`） */
@@ -14558,8 +14636,29 @@ function aggregateUserTextsForGreenYellowAttendanceProbe(state) {
   }
 }
 
+function pickRandomPatternAorB(previous = null) {
+  const rnd =
+    crypto && typeof crypto.randomInt === "function"
+      ? crypto.randomInt(0, 2)
+      : Math.random() < 0.5
+        ? 0
+        : 1;
+  let next = rnd === 0 ? "A" : "B";
+  // 同一文面が続きすぎる体感を避けるため、前回と同一なら1回だけ再抽選
+  if (previous && (previous === "A" || previous === "B") && next === previous) {
+    const reroll =
+      crypto && typeof crypto.randomInt === "function"
+        ? crypto.randomInt(0, 2)
+        : Math.random() < 0.5
+          ? 0
+          : 1;
+    next = reroll === 0 ? "A" : "B";
+  }
+  return next;
+}
+
 /**
- * 🟢🟡③ 判断の確定：A/B から**初回のみ**抽選し、`state.greenYellowDecisionCorePattern` に保持（同一会話内は固定）。**文面配列**は **🟢**／**🟡弱** で 🟢 配列、**🟡強** で 🟡 配列（`usesGreenStyleDecisionCoreLines`）。
+ * 🟢🟡③ 判断の確定：A/B を都度抽選。**文面配列**は **🟢**／**🟡弱** で 🟢 配列、**🟡強** で 🟡 配列（`usesGreenStyleDecisionCoreLines`）。
  * **特例**：出席・出勤の可否を求める発話はランダムにせず、パターンB系の文面へ差し替え（上記）。
  * @param {object} [state] 未指定時は従来どおり都度ランダム（呼び出し互換用）
  */
@@ -14572,13 +14671,12 @@ function pickGreenYellowDecisionCoreLines(state) {
   const patB = usesGreenStyleDecisionCoreLines(state)
     ? GREEN_YELLOW_DECISION_CORE_PATTERN_GREEN_B
     : GREEN_YELLOW_DECISION_CORE_PATTERN_YELLOW_B;
+  const prev = state?.greenYellowDecisionCorePattern || null;
+  const selected = pickRandomPatternAorB(prev);
   if (state) {
-    if (state.greenYellowDecisionCorePattern !== "A" && state.greenYellowDecisionCorePattern !== "B") {
-      state.greenYellowDecisionCorePattern = Math.random() < 0.5 ? "A" : "B";
-    }
-    return (state.greenYellowDecisionCorePattern === "A" ? patA : patB).slice();
+    state.greenYellowDecisionCorePattern = selected;
   }
-  return (Math.random() < 0.5 ? patA : patB).slice();
+  return (selected === "A" ? patA : patB).slice();
 }
 
 /**
@@ -19996,6 +20094,16 @@ async function generateSummaryForConfirmation(conversationId) {
       });
     }
     state.summaryPartialSections = buildSummaryPartialSectionsBeforeLlm(state);
+    bumpSummaryPartialSectionsRevision(state);
+    const levelForEarlyHandshake = finalizeRiskLevel(state);
+    if (levelForEarlyHandshake === "🟢" || levelForEarlyHandshake === "🟡") {
+      void getCachedOrBuildStateAboutLineAsync(state, levelForEarlyHandshake)
+        .then((aboutLine) => {
+          if (state.summaryGenerationEpoch !== epochAtStart || !state.summaryGenerating) return;
+          refreshSummaryPartialSectionsAfterHandshakeLlm(state, aboutLine, levelForEarlyHandshake);
+        })
+        .catch(() => {});
+    }
   } catch (e) {
     console.error("[generateSummaryForConfirmation buildStateFactsBulletsTwoStage]", e?.message || e);
   }
@@ -21016,6 +21124,8 @@ app.post("/api/chat", async (req, res) => {
     }
 
     // Call OpenAI API
+    forceCaptureLatestMissingAskedSlotFromMessage(conversationState[conversationId], message);
+    ensureSlotFilledConsistency(conversationState[conversationId]);
     const minQuestions = 5;
     const currentQuestionCount = conversationState[conversationId].questionCount;
     const { ratio, level, confidence, shouldJudge, slotsFilledCount } = judgeDecision(
@@ -21031,14 +21141,14 @@ app.post("/api/chat", async (req, res) => {
     const canShowSummary = !isFirstUserTurn && userTurnCount >= minUserTurnsForSummary;
     // 仕様: 「全スロット埋まり」OR「カテゴリ別の全質問完了」のどちらかで強制的に確認文＋まとめへ
     // 初回バナーセッション: ユーザーターンが十分でない限りまとめへ進まない（canShowSummary と二重だが明示）
+    const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled, conversationState[conversationId]);
     const shouldJudgeNow =
       canShowSummary &&
-      (decisionAllowed || questionsCompleted) &&
+      (decisionAllowed || (questionsCompleted && missingSlots.length === 0)) &&
       !(
         conversationState[conversationId].hasIntroBannerSession &&
         userTurnCount < minUserTurnsForSummary
       );
-    const missingSlots = getMissingSlots(conversationState[conversationId].slotFilled, conversationState[conversationId]);
     if (!shouldJudgeNow) {
       const isFirstQuestion =
         conversationState[conversationId].questionCount === 0 &&
@@ -22489,6 +22599,7 @@ app.get("/api/summary-progress", (req, res) => {
     const sections = Array.isArray(state.summaryPartialSections) ? state.summaryPartialSections : [];
     return res.json({
       sections,
+      partialSectionsRevision: state.summaryPartialSectionsRevision || 0,
       generationActive: !!state.summaryGenerating,
       complete: !state.summaryGenerating && !!state.summaryText,
     });
