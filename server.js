@@ -18894,11 +18894,30 @@ function buildStateDecisionLine(state, level) {
   return "";
 }
 
-/** 🟢/🟡「🤝 Kairoの判断」本文：KAIRO_SPEC（事実箇条書き → 空行 → ①②一体段落＋③👉） */
+/** 🟢/🟡「🤝 Kairoの判断」本文：事実箇条書き → 空行 → 組み合わせ行＋👉2行（箇条書きだけで終わらせない） */
 function buildGreenYellowHandshakeBlockBodySync(state, aboutLine) {
   ensureKairoJudgmentHasMinimumFactBullets(state, MIN_KAIRO_JUDGMENT_FACT_BULLETS);
   const factBullets = getKairoJudgmentFactBullets(state, { forSummary: true });
-  const core = String(aboutLine || "").trim();
+  const level = finalizeRiskLevel(state);
+  let core = String(aboutLine || "").trim();
+  const coreLines = core.split("\n").map((l) => String(l || "").trim()).filter(Boolean);
+  const coreLooksIncomplete =
+    coreLines.length === 0 ||
+    coreLines.every((l) => /^・/.test(l)) ||
+    !coreLines.some((l) => /^👉\s*/.test(l));
+  if (coreLooksIncomplete) {
+    core = buildGreenYellowStateAboutBlock(state, level);
+  }
+  const repairedLines = String(core || "").split("\n").map((l) => String(l || "").trim()).filter(Boolean);
+  if (!repairedLines.some((l) => /^👉\s*/.test(l))) {
+    const integrated = buildGreenYellowComboIntegratedParagraph(
+      state,
+      level,
+      collectGreenYellowLowMediumCombinationParts(state)
+    );
+    const coreTail = pickGreenYellowDecisionCoreLines(state);
+    core = [integrated, ...coreTail].join("\n");
+  }
   const lines = [...factBullets];
   if (factBullets.length > 0 && core) lines.push("");
   if (core) {
