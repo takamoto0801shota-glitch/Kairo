@@ -349,7 +349,7 @@ body {
 }
 
 .chat-input {
-    flex: 7;
+    flex: 1;
     padding: 8px 12px;
     border: 1px solid #e8e8e8;
     border-radius: 24px;
@@ -377,42 +377,44 @@ body {
 }
 
 .send-button {
-    flex: 3;
+    flex: 0 0 auto;
+    width: 40px;
     height: 40px;
-    min-width: 56px;
-    max-width: 80px;
-    padding: 0 12px;
-    background-color: #4a9b8e;
-    color: white;
+    min-width: 40px;
+    max-width: 40px;
+    padding: 0;
+    background-color: #000000;
+    color: #ffffff;
     border: none;
-    border-radius: 24px;
-    font-size: 14px;
+    border-radius: 50%;
     cursor: pointer;
-    transition: all 0.2s;
-    font-weight: 400;
-    font-family: 'Noto Sans JP', sans-serif;
+    transition: background-color 0.2s ease, opacity 0.2s ease;
     flex-shrink: 0;
     display: flex;
     align-items: center;
     justify-content: center;
 }
 
-.send-button:hover {
-    background-color: #3d8579;
-    transform: translateY(-1px);
-    box-shadow: 0 2px 4px rgba(74, 155, 142, 0.2);
+.send-button__icon {
+    width: 18px;
+    height: 18px;
+    display: block;
 }
 
-.send-button:active {
-    transform: translateY(0);
+.send-button:hover:not(:disabled) {
+    background-color: #1a1a1a;
+}
+
+.send-button:active:not(:disabled) {
+    background-color: #000000;
+    opacity: 0.85;
 }
 
 .send-button:disabled {
-    background-color: #e0e0e0;
-    color: #bbb;
+    background-color: #e8e8e8;
+    color: #bdbdbd;
     cursor: not-allowed;
-    transform: none;
-    box-shadow: none;
+    opacity: 1;
 }
 
 /* スクロールバーのスタイル */

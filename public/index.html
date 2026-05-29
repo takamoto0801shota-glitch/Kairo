@@ -40,7 +40,12 @@
                 placeholder="どんな感じですか？"
                 autocomplete="off"
             >
-            <button id="sendButton" class="send-button">送る</button>
+            <button id="sendButton" class="send-button" type="button" aria-label="送る">
+                <svg class="send-button__icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M12 19V5" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+                    <path d="M6 11l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+            </button>
         </div>
     </div>
     
