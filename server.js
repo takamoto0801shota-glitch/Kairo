@@ -1217,8 +1217,8 @@ function ensureKairoJudgmentHasMinimumFactBullets(state, minCount = MIN_KAIRO_JU
 
 /**
  * 🤝 ブロックを `replaceStateAboutBlockOnly` で差し替えるべきか。
- * 空、**箇条書き（・）が1行もない**、または**箇条書きのみ**（一体段落・👉 が無い未完了形）のとき補正する。
- * 事実箇条書き＋段落の**完成形**では置換しない（KAIRO_SPEC：箇条書き後に①②一体＋③👉）。
+ * 空、**箇条書き（・）が1行もない**、または**箇条書きのみ**（👉・安心文が無い未完了形）のとき補正する。
+ * 事実箇条書き＋👉2行＋安心文の**完成形**では置換しない（KAIRO_SPEC v2：箇条書き後に👉→安心文）。
  */
 function handshakeStateBlockNeedsEmpathy(text) {
   if (!textIncludesHandshakeAboutHeader(text)) return false;
@@ -1233,7 +1233,12 @@ function handshakeStateBlockNeedsEmpathy(text) {
   if (nonEmpty.length === 0) return true;
   const hasAnyBullet = nonEmpty.some((t) => /^・/.test(t));
   if (!hasAnyBullet) return true;
-  return nonEmpty.every((t) => /^・/.test(t));
+  const hasPointer = nonEmpty.some((t) => /^👉\s*/.test(t));
+  if (!hasPointer) return true;
+  if (nonEmpty.some((t) => /「[^」]*＋[^」]*」/.test(t) || /このことから/.test(t))) return true;
+  const hasReassurance = nonEmpty.some((t) => !/^👉\s*/.test(t) && !/^・/.test(t));
+  if (!hasReassurance) return true;
+  return false;
 }
 
 /** 🔴 LLM の 📝 見出し（空白・「いまの状態を整理します」別表記のゆらぎを許容） */
@@ -5117,7 +5122,7 @@ function resolvePartialHandshakeAboutLine(state) {
 }
 
 /**
- * 先行表示・プレビュー用 🤝/📝 ブロック（KAIRO_SPEC：箇条書き → 空行 → ①②一体＋③👉）。
+ * 先行表示・プレビュー用 🤝/📝 ブロック（KAIRO_SPEC v2：箇条書き → 空行 → 👉×2 → 安心文）。
  * 箇条書きだけを出さない（心理的アンカー欠落を防ぐ）。
  */
 function buildSummaryPartialHandshakeSection(state, aboutLineOverride = undefined) {
@@ -9674,6 +9679,9 @@ function otcPanadolSelectionHintForPrompt(state) {
   return "鎮痛ではパナドール**青／赤／緑のいずれか1つ**（痛み>8→赤、喉→緑、それ以外→青）。**青色に固定しない**。";
 }
 
+const OTC_PANADOL_REASON_BREVITY_HINT =
+  "パナドール等OTCの **reason（→行）は短め**（成分＋入手先が伝わる1文で足りる。長い説明は避ける）。";
+
 /** 🟡強向け OTC 行動の LLM 指示（前置き必須・テンプレ固定禁止・色は文脈で） */
 function buildOtcMedicationLlmPromptLine(state, level, options = {}) {
   if (!shouldRecommendOtcMedication(state, level)) return "";
@@ -9682,7 +9690,7 @@ function buildOtcMedicationLlmPromptLine(state, level, options = {}) {
     "市販薬（OTC）の **action** は**条件付き前置き＋具体的な薬行動**（前置きは必須だが**「きつい場合は、」に固定しない**）。例：「つらい場合は、」「痛みが強い場合は、」「熱がつらい場合は、」など症状・強さに合わせて言い換える。";
   const panadolHint = otcPanadolSelectionHintForPrompt(state);
   if (forSummary && summaryPainInfectionYellow) {
-    return [introRule, panadolHint, "doは1件のみ（別途1件目はベッド休息固定）。**その1件はOTC必須**。reasonに成分・入手先。"]
+    return [introRule, panadolHint, OTC_PANADOL_REASON_BREVITY_HINT, "doは1件のみ（別途1件目はベッド休息固定）。**その1件はOTC必須**。reasonに成分・入手先。"]
       .filter(Boolean)
       .join(" ");
   }
@@ -9690,6 +9698,7 @@ function buildOtcMedicationLlmPromptLine(state, level, options = {}) {
     return [
       introRule,
       panadolHint,
+      OTC_PANADOL_REASON_BREVITY_HINT,
       "doのうち市販薬（OTC）を**ちょうど1件**含める。もう1件は薬以外のセルフケア。成分・入手先は reason のみ。",
     ]
       .filter(Boolean)
@@ -9698,6 +9707,7 @@ function buildOtcMedicationLlmPromptLine(state, level, options = {}) {
   return [
     introRule,
     panadolHint,
+    OTC_PANADOL_REASON_BREVITY_HINT,
     "OTCは**市販薬のみ1件**（内服・外用薬。パナドール／鎮痛・解熱・整腸等）。**ワセリン・のど飴・トローチ等のアクセサリー類はOTCに含めない**（必要なら別行のセルフケア）。",
     "actionは短く（例：パナドール（○色）を服用する）。**○色は文脈で1つ**。説明・成分・入手先は reason のみ。",
   ]
@@ -13316,7 +13326,12 @@ async function getCachedOrBuildStateAboutLineAsync(state, level) {
   }
   const key = stateAboutLineCacheKey(state, lv);
   if (state.cachedStateAboutLineKey === key && String(state.cachedStateAboutLineBody || "").trim()) {
-    return state.cachedStateAboutLineBody;
+    const cachedBody = state.cachedStateAboutLineBody;
+    const isLegacyComboFormat =
+      /「[^」]*＋[^」]*」/.test(cachedBody) || /このことから/.test(cachedBody);
+    if (!isLegacyComboFormat) {
+      return cachedBody;
+    }
   }
   let aboutLine = await buildGreenYellowStateAboutBlockAsync(state, lv);
   if (!String(aboutLine || "").trim()) {
@@ -14696,7 +14711,7 @@ function buildGreenYellowComboPlusClause(state, parts, causeShortOverride) {
 }
 
 /**
- * 🤝🟢🟡 ①の「〇〇＋〇〇」列挙のみを返す（末尾は「このことから、」で③👉へ接続）。
+ * 🤝🟢🟡 ①の「〇〇＋〇〇」列挙（**🔴 用・レガシー**。🟢／🟡 本文 v2 では未使用）。
  * @param {string} [causeShortOverride] - `buildCauseComboShortLabelAsync` 結果を渡す（省略時は同期短語）。
  */
 function buildGreenYellowComboIntegratedParagraph(state, level, parts, causeShortOverride) {
@@ -14719,24 +14734,189 @@ async function buildGreenYellowComboIntegratedParagraphAsync(state, level, parts
   return buildGreenYellowComboIntegratedParagraph(state, level, parts, causeShortOverride);
 }
 
-/** 🟢 ③判断の確定（A／B・`pickGreenYellowDecisionCoreLines`） */
+/** 🟢 ③判断の確定（A／B・`pickGreenYellowDecisionCoreLines`）— 行動が即決できる断定文 */
 const GREEN_YELLOW_DECISION_CORE_PATTERN_GREEN_A = [
-  "👉 現時点では、命に関わるような緊急性は低く、ひとまず落ち着いて様子を見てください。",
-  "👉 無理に動かず休息を優先することが、今いちばん正しい対応です。",
+  "👉 今の状態なら、急いで病院を探す必要は高くなさそうです。",
+  "👉 まずは安心して、休息を優先してください。",
 ];
 const GREEN_YELLOW_DECISION_CORE_PATTERN_GREEN_B = [
-  "👉 今の症状からは、緊急性の高いサインは見られないため、ゆっくり休んでください。",
-  "👉 一般的に数時間ほどで落ち着いてくる可能性が高いです。",
+  "👉 今は病院を急ぐより、落ち着いて休む判断で大丈夫です。",
+  "👉 無理に動かず、今夜は休息を優先してください。",
 ];
-/** 🟡 同上（変更時は③完成例・超特例2行目の参照も整合） */
+/** 🟡 同上（変更時は完成例・超特例2行目の参照も整合） */
 const GREEN_YELLOW_DECISION_CORE_PATTERN_YELLOW_A = [
-  "👉 現時点では、緊急性は低いため、病院に行く必要はありません。",
-  "👉 今日は無理せず休んで体を回復させてください。",
+  "👉 今の情報では、受診を急ぐ必要は高くなさそうです。",
+  "👉 まずは安心して、休息を優先してください。",
 ];
 const GREEN_YELLOW_DECISION_CORE_PATTERN_YELLOW_B = [
-  "👉 現時点では、受診を急ぐよりも、自宅で安静にしてください。",
-  "👉 無理に動くとかえって負担になりやすいため、今日は休むことが正しい対応です。",
+  "👉 今は無理に動かず、自宅で安静に休む方が適切です。",
+  "👉 体を休めながら、変化を見られる段階です。",
 ];
+
+const GREEN_YELLOW_REASSURANCE_FALLBACK_TEMPLATES = [
+  "今の情報では、急激に悪化している様子は見られず、体を休めながら変化を見られる段階です。",
+  "一時的な疲労や環境要因でも起こりやすいパターンで、今は無理を減らして休む判断で問題ありません。",
+  "今の情報だけでは、強い危険性を疑う状態ではなさそうです。落ち着いて休息を優先してください。",
+];
+
+/** 🟢🟡 安心文の禁止表現・形式チェック（KAIRO_SPEC §🤝 v2） */
+function greenYellowReassuranceTextIsValid(text) {
+  const t = String(text || "")
+    .replace(/\n+/g, " ")
+    .trim();
+  if (!t || t.length < 12) return false;
+  if (/^👉/.test(t)) return false;
+  if (/＋/.test(t)) return false;
+  if (/「[^」]*＋/.test(t)) return false;
+  const forbidden = [
+    /注意が必要/,
+    /可能性があります/,
+    /可能性が高い/,
+    /念のため/,
+    /慎重に/,
+    /人によっては/,
+    /場合によっては/,
+    /油断/,
+    /このことから/,
+  ];
+  return !forbidden.some((re) => re.test(t));
+}
+
+/** 🟢🟡 安心・納得文（LLM 失敗・API キーなし時の同期フォールバック） */
+function buildGreenYellowReassuranceParagraphFallback(state, level) {
+  const bullets = getKairoJudgmentFactBullets(state, { forSummary: true })
+    .map((b) => String(b).replace(/^・\s*/, "").trim())
+    .filter(Boolean);
+  const mainSym = getSyncedMainSymptomDisplayLabel(state) || "症状";
+  const windy = shouldUseWindyColdOnsetPatternForStateAbout(state);
+
+  if (bullets.length >= 2) {
+    const hasStable = bullets.some(
+      (b) => /悪化|急変|急激/.test(b) && /なし|ない|安定|変わ/.test(b)
+    );
+    if (hasStable) {
+      let line = `${bullets[0]}で、${bullets.slice(1, 3).join("、")}。今の情報では急激に悪化している様子は見られません。体を休めながら変化を見られる段階です。`;
+      if (windy && !/咳|鼻|喉|風邪/.test(line)) {
+        line = line.replace(
+          /。体を/,
+          "。風の初期症状でもよくあるパターンです。体を"
+        );
+      }
+      if (greenYellowReassuranceTextIsValid(line)) return line;
+    }
+    const joined = bullets.slice(0, 3).join("、");
+    const contextual = `${mainSym}について、${joined}という状況です。今の情報では、強い危険性を疑う状態ではなさそうです。`;
+    if (greenYellowReassuranceTextIsValid(contextual)) return contextual;
+  }
+
+  const idx = Math.floor(Math.random() * GREEN_YELLOW_REASSURANCE_FALLBACK_TEMPLATES.length);
+  return GREEN_YELLOW_REASSURANCE_FALLBACK_TEMPLATES[idx];
+}
+
+/** 🟢🟡 安心・納得の自然文（LLM・最大4リトライ・キャッシュあり） */
+async function generateGreenYellowReassuranceParagraphViaLlm(state, level) {
+  const lv = level === "🟡" || level === "🟢" ? level : finalizeRiskLevel(state);
+  const bullets = getKairoJudgmentFactBullets(state, { forSummary: true })
+    .map((b) => String(b).replace(/^・\s*/, "").trim())
+    .filter(Boolean);
+  const mainSymptom = String(getSyncedMainSymptomDisplayLabel(state) || "症状").trim();
+  const windy = shouldUseWindyColdOnsetPatternForStateAbout(state);
+  const cacheKey = buildStateAboutMeaningCacheKey({
+    level: lv,
+    mainSymptom,
+    parts: bullets,
+    windy,
+  });
+  const cached = getCachedStateAboutMeaningLine(state, cacheKey);
+  if (cached && greenYellowReassuranceTextIsValid(cached)) return cached;
+
+  const pickFallback = () => buildGreenYellowReassuranceParagraphFallback(state, lv);
+  if (!process.env.OPENAI_API_KEY || bullets.length === 0) {
+    const f = pickFallback();
+    setCachedStateAboutMeaningLine(state, cacheKey, f);
+    return f;
+  }
+
+  const bulletBlock = bullets.map((b, i) => `${i + 1}. ${b}`).join("\n");
+  const windyHint = windy
+    ? "風の初期症状（咳・鼻づまり・喉など）の文脈なら、自然に1回だけその系統の語を含めてよい。"
+    : "";
+  const systemPrompt = `あなたは医療トリアージ後の「安心・納得文」を書くAIです。
+
+【目的】
+正しい医学説明ではなく、ユーザーが「今は安心していい」「休んでいい」「もう考え続けなくていい」と一瞬で理解できる短い文章を書く。
+
+【主症状】
+${mainSymptom}
+
+【整理済みの事実（箇条書き）】
+${bulletBlock}
+
+【緊急度】
+${lv}
+
+【ルール】
+・1〜2文（改行なし）。句点で終える。
+・箇条書きを「＋」や単語列で並べ替えない。背景・流れ・きっかけ・経過が自然に伝わる**情景のある短文**に統合する。
+・「なぜ今は大丈夫か」「なぜ今は休む判断でいいか」を短く説明する。
+・断定しすぎず、不安を煽らない。ただし曖昧に逃げない。
+・${windyHint}
+
+【絶対禁止】
+・全角「＋」による単語列（例：画面＋ズキズキ＋波）
+・「注意が必要」「可能性があります」「念のため」「慎重に様子を見てください」「人によっては」「場合によっては」「油断できません」
+・「このことから」
+・👉 記号
+・医学用語の網羅的説明
+
+【悪い例】
+「画面＋ズキズキ＋波」
+「気温差＋グングン＋数時間前」
+
+【良い例】
+「画面を見続けたあとに出たズキズキする頭痛で、今の情報では急激に悪化している様子は見られません。」
+「気温差で疲れたあとに、数時間前から続いている頭痛は、一時的な負担でも起こりやすいパターンです。」
+「頭痛と軽い熱感・吐き気が一緒に出ることは珍しくなく、今の情報だけでは強い危険性を疑う状態ではなさそうです。」
+
+本文のみ出力（見出し・前置き不要）。`;
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: "上記ルールに従い、安心・納得文だけを出力してください。" },
+        ],
+        temperature: 0.35 + attempt * 0.08,
+        max_tokens: 280,
+      });
+      let text = String(completion?.choices?.[0]?.message?.content || "")
+        .replace(/^[\s・\-*「『]+/g, "")
+        .replace(/\n+/g, " ")
+        .trim();
+      text = text.replace(/[」』]$/g, "").trim();
+      if (!text.endsWith("。")) text += "。";
+      if (greenYellowReassuranceTextIsValid(text)) {
+        setCachedStateAboutMeaningLine(state, cacheKey, text);
+        return text;
+      }
+    } catch (_) {
+      /* retry */
+    }
+  }
+  const f = pickFallback();
+  setCachedStateAboutMeaningLine(state, cacheKey, f);
+  return f;
+}
+
+/** 🟢🟡 🤝 本文コア：👉2行 → 安心文（間に空行なし） */
+function assembleGreenYellowStateAboutCore(decisionLines, reassuranceParagraph) {
+  const core = (decisionLines || []).map((l) => String(l || "").trim()).filter(Boolean);
+  const reassurance = String(reassuranceParagraph || "").trim();
+  if (!reassurance) return core.join("\n");
+  return [...core, reassurance].join("\n");
+}
 
 /**
  * 「学校は休む？／仕事へ行ける？／行けるかわからない？」など**通学・就労側の可否で迷っている**とき③の👉2行をパターンB系に固定し語を差し替える（KAIRO_SPEC・超特例）。
@@ -14828,14 +15008,14 @@ function maybeBuildAttendanceRestJudgmentCoreLines(state) {
         ? "幼稚園へ行く"
         : "学校へ行く";
     return [
-      `👉 現時点では、${placeShort}よりも、休んで様子を見る方が適切です。`,
+      `👉 今は${placeShort}より、安心して休む方が適切です。`,
       line2B,
     ];
   }
 
   const placeShortWork = /出社/.test(t) ? "出社する" : "仕事へ行く";
   return [
-    `👉 現時点では、${placeShortWork}よりも、安静に様子を見る方が適切です。`,
+    `👉 今は${placeShortWork}より、安心して休む方が適切です。`,
     line2B,
   ];
 }
@@ -14929,46 +15109,30 @@ function pickGreenYellowDecisionCoreLines(state) {
 }
 
 /**
- * 🤝🟢🟡 専用：共感廃止・3 ブロック固定（KAIRO_SPEC）。
- * **フォールバック用**：`OPENAI_API_KEY` なし・LLM 失敗時など。本線は `buildGreenYellowStateAboutBlockAsync`（LLM 短縮 3〜7 文字目安）。
+ * 🤝🟢🟡 専用：👉2行＋安心文（KAIRO_SPEC v2）。
+ * **フォールバック用**：`OPENAI_API_KEY` なし・LLM 失敗時など。本線は `buildGreenYellowStateAboutBlockAsync`。
  */
 function buildGreenYellowStateAboutBlock(state, level) {
-  const rawParts = collectGreenYellowLowMediumCombinationParts(state);
-  let parts = applyGreenYellowComboUserWordGuards(state, rawParts)
-    .map((p) => finalizeComboLabelForCombinationLine(p))
-    .filter(Boolean);
-  if (parts.length < 2) {
-    parts = rawParts.map((p) => String(p || "").trim()).filter(Boolean);
-  }
-  const integrated = buildGreenYellowComboIntegratedParagraph(state, level, parts);
   const core = pickGreenYellowDecisionCoreLines(state);
-  return [integrated, ...core].join("\n");
+  const reassurance = buildGreenYellowReassuranceParagraphFallback(state, level);
+  return assembleGreenYellowStateAboutCore(core, reassurance);
 }
 
-/** 🤝🟢🟡 同上。組み合わせ「〇〇」は LLM で削ぎ落とし（KAIRO_SPEC 605）。意味行（②）も LLM で動的生成（KAIRO_SPEC §🤝🟢🟡 ②）。 */
+/** 🤝🟢🟡 同上。安心文は LLM で自然文統合（KAIRO_SPEC §🤝 v2）。 */
 async function buildGreenYellowStateAboutBlockAsync(state, level) {
   const lv = level === "🟡" || level === "🟢" ? level : finalizeRiskLevel(state);
   const cacheKey = stateAboutLineCacheKey(state, lv);
   if (state.cachedStateAboutLineKey === cacheKey && String(state.cachedStateAboutLineBody || "").trim()) {
-    return state.cachedStateAboutLineBody;
+    const cachedBody = state.cachedStateAboutLineBody;
+    const isLegacyComboFormat =
+      /「[^」]*＋[^」]*」/.test(cachedBody) || /このことから/.test(cachedBody);
+    if (!isLegacyComboFormat) {
+      return cachedBody;
+    }
   }
-  const rawParts = collectGreenYellowLowMediumCombinationParts(state);
-  const finalized = await finalizeCombinationPartsWithLlm(state, rawParts);
-  const guarded = applyGreenYellowComboUserWordGuards(
-    state,
-    finalized.map((p) => String(p || "").trim()).filter(Boolean)
-  );
-  let parts = guarded
-    .map((p, i) => finalizeComboLabelFromLlmOutput(p, finalized[i] || rawParts[i]))
-    .filter(Boolean);
-  if (parts.length < 2) {
-    parts = finalized.map((p) => String(p || "").trim()).filter(Boolean);
-  }
-  const causeShort =
-    (await buildCauseComboShortLabelAsync(state)) || buildCauseComboShortLabelSync(state);
-  const integrated = await buildGreenYellowComboIntegratedParagraphAsync(state, lv, parts, causeShort);
   const core = pickGreenYellowDecisionCoreLines(state);
-  const body = [integrated, ...core].join("\n");
+  const reassurance = await generateGreenYellowReassuranceParagraphViaLlm(state, lv);
+  const body = assembleGreenYellowStateAboutCore(core, reassurance);
   state.cachedStateAboutLineKey = cacheKey;
   state.cachedStateAboutLineBody = body;
   return body;
@@ -19143,29 +19307,26 @@ function buildStateDecisionLine(state, level) {
   return "";
 }
 
-/** 🟢/🟡「🤝 Kairoの判断」本文：事実箇条書き → 空行 → 組み合わせ行＋👉2行（箇条書きだけで終わらせない） */
+/** 🟢/🟡「🤝 Kairoの判断」本文：事実箇条書き → 空行 → 👉2行 → 安心文 */
 function buildGreenYellowHandshakeBlockBodySync(state, aboutLine) {
   ensureKairoJudgmentHasMinimumFactBullets(state, MIN_KAIRO_JUDGMENT_FACT_BULLETS);
   const factBullets = getKairoJudgmentFactBullets(state, { forSummary: true });
   const level = finalizeRiskLevel(state);
   let core = String(aboutLine || "").trim();
   const coreLines = core.split("\n").map((l) => String(l || "").trim()).filter(Boolean);
+  const hasPointer = coreLines.some((l) => /^👉\s*/.test(l));
+  const hasOldCombo = coreLines.some(
+    (l) => /「[^」]*＋[^」]*」/.test(l) || /このことから/.test(l)
+  );
+  const hasReassurance = coreLines.some((l) => !/^👉\s*/.test(l) && !/^・/.test(l));
   const coreLooksIncomplete =
     coreLines.length === 0 ||
     coreLines.every((l) => /^・/.test(l)) ||
-    !coreLines.some((l) => /^👉\s*/.test(l));
+    !hasPointer ||
+    hasOldCombo ||
+    !hasReassurance;
   if (coreLooksIncomplete) {
     core = buildGreenYellowStateAboutBlock(state, level);
-  }
-  const repairedLines = String(core || "").split("\n").map((l) => String(l || "").trim()).filter(Boolean);
-  if (!repairedLines.some((l) => /^👉\s*/.test(l))) {
-    const integrated = buildGreenYellowComboIntegratedParagraph(
-      state,
-      level,
-      collectGreenYellowLowMediumCombinationParts(state)
-    );
-    const coreTail = pickGreenYellowDecisionCoreLines(state);
-    core = [integrated, ...coreTail].join("\n");
   }
   const lines = [...factBullets];
   if (factBullets.length > 0 && core) lines.push("");
