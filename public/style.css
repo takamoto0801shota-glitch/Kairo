@@ -383,7 +383,7 @@ body {
     min-width: 40px;
     max-width: 40px;
     padding: 0;
-    background-color: #000000;
+    background-color: #4a9b8e;
     color: #ffffff;
     border: none;
     border-radius: 50%;
@@ -402,11 +402,11 @@ body {
 }
 
 .send-button:hover:not(:disabled) {
-    background-color: #1a1a1a;
+    background-color: #3d8579;
 }
 
 .send-button:active:not(:disabled) {
-    background-color: #000000;
+    background-color: #4a9b8e;
     opacity: 0.85;
 }
 
