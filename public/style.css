@@ -254,6 +254,27 @@ body {
     width: 100%;
 }
 
+/* まとめ全文：1枚の大きなカード（セクション分割の小ブロックを廃止） */
+.message.ai.summary-message {
+    align-self: stretch;
+    max-width: 100%;
+    width: 100%;
+    background-color: #ffffff;
+    color: #1a3a33;
+    padding: 22px 20px;
+    border-radius: 14px;
+    border: 1px solid #d8e8e4;
+    box-shadow: 0 2px 10px rgba(45, 74, 68, 0.08);
+    font-size: 17px;
+    font-weight: 400;
+    line-height: 1.85;
+    letter-spacing: 0.02em;
+}
+
+.message.ai.summary-message span {
+    display: inline;
+}
+
 .message.user {
     background-color: #e8f4f1;
     color: #1a3a33;

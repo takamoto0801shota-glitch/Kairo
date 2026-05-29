@@ -102,8 +102,8 @@ const appState = {
   postSummaryFollowUpSuppress: false,
   /** 直前の応答がまとめ前確認文のとき true。次の送信でプレースホルダを先に出す */
   awaitingSummaryReply: false,
-  /** まとめ先行表示ポーリングで描画したセクション（index → { text, el }） */
-  partialSectionByIndex: {},
+  /** まとめ本文（分割セクションを1メッセージに統合した表示）の DOM */
+  summaryMessageEl: null,
 };
 
 function resetConversation() {
@@ -125,7 +125,7 @@ function resetConversation() {
   appState.followUpSummarySuppress = false;
   appState.postSummaryFollowUpSuppress = false;
   appState.awaitingSummaryReply = false;
-  appState.partialSectionByIndex = {};
+  appState.summaryMessageEl = null;
 }
 
 const INTRO_TEMPLATE_TEXTS = {
@@ -1772,99 +1772,168 @@ function clearSectionTimers() {
   appState.sectionTimers = [];
 }
 
-function appendTextToElementInstant(target, textToAppend) {
-  const lines = String(textToAppend || "").split("\n");
-  lines.forEach((line, index) => {
-    const lineSpan = document.createElement("span");
-    lineSpan.textContent = line;
-    target.appendChild(lineSpan);
-    if (index < lines.length - 1) {
-      target.appendChild(document.createElement("br"));
+/** まとめ先頭セクション（🟢/🟡/🔴 ここまでの情報を整理します）か */
+function isSummaryIntroSectionText(text) {
+  const first = String(text || "")
+    .trim()
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.length > 0);
+  return /^(🟢|🟡|🔴)\s*ここまでの情報を整理します/.test(first || "");
+}
+
+/** まとめセクションの仕様順ソート用キー（サーバ getSummarySectionSpecsByJudgement と同順） */
+function getSummarySectionSortKey(text) {
+  const first =
+    String(text || "")
+      .trim()
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l.length > 0) || "";
+  if (/^(🟢|🟡|🔴)\s*ここまでの情報を整理します/.test(first)) return 0;
+  if (/^🤝\s/.test(first) || /^📝\s*(?:Kairoの判断|いまの状態を整理します)/.test(first)) return 1;
+  if (/^✅\s*(?:今すぐできること|(?:あなたの)?今すぐやること)/.test(first)) return 2;
+  if (/^⏳\s*(?:今後の見通し|この先の見通し)/.test(first)) return 3;
+  if (/^🏥\s/.test(first)) return 4;
+  if (/^💊\s/.test(first)) return 5;
+  if (/^🌱\s*最後に/.test(first) || /^💬\s*最後に/.test(first)) return 6;
+  return 99;
+}
+
+function getSummarySectionDedupeKey(text) {
+  const key = getSummarySectionSortKey(text);
+  const first =
+    String(text || "")
+      .trim()
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l.length > 0) || "";
+  return `${key}:${first.replace(/\s+/g, "").slice(0, 64)}`;
+}
+
+/** ポーリング途中の部分配列と最終配列の混在・重複を防ぎ、仕様どおりの順に並べる */
+function normalizeSummarySections(sections) {
+  const list = (Array.isArray(sections) ? sections : [])
+    .filter(Boolean)
+    .map((s) => String(s).trim())
+    .filter((s) => s.length > 0);
+  const byKey = new Map();
+  for (const s of list) {
+    const dk = getSummarySectionDedupeKey(s);
+    const prev = byKey.get(dk);
+    if (!prev || s.length >= prev.length) {
+      byKey.set(dk, s);
     }
+  }
+  return Array.from(byKey.values()).sort(
+    (a, b) => getSummarySectionSortKey(a) - getSummarySectionSortKey(b)
+  );
+}
+
+/** parseAIMessage のブロック列を sections 配列へ（sections 欠落時のフォールバック） */
+function sectionsFromSummaryPlainText(text) {
+  const blocks = parseAIMessage(text);
+  if (!blocks || blocks.length === 0) return [];
+  return blocks
+    .map((b) => {
+      const icon = b?.header?.icon || "";
+      const name = b?.header?.name || "";
+      const header = icon && name ? `${icon} ${name}`.trim() : icon || name;
+      const body = String(b?.content || "").trim();
+      return [header, body].filter(Boolean).join("\n\n").trim();
+    })
+    .filter(Boolean);
+}
+
+/** 分割 sections を1本のまとめ本文に（元デザイン：1カードに全文） */
+function mergeSummarySectionsForDisplay(sections) {
+  return normalizeSummarySections(sections).join("\n\n");
+}
+
+/**
+ * まとめを常に1メッセージ・大きなカードで表示（セクションごとの小ブロック分割をしない）。
+ * ポーリング中は同一 DOM を差し替えて更新する。
+ */
+function upsertSummaryMessage(sections, options = {}) {
+  const merged = mergeSummarySectionsForDisplay(sections);
+  if (!merged) return;
+
+  const messagesContainer = document.getElementById("chatMessages");
+  if (!messagesContainer) return;
+
+  let messageDiv = appState.summaryMessageEl;
+  if (!messageDiv || !messageDiv.isConnected) {
+    messageDiv = document.createElement("div");
+    messageDiv.className = "message ai summary-message";
+    messageDiv.dataset.summaryUnified = "true";
+    messagesContainer.appendChild(messageDiv);
+    appState.summaryMessageEl = messageDiv;
+  } else {
+    messageDiv.textContent = "";
+    messageDiv.className = "message ai summary-message";
+    messageDiv.classList.remove("has-blocks");
+  }
+  messageDiv.dataset.originalText = merged;
+
+  const appendLines = (target, textToAppend, done) => {
+    const lines = String(textToAppend || "").split("\n");
+    let index = 0;
+    const appendNext = () => {
+      const lineSpan = document.createElement("span");
+      lineSpan.textContent = lines[index];
+      target.appendChild(lineSpan);
+      if (index < lines.length - 1) {
+        target.appendChild(document.createElement("br"));
+      }
+      index += 1;
+      if (index < lines.length) {
+        if (options.animate === false) {
+          appendNext();
+        } else {
+          setTimeout(appendNext, 20);
+        }
+      } else if (done) {
+        done();
+      }
+    };
+    appendNext();
+  };
+
+  appendLines(messageDiv, merged, () => {
+    if (!options.skipPersist) {
+      saveHistory();
+    }
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
   });
 }
 
-/** まとめ先行表示用：アニメーションなしで1セクションを描画（🤝 の差し替えにも使う） */
-function renderPartialSummarySection(sectionText, sectionIndex) {
-  if (!sectionText) return null;
-  const messagesContainer = document.getElementById("chatMessages");
-  if (!messagesContainer) return null;
-  const messageDiv = document.createElement("div");
-  messageDiv.className = "message ai summary-partial-section";
-  messageDiv.dataset.partialSectionIndex = String(sectionIndex);
-  const blocks = parseAIMessage(sectionText);
-  messagesContainer.appendChild(messageDiv);
-  if (blocks && blocks.length > 0) {
-    blocks.forEach((block) => {
-      const blockDiv = document.createElement("div");
-      blockDiv.className = "message-block";
-      messageDiv.appendChild(blockDiv);
-      const headerDiv = document.createElement("div");
-      headerDiv.className = "block-header";
-      blockDiv.appendChild(headerDiv);
-      const contentDiv = document.createElement("div");
-      contentDiv.className = "block-content";
-      blockDiv.appendChild(contentDiv);
-      const headerText = block.header ? block.header.icon + " " + block.header.name : "";
-      const isStateBlock =
-        (block?.header?.icon === "🤝" || block?.header?.icon === "📝") &&
-        /今の状態について|Kairoの判断|いまの状態を整理します/.test(block?.header?.name || "");
-      const isActionBlock =
-        block?.header?.icon === "✅" &&
-        /(?:今すぐできること|(?:あなたの)?今すぐやること)/.test(block?.header?.name || "");
-      const isHospitalBlock =
-        block?.header?.icon === "🏥" &&
-        /受診先の候補|Kairoの判断/.test(block?.header?.name || "");
-      const showActionDetailButton = isActionBlock && appState.riskLevel !== "RED";
-      const iconText = block?.header?.icon || splitHeaderIconAndName(headerText).icon;
-      const nameText = block?.header?.name || splitHeaderIconAndName(headerText).name;
-      const headerTitleEl = appendHeaderTitleWithIcon(headerDiv, iconText, "");
-      if (isStateBlock || showActionDetailButton || isHospitalBlock) {
-        const detailButton = document.createElement("button");
-        detailButton.type = "button";
-        detailButton.className = "block-header-action";
-        detailButton.textContent = "具体的に";
-        detailButton.addEventListener("click", () => {
-          if (isHospitalBlock) {
-            showConcreteHospitalDetails();
-          } else if (isActionBlock) {
-            showConcreteActionDetails(block.content || "");
-          } else {
-            showConcreteStateDetails(block.content || "");
-          }
-        });
-        headerDiv.appendChild(detailButton);
-      }
-      if (headerText) {
-        appendTextToElementInstant(headerTitleEl, nameText || headerText);
-        appendTextToElementInstant(contentDiv, block.content || "");
-      } else {
-        appendTextToElementInstant(contentDiv, block.content || "");
-      }
-    });
-  } else {
-    appendTextToElementInstant(messageDiv, sectionText);
-  }
-  messagesContainer.scrollTop = messagesContainer.scrollHeight;
-  if (!appState.partialSectionByIndex) appState.partialSectionByIndex = {};
-  appState.partialSectionByIndex[sectionIndex] = { text: sectionText, el: messageDiv };
-  return messageDiv;
-}
-
-function upsertPartialSummarySection(sectionIndex, sectionText) {
-  const prev = appState.partialSectionByIndex && appState.partialSectionByIndex[sectionIndex];
-  if (prev && prev.text === sectionText) return prev.el;
-  if (prev && prev.el && prev.el.parentNode) prev.el.parentNode.removeChild(prev.el);
-  return renderPartialSummarySection(sectionText, sectionIndex);
-}
-
-function renderSection(sectionText, sectionIndex) {
+/** @deprecated まとめは upsertSummaryMessage(sections[]) で一括表示 */
+function renderSection(sectionText) {
   if (!sectionText) return;
-  if (typeof sectionIndex === "number" && sectionIndex >= 0) {
-    renderPartialSummarySection(sectionText, sectionIndex);
-    return;
+  upsertSummaryMessage([sectionText], { animate: false, skipPersist: true });
+}
+
+function renderSummarySectionsUnified(sections, options = {}) {
+  const list = normalizeSummarySections(sections);
+  if (list.length === 0) return;
+  hideSummaryCard();
+  setSummaryCardLayoutVisible(false);
+  upsertSummaryMessage(list, options);
+}
+
+/** 最終まとめを1カードで表示（常に全文・仕様順。部分表示の slice は使わない） */
+function displayFinalSummaryFromResponse(aiResponse, options = {}) {
+  let sections = Array.isArray(aiResponse?.sections) ? aiResponse.sections.filter(Boolean) : [];
+  if (sections.length === 0) {
+    const msg = String(aiResponse?.message || aiResponse?.response || "").trim();
+    if (serverSummaryAlreadyInPlainText(msg) || textHasServerSummaryIntroLine(msg)) {
+      sections = sectionsFromSummaryPlainText(msg);
+    }
   }
-  addMessage(sectionText);
+  const normalized = normalizeSummarySections(sections);
+  if (normalized.length === 0) return false;
+  renderSummarySectionsUnified(normalized, options);
+  return true;
 }
 
 function addPendingSummaryPlaceholder() {
@@ -1915,53 +1984,39 @@ async function handleUserInput() {
     sessionStorage.getItem(AWAITING_SUMMARY_SESSION_KEY) === "1";
   let summaryPlaceholderEl = null;
   let pollSummaryInterval = null;
-    let pollRenderedSectionCount = 0;
-    let pollPartialRevision = 0;
-    if (expectingSummary) {
-      appState.partialSectionByIndex = {};
-      summaryPlaceholderEl = addPendingSummaryPlaceholder();
-      pollSummaryInterval = setInterval(async () => {
-        try {
-          const cid = localStorage.getItem(CONVERSATION_ID_KEY);
-          if (!cid) return;
-          const r = await fetch(`/api/summary-progress?conversationId=${encodeURIComponent(cid)}`);
-          if (!r.ok) return;
-          const progress = await r.json();
-          const secs = Array.isArray(progress.sections) ? progress.sections.filter(Boolean) : [];
-          const revision = Number(progress.partialSectionsRevision) || 0;
-          if (secs.length > 0 && (secs.length > pollRenderedSectionCount || revision > pollPartialRevision)) {
-            if (summaryPlaceholderEl) {
-              removePendingSummaryPlaceholder(summaryPlaceholderEl);
-              summaryPlaceholderEl = null;
-            }
-            const updateThrough = Math.max(pollRenderedSectionCount, secs.length);
-            for (let i = 0; i < updateThrough; i += 1) {
-              if (!secs[i]) continue;
-              if (i >= pollRenderedSectionCount) {
-                renderSection(secs[i], i);
-              } else if (
-                revision > pollPartialRevision ||
-                (appState.partialSectionByIndex[i] &&
-                  appState.partialSectionByIndex[i].text !== secs[i])
-              ) {
-                upsertPartialSummarySection(i, secs[i]);
-              }
-            }
-            pollRenderedSectionCount = secs.length;
-            pollPartialRevision = revision;
+  let pollRenderedSectionCount = 0;
+  if (expectingSummary) {
+    appState.summaryMessageEl = null;
+    summaryPlaceholderEl = addPendingSummaryPlaceholder();
+    pollSummaryInterval = setInterval(async () => {
+      try {
+        const cid = localStorage.getItem(CONVERSATION_ID_KEY);
+        if (!cid) return;
+        const r = await fetch(`/api/summary-progress?conversationId=${encodeURIComponent(cid)}`);
+        if (!r.ok) return;
+        const progress = await r.json();
+        const secs = Array.isArray(progress.sections) ? progress.sections.filter(Boolean) : [];
+        const normalizedPoll = normalizeSummarySections(secs);
+        if (normalizedPoll.length > 0) {
+          if (summaryPlaceholderEl) {
+            removePendingSummaryPlaceholder(summaryPlaceholderEl);
+            summaryPlaceholderEl = null;
           }
-          if (!progress.generationActive && progress.complete) {
-            if (pollSummaryInterval) {
-              clearInterval(pollSummaryInterval);
-              pollSummaryInterval = null;
-            }
-          }
-        } catch (_) {
-          /* ignore */
+          renderSummarySectionsUnified(normalizedPoll, { animate: false, skipPersist: true });
+          pollRenderedSectionCount = normalizedPoll.length;
         }
-      }, 450);
-    }
-    try {
+        if (!progress.generationActive && progress.complete) {
+          if (pollSummaryInterval) {
+            clearInterval(pollSummaryInterval);
+            pollSummaryInterval = null;
+          }
+        }
+      } catch (_) {
+        /* ignore */
+      }
+    }, 450);
+  }
+  try {
       // 質問フェーズは従来どおり通常APIで即時応答
       const data = await callOpenAI(userText, resetSession);
       console.log("[DEBUG] full aiResponse", data);
@@ -1986,21 +2041,9 @@ async function handleUserInput() {
       const triageState = aiResponse.triage_state || { is_final: false, triage_level: null, required_fields_filled: 0 };
       const isFirstResponse = wasFirstUserTurn;
       const sections = Array.isArray(aiResponse.sections) ? aiResponse.sections.filter(Boolean) : [];
-      /** ポーリングで既に出した分はアニメーションで再表示しない（count === length のとき従来は全文が再度出て二重になる） */
-      let sectionsToAnimate;
-      if (pollRenderedSectionCount === 0) {
-        sectionsToAnimate = sections;
-      } else if (sections.length > 0 && pollRenderedSectionCount >= sections.length) {
-        sectionsToAnimate = [];
-      } else {
-        sectionsToAnimate = sections.slice(pollRenderedSectionCount);
-      }
-      const pollAlreadyRenderedAllSections =
-        pollRenderedSectionCount > 0 &&
-        sections.length > 0 &&
-        pollRenderedSectionCount >= sections.length;
+      const normalizedSections = normalizeSummarySections(sections);
       const shouldShowSections =
-        !isFirstResponse && triageState.is_final && sectionsToAnimate.length > 0;
+        !isFirstResponse && triageState.is_final && normalizedSections.length > 0;
 
       if (aiResponse.isFollowUpOnlyResponse) {
         appState.followUpSummarySuppress = true;
@@ -2057,7 +2100,6 @@ async function handleUserInput() {
 
       if (shouldShowSections) {
         const firstDelay = QUESTION_DELAY_MS + 600;
-        const interval = 800;
         const followUpMessage = aiResponse.followUpMessage;
         /** サーバーが null を返したときはフォローしない（DEFAULT で埋めないと二重バブル・まとめの直後に別文が連続する原因になる） */
         const followUpQuestion =
@@ -2072,8 +2114,9 @@ async function handleUserInput() {
             !suppressInlineSummary &&
             !appState.followUpSummarySuppress &&
             !appState.postSummaryFollowUpSuppress;
+          const hasInlineSummaryHeader = normalizedSections.some((s) => isSummaryIntroSectionText(s));
           let showedSummaryCard = false;
-          if (canShowSummaryCard) {
+          if (canShowSummaryCard && !hasInlineSummaryHeader) {
             renderSummary();
             showedSummaryCard = true;
             persistSummaryDoneForConversation(aiResponse.conversationId);
@@ -2086,33 +2129,19 @@ async function handleUserInput() {
           }
         };
 
-        const timerId0 = setTimeout(() => {
-          if (sectionsToAnimate[0]) {
-            renderSection(sectionsToAnimate[0]);
-            if (sectionsToAnimate.length === 1) {
-              const t = setTimeout(onLastSectionRendered, 300);
-              appState.sectionTimers.push(t);
-            }
-          }
+        const timerId = setTimeout(() => {
+          displayFinalSummaryFromResponse(aiResponse, { animate: false });
+          const t = setTimeout(onLastSectionRendered, 300);
+          appState.sectionTimers.push(t);
         }, firstDelay);
-        appState.sectionTimers.push(timerId0);
-
-        for (let idx = 1; idx < sectionsToAnimate.length; idx++) {
-          const isLast = idx === sectionsToAnimate.length - 1;
-          const timerId = setTimeout(() => {
-            renderSection(sectionsToAnimate[idx]);
-            if (isLast) {
-              const t = setTimeout(onLastSectionRendered, 300);
-              appState.sectionTimers.push(t);
-            }
-          }, firstDelay + idx * interval);
-          appState.sectionTimers.push(timerId);
-        }
+        appState.sectionTimers.push(timerId);
       } else if (
-        pollAlreadyRenderedAllSections &&
         triageState.is_final &&
         !isFirstResponse &&
-        !aiResponse.isPreSummaryConfirmation
+        !aiResponse.isPreSummaryConfirmation &&
+        normalizedSections.length > 0 &&
+        !aiResponse.isFollowUpOnlyResponse &&
+        !suppressInlineSummary
       ) {
         const firstDelay = QUESTION_DELAY_MS + 600;
         const followUpMessage = aiResponse.followUpMessage;
@@ -2125,8 +2154,9 @@ async function handleUserInput() {
             !suppressInlineSummary &&
             !appState.followUpSummarySuppress &&
             !appState.postSummaryFollowUpSuppress;
+          const hasInlineSummaryHeader = normalizedSections.some((s) => isSummaryIntroSectionText(s));
           let showedSummaryCard = false;
-          if (canShowSummaryCard) {
+          if (canShowSummaryCard && !hasInlineSummaryHeader) {
             renderSummary();
             showedSummaryCard = true;
             persistSummaryDoneForConversation(aiResponse.conversationId);
@@ -2138,25 +2168,25 @@ async function handleUserInput() {
             appState.followUpSummarySuppress = true;
           }
         };
-        const t = setTimeout(onLastSectionRendered, firstDelay);
-        appState.sectionTimers.push(t);
+        const timerId = setTimeout(() => {
+          displayFinalSummaryFromResponse(aiResponse, { animate: false });
+          const t = setTimeout(onLastSectionRendered, 300);
+          appState.sectionTimers.push(t);
+        }, firstDelay);
+        appState.sectionTimers.push(timerId);
       } else {
         setTimeout(() => {
-          // まとめ後のフォロー応答（sections空 or isFollowUpOnlyResponse）ではrenderSummaryを絶対に呼ばない
+          const msgToShow = stripFollowUpFromMessage(aiMessage);
           if (
             triageState.is_final &&
             !isFirstResponse &&
             !aiResponse.isPreSummaryConfirmation &&
-            sections.length > 0 &&
             !aiResponse.isFollowUpOnlyResponse &&
             !suppressInlineSummary &&
-            !appState.followUpSummarySuppress &&
-            !appState.postSummaryFollowUpSuppress
+            displayFinalSummaryFromResponse(aiResponse, { animate: false })
           ) {
-            renderSummary();
-          }
-          const msgToShow = stripFollowUpFromMessage(aiMessage);
-          if (!pollAlreadyRenderedAllSections) {
+            /* まとめは displayFinalSummaryFromResponse で表示済み */
+          } else {
             addMessage(msgToShow, false, true, {
               animateFromTop: !!aiResponse.isPreSummaryConfirmation,
               skipSummaryBlock: suppressInlineSummary,

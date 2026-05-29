@@ -5187,9 +5187,12 @@ function setSummaryPartialSectionsFromFinalText(state, text, level) {
   if (!state || !text) return;
   try {
     const judgement = level === "🔴" ? "🔴" : level === "🟡" ? "🟡" : "🟢";
-    state.summaryPartialSections = extractSectionsBySpecs(text, getSummarySectionSpecsByJudgement(judgement)).map(
-      (e) => e.text
-    );
+    const ordered = reorderSummaryBlocksToCanonicalOrder(text, judgement);
+    state.summaryPartialSections = extractSectionsBySpecs(
+      ordered,
+      getSummarySectionSpecsByJudgement(judgement)
+    ).map((e) => e.text);
+    bumpSummaryPartialSectionsRevision(state);
   } catch (_) {
     /* ignore */
   }
@@ -8885,6 +8888,9 @@ function causeLooksTemporalOrContinuationOnly(normalized) {
 function extractCauseCategory(text) {
   const rawText = String(text || "").trim();
   const normalized = normalizeUserText(text);
+  if (/^(ない|なし|特にない|特に思い当たらない)$/.test(normalized)) {
+    return { raw: rawText || "特に思い当たらない", selectedIndex: 0 };
+  }
   if (/思い当たらない|わからない|分からない|不明/.test(normalized)) {
     const m = rawText.match(/思い当たらない|わからない|分からない|不明/);
     return { raw: (m && m[0]) || rawText || normalized, selectedIndex: 0 };
@@ -9019,7 +9025,10 @@ function applyExplicitQuestionResponseSlotFill(state, slotType, message, ctx = {
   }
   const trimmedMessage = String(message || "").trim();
   if (trimmedMessage.length < 2) return { filled: false, selectedIndex: null };
-  if (isConfirmationOnlyAnswer(trimmedMessage) || isRejectionOnlyAnswer(trimmedMessage)) {
+  if (
+    isConfirmationOnlyAnswer(trimmedMessage, { activeSlotType: slotType }) ||
+    isRejectionOnlyAnswer(trimmedMessage)
+  ) {
     return { filled: false, selectedIndex: null };
   }
 
@@ -9028,14 +9037,26 @@ function applyExplicitQuestionResponseSlotFill(state, slotType, message, ctx = {
     : Array.isArray(state.lastOptions)
       ? state.lastOptions
       : [];
+  let messageForSlot = trimmedMessage;
+  if (slotType === "associated_symptoms" && isAssociatedSymptomsNoneAnswer(trimmedMessage)) {
+    const noneOpt = lastOptionsSnapshot.find((o) => /特にない|変化はない|これ以外/.test(String(o || "")));
+    if (noneOpt) messageForSlot = noneOpt;
+    else if (!/特にない|これ以外|変化はない/.test(trimmedMessage)) messageForSlot = "これ以外は特にない";
+  } else if (slotType === "cause_category" && isSlotQuestionNegativeShortAnswer(trimmedMessage, slotType)) {
+    const noneOpt = lastOptionsSnapshot.find((o) =>
+      /思い当たらない|特にない|わからない|分からない|ない/.test(String(o || ""))
+    );
+    messageForSlot = noneOpt || "特に思い当たらない";
+  }
+
   const classified =
     ctx.classified ||
     (lastOptionsSnapshot.length >= 2
-      ? classifyAnswerToOption(trimmedMessage, lastOptionsSnapshot, slotType)
+      ? classifyAnswerToOption(messageForSlot, lastOptionsSnapshot, slotType)
       : { index: null, usedFreeText: false, useCanonicalSlotText: false });
   let selectedIndex = classified.index;
   if (selectedIndex === null && lastOptionsSnapshot.length >= 2) {
-    selectedIndex = mapFreeTextToOptionIndex(trimmedMessage, lastOptionsSnapshot, slotType);
+    selectedIndex = mapFreeTextToOptionIndex(messageForSlot, lastOptionsSnapshot, slotType);
   }
   const fallbackOptions =
     lastOptionsSnapshot.length > 0
@@ -9044,22 +9065,22 @@ function applyExplicitQuestionResponseSlotFill(state, slotType, message, ctx = {
   const effectiveIndex =
     selectedIndex !== null && selectedIndex !== undefined
       ? selectedIndex
-      : mapFreeTextToOptionIndex(trimmedMessage, fallbackOptions, slotType);
+      : mapFreeTextToOptionIndex(messageForSlot, fallbackOptions, slotType);
 
   if (!state.slotFilled[slotType]) {
     state.slotFilled[slotType] = true;
   }
-  const measuredTemp = extractBodyTemperatureCelsius(trimmedMessage);
+  const measuredTemp = extractBodyTemperatureCelsius(messageForSlot);
   if (measuredTemp != null) {
     state.extractedBodyTemperatureC = measuredTemp;
   }
   const valueForDisplay =
-    trimmedMessage ||
+    messageForSlot ||
     (effectiveIndex !== null &&
     effectiveIndex !== undefined &&
     lastOptionsSnapshot[effectiveIndex]
       ? lastOptionsSnapshot[effectiveIndex]
-      : trimmedMessage);
+      : messageForSlot);
   state.slotAnswers[slotType] = valueForDisplay;
 
   if (slotType === "duration" && effectiveIndex !== null && effectiveIndex !== undefined) {
@@ -9084,8 +9105,8 @@ function applyExplicitQuestionResponseSlotFill(state, slotType, message, ctx = {
   state.lastNormalizedAnswer = normalized;
   markSlotStatus(state, slotType, "question_response", valueForDisplay);
 
-  if (slotType === "cause_category" && hasConcreteCauseDetail(trimmedMessage)) {
-    state.causeDetailText = trimmedMessage;
+  if (slotType === "cause_category" && hasConcreteCauseDetail(messageForSlot)) {
+    state.causeDetailText = messageForSlot;
   }
   if (slotType === "associated_symptoms" && effectiveIndex !== null && lastOptionsSnapshot[effectiveIndex]) {
     const selectedOpt = lastOptionsSnapshot[effectiveIndex] || valueForDisplay || "";
@@ -9160,7 +9181,7 @@ function canForceFillSlotFromLatestMessage(slotKey, message) {
 function forceCaptureLatestMissingAskedSlotFromMessage(state, message) {
   if (!state) return false;
   const trimmed = String(message || "").trim();
-  if (!trimmed || isConfirmationOnlyAnswer(trimmed) || isRejectionOnlyAnswer(trimmed)) return false;
+  if (!trimmed || isRejectionOnlyAnswer(trimmed)) return false;
   const missing = getMissingSlots(state.slotFilled, state);
   if (!Array.isArray(missing) || missing.length === 0) return false;
 
@@ -9180,6 +9201,7 @@ function forceCaptureLatestMissingAskedSlotFromMessage(state, message) {
 
   for (const slotKey of pickCandidates) {
     if (slotKey === "pain_score") continue;
+    if (isConfirmationOnlyAnswer(trimmed, { activeSlotType: slotKey })) continue;
     if (!canForceFillSlotFromLatestMessage(slotKey, trimmed)) continue;
     const before = !!state.slotFilled?.[slotKey];
     const applied = applyExplicitQuestionResponseSlotFill(state, slotKey, trimmed, {
@@ -9190,6 +9212,75 @@ function forceCaptureLatestMissingAskedSlotFromMessage(state, message) {
     }
   }
   return false;
+}
+
+/** 直近のスロット質問で「ない」系と答えたのに未充填のときの救済（付随・きっかけ等） */
+function backfillSlotNegativeAnswerFromQuestion(state, message) {
+  if (!state) return false;
+  const slotType = state.lastQuestionType;
+  if (!slotType || slotType === "pain_score" || !SLOT_KEYS.includes(slotType)) return false;
+  if (!state.askedSlots?.[slotType]) return false;
+  if (state.slotFilled?.[slotType]) return false;
+  if (!isSlotQuestionNegativeShortAnswer(message, slotType)) return false;
+  if (slotType === "associated_symptoms") {
+    return backfillAssociatedSymptomsNoneFromQuestionAnswer(state, message);
+  }
+  const opts =
+    Array.isArray(state.lastOptions) && state.lastOptions.length > 0
+      ? state.lastOptions
+      : FIXED_QUESTIONS[slotType]?.options || [];
+  let canonical = String(message || "").trim();
+  if (slotType === "cause_category") {
+    const noneOpt = opts.find((o) => /思い当たらない|特にない|わからない/.test(String(o || "")));
+    canonical = noneOpt || "特に思い当たらない";
+  } else {
+    const noneOpt = opts.find((o) => /特にない|変化はない|これ以外|思い当たらない/.test(String(o || "")));
+    if (noneOpt) canonical = noneOpt;
+  }
+  const noneIdx = opts.indexOf(canonical);
+  const applied = applyExplicitQuestionResponseSlotFill(state, slotType, canonical, {
+    lastOptions: opts,
+    classified: {
+      index: noneIdx >= 0 ? noneIdx : 0,
+      usedFreeText: false,
+      useCanonicalSlotText: true,
+    },
+  });
+  return !!applied?.filled;
+}
+
+/** 付随症状質問で「ない」系と答えたのにスロット未充填のときの救済 */
+function backfillAssociatedSymptomsNoneFromQuestionAnswer(state, message) {
+  if (!state?.askedSlots?.associated_symptoms) return false;
+  if (state.slotFilled?.associated_symptoms) return false;
+  if (!isAssociatedSymptomsNoneAnswer(message)) return false;
+  const historyText = state.historyTextForCare || "";
+  const category = state.triageCategory || resolveQuestionCategoryFromState(state) || "PAIN";
+  const opts =
+    Array.isArray(state.lastOptions) && state.lastOptions.length >= 2
+      ? state.lastOptions
+      : category === "GI"
+        ? GI_ASSOCIATED_SYMPTOMS_OPTIONS
+        : category === "PAIN" || category === "INFECTION"
+          ? buildPainInfectionAssociatedOptions(historyText, state, category)
+          : buildAssociatedSymptomsOptions("other");
+  let canonical = "これ以外は特にない";
+  for (const o of opts) {
+    if (/特にない|変化はない|これ以外/.test(String(o || ""))) {
+      canonical = o;
+      break;
+    }
+  }
+  const noneIdx = opts.indexOf(canonical);
+  const applied = applyExplicitQuestionResponseSlotFill(state, "associated_symptoms", canonical, {
+    lastOptions: opts,
+    classified: {
+      index: noneIdx >= 0 ? noneIdx : 0,
+      usedFreeText: false,
+      useCanonicalSlotText: true,
+    },
+  });
+  return !!applied?.filled;
 }
 
 function applySpontaneousSlotFill(state, message, opts = {}) {
@@ -11114,6 +11205,36 @@ function reinterpretWeatherAndEnvironmentCause(cause) {
     return "冷えや気温の変化がきっかけの可能性";
   }
   return t;
+}
+
+/** 付随症状質問への「なし」回答（確認文の短文「ない」と区別する） */
+function isAssociatedSymptomsNoneAnswer(text) {
+  const t = normalizeAnswerText(text);
+  if (!t) return false;
+  if (
+    /^(ない|なし|特にない|特になし|これ以外は特にない|他はない|特に変化はない|それ以外はない|特にないです|ないです|ありません|特にありません)$/.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  return /^(うん|はい|ええ)[、,]?\s*(ない|なし|特にない)/.test(String(text || "").trim());
+}
+
+/** スロット質問への「ない／なし／特にない」系（確認文の短文と区別する） */
+function isSlotQuestionNegativeShortAnswer(text, slotType) {
+  if (!slotType || !SLOT_KEYS.includes(slotType) || slotType === "pain_score") return false;
+  if (slotType === "associated_symptoms") return isAssociatedSymptomsNoneAnswer(text);
+  const t = normalizeAnswerText(text);
+  if (!t) return false;
+  if (
+    /^(ない|なし|特にない|特になし|ないです|特にないです|ありません|特にありません|思い当たらない|わからない|分からない|不明|特に思い当たらない|別にない|別になし|特に変化はない|これ以外は特にない)$/.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  return /^(うん|はい|ええ)[、,]?\s*(ない|なし|特にない)/.test(String(text || "").trim());
 }
 
 /** 付随症状スロットの生の選択肢（表示専用ポリシー用）。判断ロジック・LLMには渡さない。 */
@@ -13324,9 +13445,17 @@ function buildStateFactsBulletsLegacy(state, opts = {}) {
 }
 
 /** 確認文への肯定・否定のみの返答（箇条書きに書かない）。まとめをそのまま表示する。 */
-function isConfirmationOnlyAnswer(text) {
+function isConfirmationOnlyAnswer(text, opts = {}) {
   const t = String(text || "").trim();
+  const activeSlotType = opts?.activeSlotType || null;
   if (!t) return true;
+  if (
+    activeSlotType &&
+    SLOT_KEYS.includes(activeSlotType) &&
+    isSlotQuestionNegativeShortAnswer(t, activeSlotType)
+  ) {
+    return false;
+  }
   if (/^(ない|なし|特になし|とくにない|特になく|とくになく)$/i.test(t)) return true;
   if (/^(ないです|ありません|特にないです|特にありません|別にない|別になし|追加はない|追加なし|全くない|全然ない|何もない)$/i.test(t)) return true;
   if (/^(はい|うん|ええ|おっけー|おk|OK|ok|オッケー|よろしい|合ってる|合ってます|合っています|あってる|あってます|あっています|いいです|いいよ|問題ない|問題ないです|問題ありません|それでいい|それでいいです|大丈夫|大丈夫です|そうです|そうですね|その通り|そのとおり|その通りです|正しい|正しいです|正解|間違いない|間違いありません|了解|了解です|了解しました|承知|承知しました|かしこまりました)$/i.test(t)) return true;
@@ -19167,10 +19296,13 @@ function matchAnswerToOptionWithMeta(answer, options, questionType = null) {
 
   if (normalizedAnswer.match(/^(ない|なし|特になし|特にない|いない)$/)) {
     const negativeIndex = options.findIndex((opt) =>
-      normalizeAnswerText(opt).match(/(ない|なし|思い当たらない|特になし|特にない)$/)
+      normalizeAnswerText(opt).match(/(ない|なし|思い当たらない|特になし|特にない|変化はない|これ以外)$/)
     );
     if (negativeIndex !== -1) {
       return { index: negativeIndex, canonicalize: true };
+    }
+    if (questionType === "associated_symptoms") {
+      return { index: null, canonicalize: false };
     }
   }
 
@@ -19396,7 +19528,12 @@ function mapFreeTextToOptionIndex(answer, options, type) {
       return options.length >= 3 ? 1 : 0;
     }
     if (indexOf("咳や鼻詰まりがある") >= 0 && indexOf("発熱がある") >= 0) {
-      if (none.test(text)) return 0;
+      if (none.test(text)) {
+        const noneIdx = options.findIndex((opt) =>
+          /特にない|変化はない|これ以外/.test(String(opt || ""))
+        );
+        return noneIdx >= 0 ? noneIdx : null;
+      }
       if (indexOf("吐き気がある") >= 0 && /吐き気|嘔吐|むかむか/.test(text)) return 1;
       if (textImpliesFeverForInfectionTriage(text)) return 2;
       if (/鼻|詰まり|咳|せき/.test(text)) return 0;
@@ -20740,9 +20877,12 @@ app.post("/api/chat", async (req, res) => {
       }
       summaryMsg = reorderSummaryBlocksToCanonicalOrder(summaryMsg, finalRisk);
       conversationState[conversationId].summaryText = summaryMsg;
+      setSummaryPartialSectionsFromFinalText(conversationState[conversationId], summaryMsg, finalRisk);
       markSummaryDeliveredAndFollowUpPhase(conversationState[conversationId]);
       conversationHistory[conversationId].push({ role: "assistant", content: summaryMsg });
-      const sections = extractSectionsBySpecs(summaryMsg, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text);
+      const sections = conversationState[conversationId].summaryPartialSections?.length
+        ? conversationState[conversationId].summaryPartialSections.slice()
+        : extractSectionsBySpecs(summaryMsg, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text);
       const followUpForHistory = shouldSendFollowUpQuestion(sections, summaryMsg)
         ? followUpQ || getInitialFollowUpQuestionBySpec(state)
         : null;
@@ -21004,10 +21144,12 @@ app.post("/api/chat", async (req, res) => {
       const trimmedForSlot = String(message || "").trim();
       const isSubstantiveSlotAnswer =
         trimmedForSlot.length >= 2 &&
-        !isConfirmationOnlyAnswer(trimmedForSlot) &&
+        !isConfirmationOnlyAnswer(trimmedForSlot, { activeSlotType: type }) &&
         !isRejectionOnlyAnswer(trimmedForSlot);
+      const isSlotNegativeAnswer =
+        type && SLOT_KEYS.includes(type) && isSlotQuestionNegativeShortAnswer(trimmedForSlot, type);
 
-      if (selectedIndex !== null) {
+      if (selectedIndex !== null && !isSlotNegativeAnswer) {
         const optionCount = lastOptionsSnapshot.length;
         const score =
           selectedIndex === 0
@@ -21021,13 +21163,13 @@ app.post("/api/chat", async (req, res) => {
                 : 1.5;
         conversationState[conversationId].questionCount += 1;
         conversationState[conversationId].totalScore += score;
-      } else if (isSubstantiveSlotAnswer && type && SLOT_KEYS.includes(type)) {
+      } else if ((isSubstantiveSlotAnswer || isSlotNegativeAnswer) && type && SLOT_KEYS.includes(type)) {
         conversationState[conversationId].questionCount += 1;
         conversationState[conversationId].totalScore += 1.5;
       }
 
       const slotFillResult =
-        type && SLOT_KEYS.includes(type) && isSubstantiveSlotAnswer
+        type && SLOT_KEYS.includes(type) && (isSubstantiveSlotAnswer || isSlotNegativeAnswer)
           ? applyExplicitQuestionResponseSlotFill(conversationState[conversationId], type, message, {
               lastOptions: lastOptionsSnapshot,
               classified,
@@ -21035,7 +21177,14 @@ app.post("/api/chat", async (req, res) => {
           : { filled: false, selectedIndex: null };
 
       reconcileInfectionDailyImpactFromTemperature(conversationState[conversationId], message);
-      if (slotFillResult.filled) {
+      let slotAnswerRecorded = slotFillResult.filled;
+      if (!slotAnswerRecorded) {
+        slotAnswerRecorded = backfillSlotNegativeAnswerFromQuestion(
+          conversationState[conversationId],
+          message
+        );
+      }
+      if (slotAnswerRecorded) {
         conversationState[conversationId].lastOptions = [];
         conversationState[conversationId].lastQuestionType = null;
       }
@@ -21045,19 +21194,25 @@ app.post("/api/chat", async (req, res) => {
       const trimmedForSlot = String(message || "").trim();
       const isSubstantiveSlotAnswer =
         trimmedForSlot.length >= 2 &&
-        !isConfirmationOnlyAnswer(trimmedForSlot) &&
+        !isConfirmationOnlyAnswer(trimmedForSlot, { activeSlotType: type }) &&
         !isRejectionOnlyAnswer(trimmedForSlot);
+      const isSlotNegativeAnswer =
+        type && SLOT_KEYS.includes(type) && isSlotQuestionNegativeShortAnswer(trimmedForSlot, type);
       if (
         type &&
         SLOT_KEYS.includes(type) &&
         type !== "pain_score" &&
-        isSubstantiveSlotAnswer &&
+        (isSubstantiveSlotAnswer || isSlotNegativeAnswer) &&
         stAns.askedSlots?.[type]
       ) {
         const slotFillResult = applyExplicitQuestionResponseSlotFill(stAns, type, message, {
           lastOptions: stAns.lastOptions || [],
         });
-        if (slotFillResult.filled) {
+        let slotAnswerRecorded = slotFillResult.filled;
+        if (!slotAnswerRecorded) {
+          slotAnswerRecorded = backfillSlotNegativeAnswerFromQuestion(stAns, message);
+        }
+        if (slotAnswerRecorded) {
           stAns.questionCount += 1;
           stAns.totalScore += 1.5;
           stAns.lastOptions = [];
@@ -21065,6 +21220,8 @@ app.post("/api/chat", async (req, res) => {
         }
       }
     }
+
+    backfillSlotNegativeAnswerFromQuestion(conversationState[conversationId], message);
 
     const filledAfterTurn = countFilledSlots(conversationState[conversationId].slotFilled, conversationState[conversationId]);
     if (filledAfterTurn > filledBeforeTurn) {
@@ -21173,7 +21330,10 @@ app.post("/api/chat", async (req, res) => {
         conversationState[conversationId].questionCount === 0 &&
         conversationState[conversationId].lastPainScore === null;
       const lastType = conversationState[conversationId].lastQuestionType;
-      const reaskSameSlot = lastType && missingSlots.includes(lastType);
+      const reaskSameSlot =
+        lastType &&
+        missingSlots.includes(lastType) &&
+        !isSlotQuestionNegativeShortAnswer(String(message || "").trim(), lastType);
       const stFixed = conversationState[conversationId];
       const nextSlot = mustAskPainScoreBeforeOtherSlots(stFixed)
         ? "pain_score"
@@ -21827,7 +21987,10 @@ app.post("/api/chat", async (req, res) => {
         conversationState[conversationId].questionCount === 0 &&
         conversationState[conversationId].lastPainScore === null;
       const lastType = conversationState[conversationId].lastQuestionType;
-      const reaskSameSlot = lastType && missingSlots.includes(lastType);
+      const reaskSameSlot =
+        lastType &&
+        missingSlots.includes(lastType) &&
+        !isSlotQuestionNegativeShortAnswer(String(message || "").trim(), lastType);
       const st = conversationState[conversationId];
       const nextSlot = mustAskPainScoreBeforeOtherSlots(st)
         ? "pain_score"
@@ -21982,10 +22145,21 @@ app.post("/api/chat", async (req, res) => {
       content: aiResponse,
     });
     const finalRisk = conversationState[conversationId].decisionLevel || level;
-    const sections =
-      shouldJudgeNow
-        ? extractSectionsBySpecs(aiResponse, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text)
-        : [];
+    let sections = [];
+    if (shouldJudgeNow && aiResponse) {
+      const orderedSummary = reorderSummaryBlocksToCanonicalOrder(aiResponse, finalRisk);
+      if (orderedSummary && orderedSummary !== aiResponse) {
+        aiResponse = orderedSummary;
+        if (conversationHistory[conversationId]?.length) {
+          conversationHistory[conversationId][conversationHistory[conversationId].length - 1].content =
+            orderedSummary;
+        }
+      }
+      setSummaryPartialSectionsFromFinalText(conversationState[conversationId], aiResponse, finalRisk);
+      sections = conversationState[conversationId].summaryPartialSections?.length
+        ? conversationState[conversationId].summaryPartialSections.slice()
+        : extractSectionsBySpecs(aiResponse, getSummarySectionSpecsByJudgement(finalRisk)).map((e) => e.text);
+    }
     if (followUpMessage) {
       conversationHistory[conversationId].push({
         role: "assistant",
@@ -22614,6 +22788,10 @@ app.get("/api/summary-progress", (req, res) => {
     const state = conversationState[conversationId];
     if (!state) {
       return res.json({ sections: [], generationActive: false, complete: false });
+    }
+    if (!state.summaryGenerating && state.summaryText) {
+      const level = state.decisionLevel || finalizeRiskLevel(state);
+      setSummaryPartialSectionsFromFinalText(state, state.summaryText, level);
     }
     const sections = Array.isArray(state.summaryPartialSections) ? state.summaryPartialSections : [];
     return res.json({
