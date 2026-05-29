@@ -8888,7 +8888,7 @@ function causeLooksTemporalOrContinuationOnly(normalized) {
 function extractCauseCategory(text) {
   const rawText = String(text || "").trim();
   const normalized = normalizeUserText(text);
-  if (/^(ない|なし|特にない|特に思い当たらない)$/.test(normalized)) {
+  if (/^(ない|なし|特にない|特に思い当たらない|わからない|分からない|わかりません|分かりません|不明)$/.test(normalized)) {
     return { raw: rawText || "特に思い当たらない", selectedIndex: 0 };
   }
   if (/思い当たらない|わからない|分からない|不明/.test(normalized)) {
@@ -9024,7 +9024,13 @@ function applyExplicitQuestionResponseSlotFill(state, slotType, message, ctx = {
     return { filled: false, selectedIndex: null };
   }
   const trimmedMessage = String(message || "").trim();
-  if (trimmedMessage.length < 2) return { filled: false, selectedIndex: null };
+  const isNegUnk = isSlotQuestionNegativeShortAnswer(trimmedMessage, slotType);
+  if (
+    trimmedMessage.length < 1 ||
+    (trimmedMessage.length < 2 && !isNegUnk)
+  ) {
+    return { filled: false, selectedIndex: null };
+  }
   if (
     isConfirmationOnlyAnswer(trimmedMessage, { activeSlotType: slotType }) ||
     isRejectionOnlyAnswer(trimmedMessage)
@@ -9037,35 +9043,39 @@ function applyExplicitQuestionResponseSlotFill(state, slotType, message, ctx = {
     : Array.isArray(state.lastOptions)
       ? state.lastOptions
       : [];
+  let negUnkResolved = null;
   let messageForSlot = trimmedMessage;
-  if (slotType === "associated_symptoms" && isAssociatedSymptomsNoneAnswer(trimmedMessage)) {
-    const noneOpt = lastOptionsSnapshot.find((o) => /特にない|変化はない|これ以外/.test(String(o || "")));
-    if (noneOpt) messageForSlot = noneOpt;
-    else if (!/特にない|これ以外|変化はない/.test(trimmedMessage)) messageForSlot = "これ以外は特にない";
-  } else if (slotType === "cause_category" && isSlotQuestionNegativeShortAnswer(trimmedMessage, slotType)) {
-    const noneOpt = lastOptionsSnapshot.find((o) =>
-      /思い当たらない|特にない|わからない|分からない|ない/.test(String(o || ""))
-    );
-    messageForSlot = noneOpt || "特に思い当たらない";
+  if (isNegUnk) {
+    negUnkResolved = resolveSlotNegativeOrUnknownFill(slotType, trimmedMessage, lastOptionsSnapshot);
+    messageForSlot = negUnkResolved.canonical;
   }
 
-  const classified =
-    ctx.classified ||
-    (lastOptionsSnapshot.length >= 2
-      ? classifyAnswerToOption(messageForSlot, lastOptionsSnapshot, slotType)
-      : { index: null, usedFreeText: false, useCanonicalSlotText: false });
-  let selectedIndex = classified.index;
-  if (selectedIndex === null && lastOptionsSnapshot.length >= 2) {
-    selectedIndex = mapFreeTextToOptionIndex(messageForSlot, lastOptionsSnapshot, slotType);
+  let effectiveIndex = null;
+  if (negUnkResolved) {
+    effectiveIndex = negUnkResolved.selectedIndex;
+  } else {
+    const classified =
+      ctx.classified ||
+      (lastOptionsSnapshot.length >= 2
+        ? classifyAnswerToOption(messageForSlot, lastOptionsSnapshot, slotType)
+        : { index: null, usedFreeText: false, useCanonicalSlotText: false });
+    let selectedIndex = classified.index;
+    if (selectedIndex === null && lastOptionsSnapshot.length >= 2) {
+      selectedIndex = mapFreeTextToOptionIndex(messageForSlot, lastOptionsSnapshot, slotType);
+    }
+    const fallbackOptions =
+      lastOptionsSnapshot.length > 0
+        ? lastOptionsSnapshot
+        : FIXED_QUESTIONS[slotType]?.options || [];
+    effectiveIndex =
+      selectedIndex !== null && selectedIndex !== undefined
+        ? selectedIndex
+        : mapFreeTextToOptionIndex(messageForSlot, fallbackOptions, slotType);
   }
   const fallbackOptions =
     lastOptionsSnapshot.length > 0
       ? lastOptionsSnapshot
       : FIXED_QUESTIONS[slotType]?.options || [];
-  const effectiveIndex =
-    selectedIndex !== null && selectedIndex !== undefined
-      ? selectedIndex
-      : mapFreeTextToOptionIndex(messageForSlot, fallbackOptions, slotType);
 
   if (!state.slotFilled[slotType]) {
     state.slotFilled[slotType] = true;
@@ -9083,20 +9093,30 @@ function applyExplicitQuestionResponseSlotFill(state, slotType, message, ctx = {
       : messageForSlot);
   state.slotAnswers[slotType] = valueForDisplay;
 
-  if (slotType === "duration" && effectiveIndex !== null && effectiveIndex !== undefined) {
-    state.durationMeta = {
-      selectedIndex: effectiveIndex,
-      raw_text: valueForDisplay || "",
-      normalized: effectiveIndex === 2 ? "day_or_more" : effectiveIndex === 1 ? "hours" : "short",
-    };
+  if (slotType === "duration") {
+    if (negUnkResolved?.storeRawUnknown) {
+      state.durationMeta = {
+        selectedIndex: null,
+        raw_text: valueForDisplay || "",
+        normalized: "unknown",
+      };
+    } else if (effectiveIndex !== null && effectiveIndex !== undefined) {
+      state.durationMeta = {
+        selectedIndex: effectiveIndex,
+        raw_text: valueForDisplay || "",
+        normalized: effectiveIndex === 2 ? "day_or_more" : effectiveIndex === 1 ? "hours" : "short",
+      };
+    }
   }
 
   const idxForNorm =
-    effectiveIndex !== null && effectiveIndex !== undefined
-      ? effectiveIndex
-      : fallbackOptions.length >= 3
-        ? 1
-        : 0;
+    negUnkResolved?.storeRawUnknown
+      ? 0
+      : effectiveIndex !== null && effectiveIndex !== undefined
+        ? effectiveIndex
+        : fallbackOptions.length >= 3
+          ? 1
+          : 0;
   let normalized = buildNormalizedAnswer(slotType, valueForDisplay, idxForNorm);
   if (!normalized) {
     normalized = { slotId: slotType, rawAnswer: valueForDisplay, riskLevel: RISK_LEVELS.MEDIUM };
@@ -9214,7 +9234,7 @@ function forceCaptureLatestMissingAskedSlotFromMessage(state, message) {
   return false;
 }
 
-/** 直近のスロット質問で「ない」系と答えたのに未充填のときの救済（付随・きっかけ等） */
+/** 直近のスロット質問で「ない／わからない」系と答えたのに未充填のときの救済 */
 function backfillSlotNegativeAnswerFromQuestion(state, message) {
   if (!state) return false;
   const slotType = state.lastQuestionType;
@@ -9229,19 +9249,15 @@ function backfillSlotNegativeAnswerFromQuestion(state, message) {
     Array.isArray(state.lastOptions) && state.lastOptions.length > 0
       ? state.lastOptions
       : FIXED_QUESTIONS[slotType]?.options || [];
-  let canonical = String(message || "").trim();
-  if (slotType === "cause_category") {
-    const noneOpt = opts.find((o) => /思い当たらない|特にない|わからない/.test(String(o || "")));
-    canonical = noneOpt || "特に思い当たらない";
-  } else {
-    const noneOpt = opts.find((o) => /特にない|変化はない|これ以外|思い当たらない/.test(String(o || "")));
-    if (noneOpt) canonical = noneOpt;
-  }
-  const noneIdx = opts.indexOf(canonical);
-  const applied = applyExplicitQuestionResponseSlotFill(state, slotType, canonical, {
+  const resolved = resolveSlotNegativeOrUnknownFill(slotType, message, opts);
+  const noneIdx =
+    resolved.selectedIndex !== null && resolved.selectedIndex !== undefined
+      ? resolved.selectedIndex
+      : 0;
+  const applied = applyExplicitQuestionResponseSlotFill(state, slotType, resolved.canonical, {
     lastOptions: opts,
     classified: {
-      index: noneIdx >= 0 ? noneIdx : 0,
+      index: noneIdx,
       usedFreeText: false,
       useCanonicalSlotText: true,
     },
@@ -11207,6 +11223,56 @@ function reinterpretWeatherAndEnvironmentCause(cause) {
   return t;
 }
 
+/** スロット回答としての「ない／わからない」系（箇条書き除外・進行用の共通判定） */
+function isNegativeOrUnknownAnswerText(text) {
+  const t = normalizeAnswerText(text);
+  if (!t) return false;
+  if (
+    /^(ない|なし|特にない|特になし|ないです|特にないです|ありません|特にありません|わからない|分からない|わかりません|分かりません|不明|はっきりしない|はっきりわからない|よくわからない|よく分からない|思い当たらない|特に思い当たらない|別にない|別になし|特に変化はない|これ以外は特にない)$/.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  return /^(うん|はい|ええ)[、,]?\s*(ない|なし|特にない|わからない|分からない)/.test(String(text || "").trim());
+}
+
+const SLOT_NEGATIVE_UNKNOWN_OPTION_RE =
+  /特にない|変化はない|これ以外|思い当たらない|特に思い当たらない|わからない|分からない|不明|ほとんど変わらない/;
+
+/**
+ * スロット質問への「ない／わからない」回答を正規化（誤マッチで「さっき」「咳」等にしない）。
+ * @returns {{ canonical: string, selectedIndex: number|null, storeRawUnknown?: boolean }}
+ */
+function resolveSlotNegativeOrUnknownFill(slotType, message, options = []) {
+  const trimmed = String(message || "").trim();
+  const opts = Array.isArray(options) ? options : [];
+  const findNoneOpt = () => opts.find((o) => SLOT_NEGATIVE_UNKNOWN_OPTION_RE.test(String(o || "")));
+
+  if (slotType === "associated_symptoms") {
+    const noneOpt = findNoneOpt();
+    const canonical =
+      noneOpt ||
+      (/特にない|これ以外|変化はない/.test(trimmed) ? trimmed : "これ以外は特にない");
+    const idx = opts.indexOf(canonical);
+    return { canonical, selectedIndex: idx >= 0 ? idx : 0 };
+  }
+  if (slotType === "cause_category") {
+    const noneOpt = findNoneOpt();
+    const canonical = noneOpt || "特に思い当たらない";
+    const idx = opts.indexOf(canonical);
+    return { canonical, selectedIndex: idx >= 0 ? idx : 0 };
+  }
+  const noneOpt = findNoneOpt();
+  if (noneOpt) {
+    return { canonical: noneOpt, selectedIndex: opts.indexOf(noneOpt) };
+  }
+  const canonical =
+    trimmed ||
+    (isNegativeOrUnknownAnswerText(trimmed) ? "わからない" : trimmed);
+  return { canonical, selectedIndex: 0, storeRawUnknown: true };
+}
+
 /** 付随症状質問への「なし」回答（確認文の短文「ない」と区別する） */
 function isAssociatedSymptomsNoneAnswer(text) {
   const t = normalizeAnswerText(text);
@@ -11221,20 +11287,11 @@ function isAssociatedSymptomsNoneAnswer(text) {
   return /^(うん|はい|ええ)[、,]?\s*(ない|なし|特にない)/.test(String(text || "").trim());
 }
 
-/** スロット質問への「ない／なし／特にない」系（確認文の短文と区別する） */
+/** スロット質問への「ない／なし／わからない」系（確認文の短文と区別する） */
 function isSlotQuestionNegativeShortAnswer(text, slotType) {
   if (!slotType || !SLOT_KEYS.includes(slotType) || slotType === "pain_score") return false;
   if (slotType === "associated_symptoms") return isAssociatedSymptomsNoneAnswer(text);
-  const t = normalizeAnswerText(text);
-  if (!t) return false;
-  if (
-    /^(ない|なし|特にない|特になし|ないです|特にないです|ありません|特にありません|思い当たらない|わからない|分からない|不明|特に思い当たらない|別にない|別になし|特に変化はない|これ以外は特にない)$/.test(
-      t
-    )
-  ) {
-    return true;
-  }
-  return /^(うん|はい|ええ)[、,]?\s*(ない|なし|特にない)/.test(String(text || "").trim());
+  return isNegativeOrUnknownAnswerText(text);
 }
 
 /** 付随症状スロットの生の選択肢（表示専用ポリシー用）。判断ロジック・LLMには渡さない。 */
@@ -12016,9 +12073,7 @@ function mergeConfirmationExtraFactsIntoStateBulletsCache(state) {
 function isAbsentOrUnknownSlotBulletAnswer(text) {
   const t = String(text || "").trim();
   if (!t) return true;
-  return /^(ない|なし|特にない|特になし|これ以外は特にない|わからない|分からない|不明|思い当たらない|特に思い当たらない)$/i.test(
-    t
-  );
+  return isNegativeOrUnknownAnswerText(t);
 }
 
 /**
@@ -12652,6 +12707,42 @@ function injectMissingSlotBulletsFromState(bullets, state, category, opts = {}) 
       if (isAbsentOrUnknownSlotBulletAnswer(chunk)) continue;
       if (!bulletLinesCoverSlotText(out, chunk)) {
         toInsert.push(`・${polishUserSlotForBulletLine(chunk)}`);
+      }
+    }
+  }
+  const worsening = val("worsening", answers.worsening);
+  if (!isAbsentOrUnknownSlotBulletAnswer(worsening)) {
+    for (const chunk of splitSlotAnswerIntoBulletChunks(worsening)) {
+      if (isAbsentOrUnknownSlotBulletAnswer(chunk)) continue;
+      if (!bulletLinesCoverSlotText(out, chunk)) {
+        toInsert.push(`・${polishUserSlotForBulletLine(chunk)}`);
+      }
+    }
+  }
+  const impactRaw = val("impact", answers.daily_impact);
+  const impact = pickUserPreferredPhraseOverSlotLabel(state, impactRaw) || impactRaw;
+  if (!isAbsentOrUnknownSlotBulletAnswer(impact)) {
+    for (const chunk of splitSlotAnswerIntoBulletChunks(impact)) {
+      if (isAbsentOrUnknownSlotBulletAnswer(chunk)) continue;
+      if (!bulletLinesCoverSlotText(out, chunk)) {
+        toInsert.push(`・${polishUserSlotForBulletLine(chunk)}`);
+      }
+    }
+  }
+  if (!state?.associatedSymptomsFromFirstMessage) {
+    const assocRaw = val("associated", answers.associated_symptoms);
+    const associated = pickUserPreferredPhraseOverSlotLabel(state, assocRaw) || assocRaw;
+    if (
+      associated &&
+      !isAbsentOrUnknownSlotBulletAnswer(associated) &&
+      !isPainCategorySlot4NoneSelected(state) &&
+      !isGiCategorySlot5NoneSelected(state)
+    ) {
+      for (const chunk of splitSlotAnswerIntoBulletChunks(associated)) {
+        if (isAbsentOrUnknownSlotBulletAnswer(chunk)) continue;
+        if (!bulletLinesCoverSlotText(out, chunk)) {
+          toInsert.push(`・${polishUserSlotForBulletLine(chunk)}`);
+        }
       }
     }
   }
@@ -13319,14 +13410,8 @@ function buildStateFactsBullets(state, opts = {}) {
 function buildStateFactsBulletsLegacy(state, opts = {}) {
   const answers = state?.slotAnswers || {};
   const val = (statusKey, fallback = "") => getSlotStatusValue(state, statusKey, fallback);
-  const isUnknownLike = (text) =>
-    /^(ない|なし|特にない|特になし|これ以外は特にない|わからない|分からない|不明|思い当たらない|特に思い当たらない)$/i.test(
-      String(text || "").trim()
-    );
-  const shouldHide = (text) =>
-    /^(ない|なし|わからない|分からない|不明|思い当たらない|特に思い当たらない)$/i.test(
-      String(text || "").trim()
-    );
+  const isUnknownLike = (text) => isAbsentOrUnknownSlotBulletAnswer(text);
+  const shouldHide = (text) => isAbsentOrUnknownSlotBulletAnswer(text);
   const lines = [];
   const pushIfValid = (line) => {
     const normalized = String(line || "").trim();
@@ -13459,7 +13544,12 @@ function isConfirmationOnlyAnswer(text, opts = {}) {
   if (/^(ない|なし|特になし|とくにない|特になく|とくになく)$/i.test(t)) return true;
   if (/^(ないです|ありません|特にないです|特にありません|別にない|別になし|追加はない|追加なし|全くない|全然ない|何もない)$/i.test(t)) return true;
   if (/^(はい|うん|ええ|おっけー|おk|OK|ok|オッケー|よろしい|合ってる|合ってます|合っています|あってる|あってます|あっています|いいです|いいよ|問題ない|問題ないです|問題ありません|それでいい|それでいいです|大丈夫|大丈夫です|そうです|そうですね|その通り|そのとおり|その通りです|正しい|正しいです|正解|間違いない|間違いありません|了解|了解です|了解しました|承知|承知しました|かしこまりました)$/i.test(t)) return true;
-  if (/^(分かりました|わかりました|そのままでいい|そのままで大丈夫|これでお願いします|思い当たらない|特に思い当たらない)$/i.test(t)) return true;
+  if (
+    !activeSlotType &&
+    /^(分かりました|わかりました|そのままでいい|そのままで大丈夫|これでお願いします|思い当たらない|特に思い当たらない)$/i.test(t)
+  ) {
+    return true;
+  }
   if (/^(はい|うん|ええ)[、,]?\s*(あってる|あっています|合ってる|合っています|大丈夫|大丈夫です|そうです|その通り)/i.test(t)) return true;
   if (/^(はい|うん|ええ)[、,]?\s*(特にない|特にありません|ないです|ありません|特になし)/i.test(t)) return true;
   if (/^(うん|はい|ええ)[、。]?\s*(ない|なし|特になし)/i.test(t)) return true;
@@ -19277,6 +19367,22 @@ function hasFinalQuestionPrefix(text) {
 function matchAnswerToOptionWithMeta(answer, options, questionType = null) {
   const normalizedAnswer = normalizeAnswerText(answer);
   if (!normalizedAnswer) {
+    return { index: null, canonicalize: false };
+  }
+
+  if (
+    questionType &&
+    SLOT_KEYS.includes(questionType) &&
+    isSlotQuestionNegativeShortAnswer(answer, questionType)
+  ) {
+    const resolved = resolveSlotNegativeOrUnknownFill(questionType, answer, options);
+    if (
+      resolved.selectedIndex !== null &&
+      resolved.selectedIndex !== undefined &&
+      options[resolved.selectedIndex]
+    ) {
+      return { index: resolved.selectedIndex, canonicalize: true };
+    }
     return { index: null, canonicalize: false };
   }
 

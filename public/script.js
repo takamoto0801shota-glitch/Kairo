@@ -1285,6 +1285,175 @@ function extractSummary(text) {
   return summary.trim() || null;
 }
 
+function appendLinesSequentially(target, textToAppend, done, lineDelay = 24) {
+  const lines = String(textToAppend || "").split("\n");
+  let index = 0;
+  const appendNext = () => {
+    const lineSpan = document.createElement("span");
+    lineSpan.textContent = lines[index];
+    target.appendChild(lineSpan);
+    if (index < lines.length - 1) {
+      target.appendChild(document.createElement("br"));
+    }
+    index += 1;
+    if (index < lines.length) {
+      if (lineDelay <= 0) {
+        appendNext();
+      } else {
+        setTimeout(appendNext, lineDelay);
+      }
+    } else if (done) {
+      done();
+    }
+  };
+  if (lines.length === 0 || (lines.length === 1 && !lines[0])) {
+    if (done) done();
+    return;
+  }
+  appendNext();
+}
+
+/** parseAIMessage の1ブロック → 白カード（⏳今後の見通し・🌱最後に 等） */
+function buildMessageBlockElement(block) {
+  const blockDiv = document.createElement("div");
+  blockDiv.className = "message-block";
+
+  const headerDiv = document.createElement("div");
+  headerDiv.className = "block-header";
+  blockDiv.appendChild(headerDiv);
+
+  const contentDiv = document.createElement("div");
+  contentDiv.className = "block-content";
+  blockDiv.appendChild(contentDiv);
+
+  const headerText = block.header ? `${block.header.icon} ${block.header.name}`.trim() : "";
+  headerDiv.dataset.headerText = headerText;
+  const isStateBlock =
+    (block?.header?.icon === "🤝" || block?.header?.icon === "📝") &&
+    /今の状態について|Kairoの判断|いまの状態を整理します/.test(block?.header?.name || "");
+  const isActionBlock =
+    block?.header?.icon === "✅" &&
+    /(?:今すぐできること|(?:あなたの)?今すぐやること)/.test(block?.header?.name || "");
+  const isHospitalBlock =
+    block?.header?.icon === "🏥" && /受診先の候補|Kairoの判断/.test(block?.header?.name || "");
+  const showActionDetailButton = isActionBlock && appState.riskLevel !== "RED";
+  const iconText = block?.header?.icon || splitHeaderIconAndName(headerText).icon;
+  const nameText = block?.header?.name || splitHeaderIconAndName(headerText).name;
+  const headerTitleEl = appendHeaderTitleWithIcon(headerDiv, iconText, nameText || "");
+
+  if (isStateBlock || showActionDetailButton || isHospitalBlock) {
+    const detailButton = document.createElement("button");
+    detailButton.type = "button";
+    detailButton.className = "block-header-action";
+    detailButton.textContent = "具体的に";
+    detailButton.addEventListener("click", () => {
+      if (isHospitalBlock) {
+        showConcreteHospitalDetails();
+      } else if (isActionBlock) {
+        showConcreteActionDetails(block.content || "");
+      } else {
+        showConcreteStateDetails(block.content || "");
+      }
+    });
+    headerDiv.appendChild(detailButton);
+  }
+
+  contentDiv.textContent = String(block.content || "");
+  return blockDiv;
+}
+
+/**
+ * まとめ・ブロック付きAI文をセクションカード列で描画（従来の message-block UI）。
+ */
+function renderParsedBlocksIntoMessage(messageDiv, blocks, options = {}) {
+  if (!messageDiv || !Array.isArray(blocks) || blocks.length === 0) return;
+  const lineDelay = options.animate === false ? 0 : 24;
+
+  const renderSync = () => {
+    messageDiv.innerHTML = "";
+    messageDiv.classList.add("has-blocks");
+    for (const block of blocks) {
+      messageDiv.appendChild(buildMessageBlockElement(block));
+    }
+    if (typeof options.onComplete === "function") options.onComplete();
+  };
+
+  if (options.animate === false) {
+    renderSync();
+    return;
+  }
+
+  messageDiv.innerHTML = "";
+  messageDiv.classList.add("has-blocks");
+  let blockIndex = 0;
+  const appendNextBlock = () => {
+    if (blockIndex >= blocks.length) {
+      if (typeof options.onComplete === "function") options.onComplete();
+      return;
+    }
+    const block = blocks[blockIndex];
+    const blockDiv = document.createElement("div");
+    blockDiv.className = "message-block";
+    messageDiv.appendChild(blockDiv);
+
+    const headerDiv = document.createElement("div");
+    headerDiv.className = "block-header";
+    blockDiv.appendChild(headerDiv);
+
+    const contentDiv = document.createElement("div");
+    contentDiv.className = "block-content";
+    blockDiv.appendChild(contentDiv);
+
+    const headerText = block.header ? `${block.header.icon} ${block.header.name}`.trim() : "";
+    headerDiv.dataset.headerText = headerText;
+    const isStateBlock =
+      (block?.header?.icon === "🤝" || block?.header?.icon === "📝") &&
+      /今の状態について|Kairoの判断|いまの状態を整理します/.test(block?.header?.name || "");
+    const isActionBlock =
+      block?.header?.icon === "✅" &&
+      /(?:今すぐできること|(?:あなたの)?今すぐやること)/.test(block?.header?.name || "");
+    const isHospitalBlock =
+      block?.header?.icon === "🏥" && /受診先の候補|Kairoの判断/.test(block?.header?.name || "");
+    const showActionDetailButton = isActionBlock && appState.riskLevel !== "RED";
+    let detailButton = null;
+    const iconText = block?.header?.icon || splitHeaderIconAndName(headerText).icon;
+    const nameText = block?.header?.name || splitHeaderIconAndName(headerText).name;
+    const headerTitleEl = appendHeaderTitleWithIcon(headerDiv, iconText, "");
+    if (isStateBlock || showActionDetailButton || isHospitalBlock) {
+      detailButton = document.createElement("button");
+      detailButton.type = "button";
+      detailButton.className = "block-header-action";
+      detailButton.textContent = "具体的に";
+      detailButton.disabled = true;
+      detailButton.addEventListener("click", () => {
+        if (isHospitalBlock) {
+          showConcreteHospitalDetails();
+        } else if (isActionBlock) {
+          showConcreteActionDetails(block.content || "");
+        } else {
+          showConcreteStateDetails(block.content || "");
+        }
+      });
+      headerDiv.appendChild(detailButton);
+    }
+
+    const finishBlock = () => {
+      if (detailButton) detailButton.disabled = false;
+      blockIndex += 1;
+      appendNextBlock();
+    };
+
+    if (headerText) {
+      appendLinesSequentially(headerTitleEl, nameText || headerText, () => {
+        appendLinesSequentially(contentDiv, block.content || "", finishBlock, lineDelay);
+      }, lineDelay);
+    } else {
+      appendLinesSequentially(contentDiv, block.content || "", finishBlock, lineDelay);
+    }
+  };
+  appendNextBlock();
+}
+
 // Add message to chat (AIは即時表示)
 let isCollecting = true;
 function addMessage(text, isUser = false, save = true, options = {}) {
@@ -1321,31 +1490,7 @@ function addMessage(text, isUser = false, save = true, options = {}) {
   // AI messages: render line-by-line (no animation, no re-render)
   const blocks = parseAIMessage(text);
   messagesContainer.appendChild(messageDiv);
-  
-  const appendLinesSequentially = (target, textToAppend, done) => {
-    const lines = textToAppend.split("\n");
-    let index = 0;
-    
-    const appendNext = () => {
-      const lineSpan = document.createElement("span");
-      lineSpan.textContent = lines[index];
-      target.appendChild(lineSpan);
-      
-      if (index < lines.length - 1) {
-        target.appendChild(document.createElement("br"));
-      }
-      
-      index += 1;
-      if (index < lines.length) {
-        setTimeout(appendNext, 24);
-      } else if (done) {
-        done();
-      }
-    };
-    
-    appendNext();
-  };
-  
+
   const finalizeMessage = () => {
     // 判断が完了しているかチェック
     const decisionCompleted = isDecisionCompleted(text);
@@ -1384,80 +1529,7 @@ function addMessage(text, isUser = false, save = true, options = {}) {
   };
   
   if (blocks && blocks.length > 0) {
-    messageDiv.classList.add("has-blocks");
-    let blockIndex = 0;
-    
-    const appendNextBlock = () => {
-      if (blockIndex >= blocks.length) {
-        finalizeMessage();
-        return;
-      }
-      
-      const block = blocks[blockIndex];
-      const blockDiv = document.createElement("div");
-      blockDiv.className = "message-block";
-      messageDiv.appendChild(blockDiv);
-      
-      const headerDiv = document.createElement("div");
-      headerDiv.className = "block-header";
-      blockDiv.appendChild(headerDiv);
-      
-      const contentDiv = document.createElement("div");
-      contentDiv.className = "block-content";
-      blockDiv.appendChild(contentDiv);
-      
-      const headerText = block.header ? (block.header.icon + " " + block.header.name) : "";
-      headerDiv.dataset.headerText = headerText;
-      const isStateBlock =
-        (block?.header?.icon === "🤝" || block?.header?.icon === "📝") &&
-        /今の状態について|Kairoの判断|いまの状態を整理します/.test(block?.header?.name || "");
-      const isActionBlock =
-        block?.header?.icon === "✅" &&
-        /(?:今すぐできること|(?:あなたの)?今すぐやること)/.test(block?.header?.name || "");
-      const isHospitalBlock =
-        block?.header?.icon === "🏥" &&
-        /受診先の候補|Kairoの判断/.test(block?.header?.name || "");
-      const showActionDetailButton = isActionBlock && appState.riskLevel !== "RED";
-      let detailButton = null;
-      const iconText = block?.header?.icon || splitHeaderIconAndName(headerText).icon;
-      const nameText = block?.header?.name || splitHeaderIconAndName(headerText).name;
-      const headerTitleEl = appendHeaderTitleWithIcon(headerDiv, iconText, "");
-      if (isStateBlock || showActionDetailButton || isHospitalBlock) {
-        detailButton = document.createElement("button");
-        detailButton.type = "button";
-        detailButton.className = "block-header-action";
-        detailButton.textContent = "具体的に";
-        detailButton.disabled = true;
-        detailButton.addEventListener("click", () => {
-          if (isHospitalBlock) {
-            showConcreteHospitalDetails();
-          } else if (isActionBlock) {
-            showConcreteActionDetails(block.content || "");
-          } else {
-            showConcreteStateDetails(block.content || "");
-          }
-        });
-        headerDiv.appendChild(detailButton);
-      }
-      
-      if (headerText) {
-        appendLinesSequentially(headerTitleEl, nameText || headerText, () => {
-          appendLinesSequentially(contentDiv, block.content || "", () => {
-            if (detailButton) detailButton.disabled = false;
-            blockIndex += 1;
-            appendNextBlock();
-          });
-        });
-      } else {
-        appendLinesSequentially(contentDiv, block.content || "", () => {
-          if (detailButton) detailButton.disabled = false;
-          blockIndex += 1;
-          appendNextBlock();
-        });
-      }
-    };
-    
-    appendNextBlock();
+    renderParsedBlocksIntoMessage(messageDiv, blocks, { animate: true, onComplete: finalizeMessage });
   } else {
     appendLinesSequentially(messageDiv, text, finalizeMessage);
   }
@@ -1845,18 +1917,18 @@ function sectionsFromSummaryPlainText(text) {
     .filter(Boolean);
 }
 
-/** 分割 sections を1本のまとめ本文に（元デザイン：1カードに全文） */
+/** 全セクションを1本文に結合（🟢/🟡/🔴 ここまで… 含む。サマリーカードとは別） */
 function mergeSummarySectionsForDisplay(sections) {
   return normalizeSummarySections(sections).join("\n\n");
 }
 
 /**
- * まとめを常に1メッセージ・大きなカードで表示（セクションごとの小ブロック分割をしない）。
- * ポーリング中は同一 DOM を差し替えて更新する。
+ * まとめをセクションごとの白カード（message-block）で表示。ポーリング中は同一 DOM を差し替える。
  */
 function upsertSummaryMessage(sections, options = {}) {
-  const merged = mergeSummarySectionsForDisplay(sections);
-  if (!merged) return;
+  const normalized = normalizeSummarySections(sections);
+  const merged = mergeSummarySectionsForDisplay(normalized);
+  if (!merged && normalized.length === 0) return;
 
   const messagesContainer = document.getElementById("chatMessages");
   if (!messagesContainer) return;
@@ -1864,47 +1936,34 @@ function upsertSummaryMessage(sections, options = {}) {
   let messageDiv = appState.summaryMessageEl;
   if (!messageDiv || !messageDiv.isConnected) {
     messageDiv = document.createElement("div");
-    messageDiv.className = "message ai summary-message";
+    messageDiv.className = "message ai summary-message has-blocks";
     messageDiv.dataset.summaryUnified = "true";
     messagesContainer.appendChild(messageDiv);
     appState.summaryMessageEl = messageDiv;
   } else {
-    messageDiv.textContent = "";
-    messageDiv.className = "message ai summary-message";
-    messageDiv.classList.remove("has-blocks");
+    messageDiv.className = "message ai summary-message has-blocks";
   }
-  messageDiv.dataset.originalText = merged;
+  messageDiv.dataset.originalText = merged || normalized.join("\n\n");
 
-  const appendLines = (target, textToAppend, done) => {
-    const lines = String(textToAppend || "").split("\n");
-    let index = 0;
-    const appendNext = () => {
-      const lineSpan = document.createElement("span");
-      lineSpan.textContent = lines[index];
-      target.appendChild(lineSpan);
-      if (index < lines.length - 1) {
-        target.appendChild(document.createElement("br"));
-      }
-      index += 1;
-      if (index < lines.length) {
-        if (options.animate === false) {
-          appendNext();
-        } else {
-          setTimeout(appendNext, 20);
-        }
-      } else if (done) {
-        done();
-      }
-    };
-    appendNext();
-  };
-
-  appendLines(messageDiv, merged, () => {
+  const blocks = merged ? parseAIMessage(merged) : null;
+  const onDone = () => {
     if (!options.skipPersist) {
       saveHistory();
     }
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
-  });
+  };
+
+  if (blocks && blocks.length > 0) {
+    renderParsedBlocksIntoMessage(messageDiv, blocks, {
+      animate: options.animate !== false,
+      onComplete: onDone,
+    });
+    return;
+  }
+
+  messageDiv.classList.remove("has-blocks");
+  messageDiv.textContent = merged || normalized.join("\n\n");
+  onDone();
 }
 
 /** @deprecated まとめは upsertSummaryMessage(sections[]) で一括表示 */
@@ -1913,15 +1972,31 @@ function renderSection(sectionText) {
   upsertSummaryMessage([sectionText], { animate: false, skipPersist: true });
 }
 
+/** 仕様14.2：サマリーカード（短い🟢🟡🔴文言）とまとめブロックを同時に出す */
+function showSummaryCardWithSummaryBlocks() {
+  if (!appState.userHasSubmitted || appState.awaitingSummaryReply) return false;
+  if (
+    appState.introSummarySuppress ||
+    appState.followUpSummarySuppress ||
+    appState.postSummaryFollowUpSuppress
+  ) {
+    return false;
+  }
+  if (!appState.riskLevel) return false;
+  renderSummary();
+  return true;
+}
+
 function renderSummarySectionsUnified(sections, options = {}) {
   const list = normalizeSummarySections(sections);
   if (list.length === 0) return;
-  hideSummaryCard();
-  setSummaryCardLayoutVisible(false);
+  if (options.showSummaryCard !== false) {
+    showSummaryCardWithSummaryBlocks();
+  }
   upsertSummaryMessage(list, options);
 }
 
-/** 最終まとめを1カードで表示（常に全文・仕様順。部分表示の slice は使わない） */
+/** 最終まとめをセクションカード列で表示（常に全文・仕様順） */
 function displayFinalSummaryFromResponse(aiResponse, options = {}) {
   let sections = Array.isArray(aiResponse?.sections) ? aiResponse.sections.filter(Boolean) : [];
   if (sections.length === 0) {
@@ -2114,19 +2189,13 @@ async function handleUserInput() {
             !suppressInlineSummary &&
             !appState.followUpSummarySuppress &&
             !appState.postSummaryFollowUpSuppress;
-          const hasInlineSummaryHeader = normalizedSections.some((s) => isSummaryIntroSectionText(s));
-          let showedSummaryCard = false;
-          if (canShowSummaryCard && !hasInlineSummaryHeader) {
-            renderSummary();
-            showedSummaryCard = true;
+          if (canShowSummaryCard) {
             persistSummaryDoneForConversation(aiResponse.conversationId);
-          }
-          if (followUpMessage) addMessage(followUpMessage, false, true, { fromFollowUpTrigger: true });
-          if (followUpQuestion) addMessage(followUpQuestion, false, true, { fromFollowUpTrigger: true });
-          if (showedSummaryCard) {
             appState.postSummaryFollowUpSuppress = true;
             appState.followUpSummarySuppress = true;
           }
+          if (followUpMessage) addMessage(followUpMessage, false, true, { fromFollowUpTrigger: true });
+          if (followUpQuestion) addMessage(followUpQuestion, false, true, { fromFollowUpTrigger: true });
         };
 
         const timerId = setTimeout(() => {
@@ -2154,19 +2223,13 @@ async function handleUserInput() {
             !suppressInlineSummary &&
             !appState.followUpSummarySuppress &&
             !appState.postSummaryFollowUpSuppress;
-          const hasInlineSummaryHeader = normalizedSections.some((s) => isSummaryIntroSectionText(s));
-          let showedSummaryCard = false;
-          if (canShowSummaryCard && !hasInlineSummaryHeader) {
-            renderSummary();
-            showedSummaryCard = true;
+          if (canShowSummaryCard) {
             persistSummaryDoneForConversation(aiResponse.conversationId);
-          }
-          if (followUpMessage) addMessage(followUpMessage, false, true, { fromFollowUpTrigger: true });
-          if (followUpQuestion) addMessage(followUpQuestion, false, true, { fromFollowUpTrigger: true });
-          if (showedSummaryCard) {
             appState.postSummaryFollowUpSuppress = true;
             appState.followUpSummarySuppress = true;
           }
+          if (followUpMessage) addMessage(followUpMessage, false, true, { fromFollowUpTrigger: true });
+          if (followUpQuestion) addMessage(followUpQuestion, false, true, { fromFollowUpTrigger: true });
         };
         const timerId = setTimeout(() => {
           displayFinalSummaryFromResponse(aiResponse, { animate: false });
