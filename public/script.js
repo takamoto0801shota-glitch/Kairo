@@ -104,6 +104,8 @@ const appState = {
   awaitingSummaryReply: false,
   /** まとめ本文（分割セクションを1メッセージに統合した表示）の DOM */
   summaryMessageEl: null,
+  /** まとめブロック逐次描画の世代（ポーリング重複を無視） */
+  summaryRenderSeq: 0,
 };
 
 function resetConversation() {
@@ -126,6 +128,7 @@ function resetConversation() {
   appState.postSummaryFollowUpSuppress = false;
   appState.awaitingSummaryReply = false;
   appState.summaryMessageEl = null;
+  appState.summaryRenderSeq = 0;
 }
 
 const INTRO_TEMPLATE_TEXTS = {
@@ -1362,15 +1365,28 @@ function buildMessageBlockElement(block) {
   return blockDiv;
 }
 
+function countRenderedSummaryBlocks(messageDiv) {
+  if (!messageDiv) return 0;
+  return messageDiv.querySelectorAll(":scope > .message-block").length;
+}
+
 /**
  * まとめ・ブロック付きAI文をセクションカード列で描画（従来の message-block UI）。
+ * appendOnly: true のとき既存ブロックは残し、追加分だけ上から順に追加する。
  */
 function renderParsedBlocksIntoMessage(messageDiv, blocks, options = {}) {
-  if (!messageDiv || !Array.isArray(blocks) || blocks.length === 0) return;
-  const lineDelay = options.animate === false ? 0 : 24;
+  if (!messageDiv || !Array.isArray(blocks) || blocks.length === 0) {
+    if (typeof options.onComplete === "function") options.onComplete();
+    return;
+  }
+  const lineDelay = options.animate === false ? 0 : options.lineDelay ?? 20;
+  const blockDelay = options.animate === false ? 0 : options.blockDelay ?? 160;
+  const appendOnly = !!options.appendOnly;
 
   const renderSync = () => {
-    messageDiv.innerHTML = "";
+    if (!appendOnly) {
+      messageDiv.innerHTML = "";
+    }
     messageDiv.classList.add("has-blocks");
     for (const block of blocks) {
       messageDiv.appendChild(buildMessageBlockElement(block));
@@ -1383,7 +1399,9 @@ function renderParsedBlocksIntoMessage(messageDiv, blocks, options = {}) {
     return;
   }
 
-  messageDiv.innerHTML = "";
+  if (!appendOnly) {
+    messageDiv.innerHTML = "";
+  }
   messageDiv.classList.add("has-blocks");
   let blockIndex = 0;
   const appendNextBlock = () => {
@@ -1440,13 +1458,26 @@ function renderParsedBlocksIntoMessage(messageDiv, blocks, options = {}) {
     const finishBlock = () => {
       if (detailButton) detailButton.disabled = false;
       blockIndex += 1;
-      appendNextBlock();
+      if (blockIndex >= blocks.length) {
+        if (typeof options.onComplete === "function") options.onComplete();
+        return;
+      }
+      if (blockDelay <= 0) {
+        appendNextBlock();
+      } else {
+        setTimeout(appendNextBlock, blockDelay);
+      }
     };
 
     if (headerText) {
-      appendLinesSequentially(headerTitleEl, nameText || headerText, () => {
-        appendLinesSequentially(contentDiv, block.content || "", finishBlock, lineDelay);
-      }, lineDelay);
+      appendLinesSequentially(
+        headerTitleEl,
+        nameText || headerText,
+        () => {
+          appendLinesSequentially(contentDiv, block.content || "", finishBlock, lineDelay);
+        },
+        lineDelay
+      );
     } else {
       appendLinesSequentially(contentDiv, block.content || "", finishBlock, lineDelay);
     }
@@ -1923,7 +1954,7 @@ function mergeSummarySectionsForDisplay(sections) {
 }
 
 /**
- * まとめをセクションごとの白カード（message-block）で表示。ポーリング中は同一 DOM を差し替える。
+ * まとめをセクションごとの白カードで表示。先頭ブロックから順に追加（自動スクロールなし）。
  */
 function upsertSummaryMessage(sections, options = {}) {
   const normalized = normalizeSummarySections(sections);
@@ -1950,20 +1981,37 @@ function upsertSummaryMessage(sections, options = {}) {
     if (!options.skipPersist) {
       saveHistory();
     }
-    messagesContainer.scrollTop = messagesContainer.scrollHeight;
   };
 
-  if (blocks && blocks.length > 0) {
-    renderParsedBlocksIntoMessage(messageDiv, blocks, {
-      animate: options.animate !== false,
-      onComplete: onDone,
-    });
+  if (!blocks || blocks.length === 0) {
+    messageDiv.classList.remove("has-blocks");
+    messageDiv.textContent = merged || normalized.join("\n\n");
+    onDone();
     return;
   }
 
-  messageDiv.classList.remove("has-blocks");
-  messageDiv.textContent = merged || normalized.join("\n\n");
-  onDone();
+  const renderedCount = countRenderedSummaryBlocks(messageDiv);
+  const animate = options.animate !== false;
+
+  if (renderedCount >= blocks.length) {
+    onDone();
+    return;
+  }
+
+  const blocksToRender = blocks.slice(renderedCount);
+  const appendOnly = renderedCount > 0;
+  const renderSeq = ++appState.summaryRenderSeq;
+
+  renderParsedBlocksIntoMessage(messageDiv, blocksToRender, {
+    animate,
+    appendOnly,
+    blockDelay: options.blockDelay ?? 160,
+    lineDelay: options.lineDelay ?? 20,
+    onComplete: () => {
+      if (renderSeq !== appState.summaryRenderSeq) return;
+      onDone();
+    },
+  });
 }
 
 /** @deprecated まとめは upsertSummaryMessage(sections[]) で一括表示 */
@@ -2020,7 +2068,6 @@ function addPendingSummaryPlaceholder() {
   messageDiv.setAttribute("aria-live", "polite");
   messageDiv.textContent = "まとめを準備中です…\n少しお待ちください。";
   messagesContainer.appendChild(messageDiv);
-  messagesContainer.scrollTop = messagesContainer.scrollHeight;
   return messageDiv;
 }
 
@@ -2077,7 +2124,7 @@ async function handleUserInput() {
             removePendingSummaryPlaceholder(summaryPlaceholderEl);
             summaryPlaceholderEl = null;
           }
-          renderSummarySectionsUnified(normalizedPoll, { animate: false, skipPersist: true });
+          renderSummarySectionsUnified(normalizedPoll, { skipPersist: true });
           pollRenderedSectionCount = normalizedPoll.length;
         }
         if (!progress.generationActive && progress.complete) {
@@ -2199,7 +2246,7 @@ async function handleUserInput() {
         };
 
         const timerId = setTimeout(() => {
-          displayFinalSummaryFromResponse(aiResponse, { animate: false });
+          displayFinalSummaryFromResponse(aiResponse, { animate: true });
           const t = setTimeout(onLastSectionRendered, 300);
           appState.sectionTimers.push(t);
         }, firstDelay);
@@ -2232,7 +2279,7 @@ async function handleUserInput() {
           if (followUpQuestion) addMessage(followUpQuestion, false, true, { fromFollowUpTrigger: true });
         };
         const timerId = setTimeout(() => {
-          displayFinalSummaryFromResponse(aiResponse, { animate: false });
+          displayFinalSummaryFromResponse(aiResponse, { animate: true });
           const t = setTimeout(onLastSectionRendered, 300);
           appState.sectionTimers.push(t);
         }, firstDelay);
@@ -2246,7 +2293,7 @@ async function handleUserInput() {
             !aiResponse.isPreSummaryConfirmation &&
             !aiResponse.isFollowUpOnlyResponse &&
             !suppressInlineSummary &&
-            displayFinalSummaryFromResponse(aiResponse, { animate: false })
+            displayFinalSummaryFromResponse(aiResponse, { animate: true })
           ) {
             /* まとめは displayFinalSummaryFromResponse で表示済み */
           } else {

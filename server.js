@@ -1161,49 +1161,58 @@ function countBulletLinesInKairoJudgmentBlock(text) {
  */
 function ensureKairoJudgmentHasMinimumFactBullets(state, minCount = MIN_KAIRO_JUDGMENT_FACT_BULLETS) {
   if (!state) return false;
+  const slotChunkTarget = countRequiredBulletChunksFromRawSlots(state);
+  const target = Math.max(
+    typeof minCount === "number" ? minCount : MIN_KAIRO_JUDGMENT_FACT_BULLETS,
+    slotChunkTarget,
+    MIN_KAIRO_JUDGMENT_FACT_BULLETS
+  );
   if (shouldReuseConfirmationBulletsSnapshot(state)) {
-    return state.confirmationBulletsSnapshot.length >= minCount;
+    return state.confirmationBulletsSnapshot.length >= target;
   }
   if (!state.bulletLlmPolishedSourceFingerprint) {
     enforceConfirmationBulletsCompletenessCore(state);
   }
   const count = () => sanitizeBulletPoints(buildStateFactsBullets(state, { forSummary: true }) || [], state).length;
-  if (count() >= minCount) return true;
+  if (count() >= target) return true;
   let cur = (state.stateAboutBulletsCache || []).slice();
   for (const line of buildFactsFromSlotAnswers(state) || []) {
-    if (cur.length >= 14) break;
+    if (cur.length >= ABSOLUTE_MAX_CONFIRMATION_BULLETS) break;
     const t = String(line).trim();
     if (t && !cur.some((c) => String(c).trim() === t)) cur.push(line);
   }
-  state.stateAboutBulletsCache = sanitizeBulletPoints(cur, state);
-  if (count() >= minCount) return true;
+  state.stateAboutBulletsCache = sanitizeBulletPoints(
+    reconcileBulletCoverageGaps(state, cur, { maxOut: resolveConfirmationBulletsMaxForState(state) }),
+    state
+  );
+  if (count() >= target) return true;
   const userLines = collectUserUtterancesForBulletCoverage(state);
   const heur = heuristicSupplementBulletsFromUserUtterances(state.stateAboutBulletsCache.slice(), userLines) || [];
   for (const h of heur) {
-    if (count() >= minCount) break;
+    if (count() >= target) break;
     if (h) {
       const line = /^・/.test(h) ? h : `・${h}`;
       mergeMissingBulletLinesIntoStateAboutCache(state, state.stateAboutBulletsCache, [line]);
     }
   }
-  if (count() >= minCount) return true;
+  if (count() >= target) return true;
   const mainSym = String(getSyncedMainSymptomDisplayLabel(state) || "").trim();
-  if (mainSym && count() < minCount) {
+  if (mainSym && count() < target) {
     state.stateAboutBulletsCache = sanitizeBulletPoints(
       [...(state.stateAboutBulletsCache || []), `・${mainSym}について主に話している`].slice(0, 14),
       state
     );
   }
-  if (Number.isFinite(state?.lastPainScore) && count() < minCount) {
+  if (Number.isFinite(state?.lastPainScore) && count() < target) {
     const ps = `・痛みは${state.lastPainScore} / 10`;
     if (!state.stateAboutBulletsCache?.some((l) => /痛みは.*\/\s*10/.test(String(l)))) {
       state.stateAboutBulletsCache = sanitizeBulletPoints(
-        [...(state.stateAboutBulletsCache || []), ps].slice(0, 14),
+        [...(state.stateAboutBulletsCache || []), ps].slice(0, ABSOLUTE_MAX_CONFIRMATION_BULLETS),
         state
       );
     }
   }
-  return count() >= minCount;
+  return count() >= target;
 }
 
 /**
@@ -9171,12 +9180,42 @@ function backfillCauseSlotFromRecentUserTurn(conversationId, state) {
   return true;
 }
 
-function canForceFillSlotFromLatestMessage(slotKey, message) {
+/** 単独の「ない／わからない」がきっかけスロットへ誤って入るのを防ぐ（付随症状の回答など） */
+function shouldApplySpontaneousCauseFromMessage(state, message) {
+  const t = String(message || "").trim();
+  if (!t) return false;
+  if (isNegativeOrUnknownAnswerText(t)) {
+    return state?.lastQuestionType === "cause_category";
+  }
+  return true;
+}
+
+/** 付随など別スロット向けの「ない」で cause が埋まっていたら解除 */
+function revertMisassignedNegativeCauseFromMessage(state, message) {
+  if (!state) return;
+  const t = String(message || "").trim();
+  if (!t || !isNegativeOrUnknownAnswerText(t)) return;
+  if (state.lastQuestionType === "cause_category") return;
+  if (state.askedSlots?.cause_category) return;
+  const causeRaw = String(state.slotAnswers?.cause_category || "").trim();
+  if (!causeRaw) return;
+  if (
+    isAbsentOrUnknownSlotBulletAnswer(causeRaw) ||
+    /^(ない|なし|特にない|思い当たらない|わからない)/.test(causeRaw)
+  ) {
+    clearNonPainSlot(state, "cause_category");
+  }
+}
+
+function canForceFillSlotFromLatestMessage(slotKey, message, state = null) {
   const text = String(message || "").trim();
   if (!text || text.length < 2) return false;
   switch (slotKey) {
     case "cause_category":
-      return true;
+      if (isNegativeOrUnknownAnswerText(text) && !state?.askedSlots?.cause_category) {
+        return false;
+      }
+      return !!extractCauseCategory(text);
     case "duration":
       return !!extractDurationFromText(text);
     case "worsening":
@@ -9205,33 +9244,20 @@ function forceCaptureLatestMissingAskedSlotFromMessage(state, message) {
   const missing = getMissingSlots(state.slotFilled, state);
   if (!Array.isArray(missing) || missing.length === 0) return false;
 
-  const pickCandidates = [];
-  if (state.lastQuestionType && missing.includes(state.lastQuestionType)) {
-    pickCandidates.push(state.lastQuestionType);
-  }
-  const recents = Array.isArray(state.recentQuestionTypes) ? state.recentQuestionTypes.slice().reverse() : [];
-  for (const t of recents) {
-    if (!t || pickCandidates.includes(t)) continue;
-    if (missing.includes(t) && state.askedSlots?.[t]) pickCandidates.push(t);
-  }
-  for (const t of getSlotOrderWithConditional(state).slice().reverse()) {
-    if (!t || pickCandidates.includes(t)) continue;
-    if (missing.includes(t) && state.askedSlots?.[t]) pickCandidates.push(t);
-  }
+  const slotKey = state.lastQuestionType;
+  if (!slotKey || slotKey === "pain_score" || !state.askedSlots?.[slotKey]) return false;
+  if (!missing.includes(slotKey)) return false;
 
-  for (const slotKey of pickCandidates) {
-    if (slotKey === "pain_score") continue;
-    if (isConfirmationOnlyAnswer(trimmed, { activeSlotType: slotKey })) continue;
-    if (!canForceFillSlotFromLatestMessage(slotKey, trimmed)) continue;
-    const before = !!state.slotFilled?.[slotKey];
-    const applied = applyExplicitQuestionResponseSlotFill(state, slotKey, trimmed, {
-      lastOptions: Array.isArray(state.lastOptions) ? state.lastOptions : [],
-    });
-    if (applied?.filled && (!before || state.slotAnswers?.[slotKey])) {
-      return true;
-    }
+  if (isSlotQuestionNegativeShortAnswer(trimmed, slotKey)) {
+    return backfillSlotNegativeAnswerFromQuestion(state, message);
   }
-  return false;
+  if (isConfirmationOnlyAnswer(trimmed, { activeSlotType: slotKey })) return false;
+  if (!canForceFillSlotFromLatestMessage(slotKey, trimmed, state)) return false;
+  const before = !!state.slotFilled?.[slotKey];
+  const applied = applyExplicitQuestionResponseSlotFill(state, slotKey, trimmed, {
+    lastOptions: Array.isArray(state.lastOptions) ? state.lastOptions : [],
+  });
+  return !!(applied?.filled && (!before || state.slotAnswers?.[slotKey]));
 }
 
 /** 直近のスロット質問で「ない／わからない」系と答えたのに未充填のときの救済 */
@@ -9411,11 +9437,15 @@ function applySpontaneousSlotFill(state, message, opts = {}) {
   }
 
   const cause = extractCauseCategory(text);
-  if (cause && setSlotFromSpontaneous(state, "cause_category", {
-    rawAnswer: cause.raw,
-    selectedIndex: cause.selectedIndex,
-    allowOverwrite: correction,
-  })) {
+  if (
+    cause &&
+    shouldApplySpontaneousCauseFromMessage(state, message) &&
+    setSlotFromSpontaneous(state, "cause_category", {
+      rawAnswer: cause.raw,
+      selectedIndex: cause.selectedIndex,
+      allowOverwrite: correction,
+    })
+  ) {
     added += 1;
   }
 
@@ -20725,6 +20755,7 @@ app.post("/api/chat", async (req, res) => {
     ensureSlotFilledConsistency(conversationState[conversationId]);
     const filledBeforeTurn = countFilledSlots(conversationState[conversationId].slotFilled, conversationState[conversationId]);
     applySpontaneousSlotFill(conversationState[conversationId], message, { isFirstMessage: userMessageCountBefore === 0 });
+    revertMisassignedNegativeCauseFromMessage(conversationState[conversationId], message);
     ensureSlotFilledConsistency(conversationState[conversationId]);
     const isFirstUserMessage = userMessageCountBefore === 0;
     const triageCompleted = filledBeforeTurn >= getRequiredSlotCount(state) || !!state.decisionLevel;
@@ -21416,8 +21447,14 @@ app.post("/api/chat", async (req, res) => {
     // 強制仕様: 全スロット充填完了、またはカテゴリ別の全質問完了時のみ判定・まとめを許可
     const requiredCount = getRequiredSlotCount(conversationState[conversationId]);
     const decisionAllowed = slotsFilledCount >= requiredCount;
-    // カテゴリ・場合によりスロット数が異なる（PAIN/GI/SKIN=5, INFECTION=6, worsening_trend ありで+1等）
-    const questionsCompleted = currentQuestionCount >= requiredCount;
+    const orderForAsked = getSlotOrderWithConditional(conversationState[conversationId]);
+    const askedAndFilledCount = orderForAsked.filter(
+      (k) =>
+        conversationState[conversationId].askedSlots?.[k] &&
+        conversationState[conversationId].slotFilled?.[k]
+    ).length;
+    // 質問回数の加重スコアだけでまとめへ進まない（未質問スロットが残る退行を防ぐ）
+    const questionsCompleted = askedAndFilledCount >= requiredCount;
     // 絶対ルール: 初回ユーザーターンでは絶対にまとめを出さない（2ターン未満も禁止）
     const minUserTurnsForSummary = 2;
     const canShowSummary = !isFirstUserTurn && userTurnCount >= minUserTurnsForSummary;
