@@ -551,6 +551,25 @@ function truncateBlocksAfterTerminalLastBlock(blocks) {
 }
 
 /**
+ * まとめブロックの意味的キー（見出し表記ゆらぎを同一視：✅今すぐできること／今すぐやること 等）
+ */
+function getCanonicalMessageBlockKey(icon, name) {
+  const ic = String(icon || "").trim();
+  const n = String(name || "").replace(/\s+/g, " ").trim();
+  if (ic === "🟢" || ic === "🟡" || ic === "🔴") {
+    if (/ここまでの情報を整理します/.test(n)) return "intro";
+  }
+  if (ic === "🤝" && /^(Kairoの判断|今の状態について)/.test(n)) return "handshake_about";
+  if (ic === "📝" && /^(Kairoの判断|いまの状態を整理します)/.test(n)) return "memo_about";
+  if (ic === "✅") return "immediate_actions";
+  if (ic === "⏳") return "outlook";
+  if (ic === "🏥") return "hospital";
+  if (ic === "💊") return "otc";
+  if ((ic === "🌱" || ic === "💬") && /最後に/.test(n)) return "closing";
+  return `${ic}\0${n}`;
+}
+
+/**
  * 同一の「絵文字＋見出し名」ブロックが二重（LLM やサーバの重複出力）のとき、先頭のみ採用する。
  * （例：`🤝 Kairoの判断` や `✅ 今すぐできること` が2回続く）
  */
@@ -559,14 +578,7 @@ function dedupeParsedMessageBlocksByHeader(blocks) {
   const seen = new Set();
   const out = [];
   for (const b of blocks) {
-    const icon = b?.header?.icon ?? "";
-    let name = String(b?.header?.name ?? "")
-      .replace(/\s+/g, " ")
-      .trim();
-    let key = `${icon}\0${name}`;
-    if (icon === "🤝" && /^(Kairoの判断|今の状態について)/.test(name)) {
-      key = "🤝\0_handshake_about";
-    }
+    const key = getCanonicalMessageBlockKey(b?.header?.icon ?? "", b?.header?.name ?? "");
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(b);
@@ -1370,6 +1382,29 @@ function countRenderedSummaryBlocks(messageDiv) {
   return messageDiv.querySelectorAll(":scope > .message-block").length;
 }
 
+function getRenderedSummaryBlockCanonicalKeys(messageDiv) {
+  if (!messageDiv) return [];
+  return Array.from(messageDiv.querySelectorAll(":scope > .message-block")).map((el) => {
+    const ht = el.querySelector(".block-header")?.dataset.headerText || "";
+    const { icon, name } = splitHeaderIconAndName(ht);
+    return getCanonicalMessageBlockKey(icon, name);
+  });
+}
+
+/** ポーリング追記後の DOM が期待ブロック列と一致するか（連続重複・順序ズレ検出） */
+function summaryDomMatchesExpectedBlocks(messageDiv, blocks) {
+  const rendered = getRenderedSummaryBlockCanonicalKeys(messageDiv);
+  const expected = (blocks || []).map((b) =>
+    getCanonicalMessageBlockKey(b?.header?.icon ?? "", b?.header?.name ?? "")
+  );
+  if (rendered.length !== expected.length) return false;
+  if (new Set(rendered).size !== rendered.length) return false;
+  for (let i = 0; i < expected.length; i++) {
+    if (rendered[i] !== expected[i]) return false;
+  }
+  return true;
+}
+
 /**
  * まとめ・ブロック付きAI文をセクションカード列で描画（従来の message-block UI）。
  * appendOnly: true のとき既存ブロックは残し、追加分だけ上から順に追加する。
@@ -1410,6 +1445,23 @@ function renderParsedBlocksIntoMessage(messageDiv, blocks, options = {}) {
       return;
     }
     const block = blocks[blockIndex];
+    const blockKey = getCanonicalMessageBlockKey(block?.header?.icon ?? "", block?.header?.name ?? "");
+    if (appendOnly) {
+      const existingKeys = new Set(getRenderedSummaryBlockCanonicalKeys(messageDiv));
+      if (existingKeys.has(blockKey)) {
+        blockIndex += 1;
+        if (blockIndex >= blocks.length) {
+          if (typeof options.onComplete === "function") options.onComplete();
+          return;
+        }
+        if (blockDelay <= 0) {
+          appendNextBlock();
+        } else {
+          setTimeout(appendNextBlock, blockDelay);
+        }
+        return;
+      }
+    }
     const blockDiv = document.createElement("div");
     blockDiv.className = "message-block";
     messageDiv.appendChild(blockDiv);
@@ -1904,14 +1956,15 @@ function getSummarySectionSortKey(text) {
 }
 
 function getSummarySectionDedupeKey(text) {
-  const key = getSummarySectionSortKey(text);
+  const sortKey = getSummarySectionSortKey(text);
   const first =
     String(text || "")
       .trim()
       .split("\n")
       .map((l) => l.trim())
       .find((l) => l.length > 0) || "";
-  return `${key}:${first.replace(/\s+/g, "").slice(0, 64)}`;
+  const { icon, name } = splitHeaderIconAndName(first);
+  return `${sortKey}:${getCanonicalMessageBlockKey(icon, name)}`;
 }
 
 /** ポーリング途中の部分配列と最終配列の混在・重複を防ぎ、仕様どおりの順に並べる */
@@ -1990,16 +2043,24 @@ function upsertSummaryMessage(sections, options = {}) {
     return;
   }
 
-  const renderedCount = countRenderedSummaryBlocks(messageDiv);
+  let renderedCount = countRenderedSummaryBlocks(messageDiv);
+  let appendOnly = renderedCount > 0;
+
+  // ポーリング途中の重複追記や見出しゆらぎで DOM がずれたら先頭から描き直す
+  if (renderedCount > 0 && !summaryDomMatchesExpectedBlocks(messageDiv, blocks)) {
+    messageDiv.innerHTML = "";
+    renderedCount = 0;
+    appendOnly = false;
+  }
+
   const animate = options.animate !== false;
 
-  if (renderedCount >= blocks.length) {
+  if (renderedCount >= blocks.length && summaryDomMatchesExpectedBlocks(messageDiv, blocks)) {
     onDone();
     return;
   }
 
   const blocksToRender = blocks.slice(renderedCount);
-  const appendOnly = renderedCount > 0;
   const renderSeq = ++appState.summaryRenderSeq;
 
   renderParsedBlocksIntoMessage(messageDiv, blocksToRender, {
